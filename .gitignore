@@ -1,0 +1,32 @@
+.env
+.venv/
+**/.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+.DS_Store
+**/.DS_Store
+.pytest_cache/
+**/.pytest_cache/
+
+# Runtime logs and process/pid state -- not source.
+logs/
+ai-domain-search-engine/logs/
+zone-universe/logs/
+
+# Crawl data, databases, manual training labels, HTML archives -- user data,
+# never source. Matches the README's existing "do not send data/" policy.
+data/
+ai-domain-search-engine/data/
+zone-universe/data/
+
+# Local credentials some crawlers read (see zone-universe/config.sample.json).
+config.json
+**/config.json
+
+# Independent nested repository with its own remote/history -- not part of
+# this repo's tree.
+Scrape!/
+
+# Local Claude Code tool settings, not project source.
+.claude/

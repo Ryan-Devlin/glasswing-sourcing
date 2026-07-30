@@ -1,0 +1,3410 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+import os
+import re
+
+import json
+import signal
+import sqlite3
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import pandas as pd
+from dotenv import load_dotenv
+import streamlit as st
+from streamlit_autorefresh import st_autorefresh
+
+from classification_store import record_manual_move
+from common import (
+    FILTERED, LLM, MANUAL, NO_BASKET_DATA, YES_BASKET_DATA,
+    ROOT, RUN_LOCK, RUN_LOG, RUN_STATUS,
+    QUEUE_DB, RUN_CONFIG, STREAM_PID, STREAM_STATUS, STREAM_STOP,
+    atomic_write_csv, atomic_write_json, normalize_domain_url, read_basket_data, remove_basket_entry,
+    save_basket_entries, save_basket_entry, seed_yes_basket,
+    stable_domain,
+)
+from filter import (
+    enterprise_rescue_mask,
+    investment_eligibility_adjusted_score,
+    score_text,
+)
+from glasswing_portfolio import GLASSWING_PORTFOLIO_DOMAINS
+from training_data import (
+    backfill_label_metadata, balanced_instruction_frame,
+    build_active_review_queue, build_training_dataset, write_training_exports,
+)
+
+load_dotenv(ROOT / ".env")
+
+# Seed verified Glasswing investments as ground-truth positives. Existing basket
+# labels and human-edited ratings always win, so reruns remain safe and editable.
+seed_yes_basket(GLASSWING_PORTFOLIO_DOMAINS, rating=100)
+backfill_label_metadata()
+
+st.markdown(
+    """
+    <style>
+        .stDeployButton {
+            display: none !important;
+        }
+        .stApp {
+            margin-top: 0 !important;
+        }
+        .block-container {
+            padding-top: .65rem !important;
+            padding-bottom: 2rem;
+            max-width: 1400px;
+        }
+        .glasswing-header {
+            margin-bottom: .75rem;
+        }
+        .glasswing-title {
+            font-size: 2.15rem;
+            line-height: 1.1;
+            font-weight: 760;
+            letter-spacing: -.04em;
+            margin: 0;
+        }
+        .glasswing-subtitle {
+            margin: .4rem 0 0 0;
+            opacity: .68;
+            font-size: 1rem;
+        }
+        div[data-testid="stMetric"] {
+            border: 1px solid rgba(128,128,128,.18);
+            padding: .8rem 1rem;
+            border-radius: 12px;
+        }
+        div[data-testid="stDataFrame"] {
+            border: 1px solid rgba(128,128,128,.16);
+            border-radius: 12px;
+            overflow: hidden;
+        }
+        div[data-baseweb="select"] > div {
+            min-height: 42px;
+            border-radius: 10px;
+        }
+        .status-card {
+            border: 1px solid rgba(128,128,128,.18);
+            border-radius: 12px;
+            padding: .8rem 1rem;
+            min-height: 44px;
+        }
+        #MainMenu {visibility: hidden;}
+        footer {visibility: hidden;}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+api_key_present = bool(os.getenv("ANTHROPIC_API_KEY", "").strip())
+with st.expander("API key status", expanded=not api_key_present):
+    if api_key_present:
+        st.success("Anthropic API key is configured.")
+    else:
+        st.error(
+            "No Anthropic API key is configured. Add ANTHROPIC_API_KEY to the .env file, "
+            "then restart the dashboard."
+        )
+
+@st.cache_data(show_spinner=False, max_entries=32)
+def _read_csv_version(
+    path_string: str,
+    modified_ns: int,
+    size: int,
+) -> pd.DataFrame:
+    """Cache one immutable on-disk CSV version."""
+    del modified_ns, size
+    return pd.read_csv(path_string, dtype=str).fillna("")
+
+
+def read_csv_safely(path: Path) -> pd.DataFrame:
+    if not path.exists() or path.stat().st_size == 0:
+        return pd.DataFrame()
+    snapshot_key = f"csv_snapshot::{path.resolve()}"
+    try:
+        stat = path.stat()
+        frame = _read_csv_version(
+            str(path.resolve()),
+            stat.st_mtime_ns,
+            stat.st_size,
+        )
+        st.session_state[snapshot_key] = frame
+        return frame.copy()
+    except (
+        OSError,
+        pd.errors.EmptyDataError,
+        pd.errors.ParserError,
+    ):
+        previous = st.session_state.get(snapshot_key)
+        if isinstance(previous, pd.DataFrame):
+            return previous.copy()
+        return pd.DataFrame()
+
+def read_status() -> dict:
+    if not RUN_STATUS.exists():
+        return {"running": False, "stage": "idle"}
+    try:
+        return json.loads(RUN_STATUS.read_text(encoding="utf-8"))
+    except Exception:
+        return {"running": RUN_LOCK.exists(), "stage": "unknown"}
+
+INDUSTRY_OPTIONS = {
+    "Vertical AI": "vertical_ai",
+    "Physical AI": "physical_ai",
+    "AI Infrastructure": "ai_adaptive_infrastructure",
+    "Cybersecurity": "intelligent_enterprise_defense",
+    "Collaborative Intelligence": "collaborative_intelligence",
+    "Next-Generation Compute": "next_gen_compute",
+}
+
+EXTENSION_OPTIONS = {
+    ".ai": "AI-native companies",
+    ".io": "Technology startups",
+    ".app": "Application products",
+    ".dev": "Developer tools",
+    ".co": "General startups",
+    ".xyz": "Emerging technology",
+    ".tech": "Technology companies",
+    ".com": "Maximum coverage",
+}
+
+EXTENSION_PRESETS = {
+    "Focused AI & Developer": [
+        ".ai",
+        ".io",
+        ".app",
+        ".dev",
+    ],
+    "Startup Broad": [
+        ".ai",
+        ".io",
+        ".app",
+        ".dev",
+        ".co",
+        ".xyz",
+        ".tech",
+    ],
+    "Maximum Coverage": [
+        ".ai",
+        ".io",
+        ".app",
+        ".dev",
+        ".co",
+        ".xyz",
+        ".tech",
+        ".com",
+    ],
+    "Custom": [],
+}
+
+
+DEFAULT_RUN_CONFIG = {
+    "selected_extensions": [".ai", ".app", ".dev"],
+    "selected_industries": list(INDUSTRY_OPTIONS.values()),
+    "include_keywords": [],
+    "exclude_keywords": [],
+    "keyword_mode": "any",
+    "minimum_score": 55,
+    "minimum_signal_dimensions": 2,
+    "screening_batch_size": 75,
+    "scraper_workers": 28,
+    "scrape_timeout": 6,
+    "require_us_evidence": False,
+    "include_coming_soon": True,
+    "auto_claude": True,
+    "claude_minimum_score": 51,
+    "claude_batch_max": 3,
+    "claude_hourly_limit": 3,
+    "claude_daily_limit": 12,
+    "claude_percentage_cap": 0.10,
+    "exceptional_score": 84,
+}
+
+
+def load_dashboard_run_config() -> dict:
+    if not RUN_CONFIG.exists():
+        return dict(DEFAULT_RUN_CONFIG)
+    try:
+        loaded = json.loads(RUN_CONFIG.read_text(encoding="utf-8"))
+    except Exception:
+        return dict(DEFAULT_RUN_CONFIG)
+    result = dict(DEFAULT_RUN_CONFIG)
+    result.update(loaded)
+    return result
+
+
+def save_dashboard_run_config(config: dict) -> None:
+    RUN_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    RUN_CONFIG.write_text(
+        json.dumps(config, indent=2),
+        encoding="utf-8",
+    )
+
+
+def parse_keyword_text(value: str) -> list[str]:
+    return [
+        item.strip()
+        for item in re.split(r"[,;\n]+", value or "")
+        if item.strip()
+    ]
+
+
+def process_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, PermissionError, ValueError):
+        return False
+
+
+def read_stream_status() -> dict:
+    if not STREAM_STATUS.exists():
+        return {"running": False, "stage": "stopped", "queue": {}}
+    try:
+        status = json.loads(
+            STREAM_STATUS.read_text(encoding="utf-8")
+        )
+    except Exception:
+        status = {
+            "running": STREAM_PID.exists(),
+            "stage": "unknown",
+            "queue": {},
+        }
+
+    pid = int(status.get("pid", 0) or 0)
+    if status.get("running") and pid > 0 and not process_is_alive(pid):
+        status["running"] = False
+        status["stage"] = "crashed"
+        status["last_error"] = (
+            status.get("last_error")
+            or "Background process exited unexpectedly. Open Run Details or run ./diagnose.sh."
+        )
+        try:
+            atomic_write_json(STREAM_STATUS, status)
+        except Exception:
+            pass
+    return status
+
+def start_continuous_pipeline(config: dict) -> None:
+    status = read_stream_status()
+    stale_pid = 0
+    if STREAM_PID.exists():
+        try:
+            stale_pid = int(
+                STREAM_PID.read_text(encoding="utf-8").strip()
+            )
+        except Exception:
+            stale_pid = 0
+
+    if status.get("running") or process_is_alive(stale_pid):
+        st.warning("The continuous pipeline is already running.")
+        return
+
+    STREAM_PID.unlink(missing_ok=True)
+    STREAM_STOP.unlink(missing_ok=True)
+    save_dashboard_run_config(config)
+
+    log_path = ROOT / "logs" / "continuous_pipeline.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_handle = log_path.open("a", encoding="utf-8")
+    try:
+        process = subprocess.Popen(
+            [sys.executable, str(ROOT / "continuous_pipeline.py")],
+            cwd=ROOT,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    except Exception as exc:
+        log_handle.close()
+        st.error(f"Could not start pipeline: {type(exc).__name__}: {exc}")
+        return
+    finally:
+        try:
+            log_handle.close()
+        except Exception:
+            pass
+
+    # Write an optimistic startup state immediately. The old build reran the
+    # dashboard before the child process wrote status, making a healthy start
+    # look like an instant stop.
+    startup_status = {
+        "running": True,
+        "pid": process.pid,
+        "stage": "starting",
+        "started_at": pd.Timestamp.utcnow().isoformat(),
+        "updated_at": pd.Timestamp.utcnow().isoformat(),
+        "selected_extensions": config.get(
+            "selected_extensions",
+            [".ai"],
+        ),
+        "new_domains_received": 0,
+        "domains_received": 0,
+        "screened": 0,
+        "repeat_events_ignored": 0,
+        "failed_this_run": 0,
+        "claude_calls": 0,
+        "last_error": "",
+        "queue": {},
+    }
+    atomic_write_json(STREAM_STATUS, startup_status)
+    st.success("Continuous pipeline is starting.")
+    st.rerun()
+
+def stop_continuous_pipeline() -> None:
+    status = read_stream_status()
+    if not status.get("running") and not STREAM_PID.exists():
+        st.info("The continuous pipeline is already stopped.")
+        return
+    STREAM_STOP.write_text("stop", encoding="utf-8")
+    st.success(
+        "Stop requested. The current batch will finish before shutdown."
+    )
+    st.rerun()
+
+
+def reset_current_run() -> None:
+    """Stop active work and clear only unfinished current-run state."""
+    status = read_stream_status()
+    pid = int(status.get("pid", 0) or 0)
+
+    STREAM_STOP.write_text("stop", encoding="utf-8")
+    if pid > 0:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    deadline = time.time() + 4
+    while pid > 0 and time.time() < deadline:
+        try:
+            os.kill(pid, 0)
+            time.sleep(0.1)
+        except ProcessLookupError:
+            break
+        except PermissionError:
+            break
+
+    QUEUE_DB.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(QUEUE_DB, timeout=30) as conn:
+        conn.execute(
+            """
+            UPDATE domains
+            SET status='discarded',
+                next_attempt_at=NULL,
+                last_error='current_run_reset'
+            WHERE status IN ('pending', 'processing')
+            """
+        )
+        conn.commit()
+
+    reset_status = {
+        "running": False,
+        "stage": "reset",
+        "run_id": "",
+        "run_started_at": "",
+        "certificate_events_received": 0,
+        "new_domains_received": 0,
+        "repeat_events_ignored": 0,
+        "domains_received": 0,
+        "processed": 0,
+        "screened": 0,
+        "failed_this_run": 0,
+        "claude_calls": 0,
+        "automatic_claude_calls": 0,
+        "manual_claude_calls": 0,
+        "received_by_extension": {},
+        "repeats_by_extension": {},
+        "current_batch": [],
+        "last_domain_received": "",
+        "last_domain_processed": "",
+        "last_error": "",
+        "reset_at": pd.Timestamp.utcnow().isoformat(),
+    }
+    atomic_write_json(STREAM_STATUS, reset_status)
+    STREAM_PID.unlink(missing_ok=True)
+    STREAM_STOP.unlink(missing_ok=True)
+    st.session_state["confirm_reset_run"] = False
+    st.success("Current run reset. Saved company history was preserved.")
+    st.rerun()
+
+
+
+def update_manual_claude_status(
+    *,
+    increment: int = 0,
+    result: dict | None = None,
+    error: str = "",
+) -> None:
+    status = read_stream_status()
+    automatic_calls = int(status.get("automatic_claude_calls", 0) or 0)
+    legacy_calls = int(status.get("claude_calls", 0) or 0)
+    manual_calls = int(status.get("manual_claude_calls", 0) or 0)
+
+    # Older status files only have claude_calls. Preserve that value as the
+    # automatic baseline until the background service writes the explicit key.
+    if "automatic_claude_calls" not in status:
+        automatic_calls = max(automatic_calls, legacy_calls - manual_calls)
+
+    manual_calls += max(0, int(increment))
+    status["automatic_claude_calls"] = automatic_calls
+    status["manual_claude_calls"] = manual_calls
+    status["claude_calls"] = automatic_calls + manual_calls
+    status["last_manual_claude_error"] = error[:800]
+    if result is not None:
+        status["last_manual_claude_result"] = result
+    atomic_write_json(STREAM_STATUS, status)
+
+
+def find_latest_claude_result(domain: str) -> dict | None:
+    target = stable_domain(domain)
+    for path in (
+        LLM / "llm_approved_master.csv",
+        LLM / "llm_denied_master.csv",
+    ):
+        frame = read_csv_safely(path)
+        if frame.empty or "domain" not in frame.columns:
+            continue
+        matches = frame[
+            frame["domain"].map(stable_domain).eq(target)
+        ]
+        if matches.empty:
+            continue
+        row = matches.iloc[-1].to_dict()
+        return {
+            "domain": target,
+            "decision": str(row.get("llm_decision", "")),
+            "score": str(row.get("llm_fit_score", "")),
+            "summary": str(row.get("llm_product_summary", "")),
+            "reason": (
+                str(row.get("llm_reasoning", "")).strip()
+                or str(row.get("llm_concerns", "")).strip()
+                or str(row.get("ownership_evidence", "")).strip()
+                or "Claude provided no written reason"
+            ),
+            "concern": (
+                str(row.get("llm_concerns", "")).strip()
+                or str(row.get("llm_reasoning", "")).strip()
+                or "No additional concern recorded"
+            ),
+            "model": str(row.get("llm_model", "")),
+        }
+    return None
+
+
+def run_manual_diligence(row: pd.Series) -> tuple[bool, str]:
+    """Force exactly one selected company through Claude and verify output."""
+    if not api_key_present:
+        return False, "Anthropic API key is not configured."
+
+    manual_dir = ROOT / "data" / "manual"
+    manual_dir.mkdir(parents=True, exist_ok=True)
+    domain = stable_domain(
+        str(row.get("domain", "selected-company"))
+    ) or "selected-company"
+    safe_name = re.sub(r"[^a-zA-Z0-9._-]+", "_", domain)
+    input_path = manual_dir / f"{safe_name}_manual_diligence.csv"
+
+    selected = row.to_dict()
+    selected["domain"] = domain
+
+    # Manual means manual: bypass all automatic queue gates.
+    selected["qualified_for_llm"] = "true"
+    if str(selected.get("location_status", "")).upper() not in {
+        "US",
+        "UNKNOWN",
+    }:
+        selected["location_status"] = "UNKNOWN"
+
+    pd.DataFrame([selected]).to_csv(input_path, index=False)
+
+    before = find_latest_claude_result(domain)
+
+    command = [
+        sys.executable,
+        str(ROOT / "claude_classifier.py"),
+        str(input_path),
+        "--reclassify",
+        "--limit", "1",
+        "--minimum-score", "0",
+        "--percentage-cap", "1",
+        "--max-calls", "1",
+        "--exceptional-score", "0",
+        "--workers", "1",
+    ]
+
+    try:
+        result = subprocess.run(
+            command,
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=240,
+        )
+    except subprocess.TimeoutExpired:
+        message = "Claude diligence timed out after 240 seconds."
+        update_manual_claude_status(error=message)
+        return False, message
+    except Exception as exc:
+        message = f"{type(exc).__name__}: {exc}"
+        update_manual_claude_status(error=message)
+        return False, message
+
+    combined_output = "\n".join(
+        part.strip()
+        for part in (result.stdout, result.stderr)
+        if part and part.strip()
+    )
+
+    if result.returncode != 0:
+        detail = combined_output or "Claude classifier exited with no details."
+        update_manual_claude_status(error=detail[-800:])
+        return False, detail[-1200:]
+
+    after = find_latest_claude_result(domain)
+    if after is None:
+        detail = (
+            combined_output
+            or "Classifier finished but did not write a result."
+        )
+        update_manual_claude_status(error=detail[-800:])
+        return False, (
+            "Claude did not process the selected company. "
+            f"Classifier output: {detail[-800:]}"
+        )
+
+    # Ensure this was a real selected-company result, not a silent zero-row run.
+    if "Web diligence searches: 1" not in combined_output:
+        update_manual_claude_status(
+            error=combined_output[-800:],
+        )
+        return False, (
+            "Claude selected zero companies, so no API call was made. "
+            f"Classifier output: {combined_output[-800:]}"
+        )
+
+    update_manual_claude_status(
+        increment=1,
+        result=after,
+        error="",
+    )
+
+    decision = after.get("decision") or "UNKNOWN"
+    score = after.get("score") or "N/A"
+    summary = after.get("summary") or domain
+    return True, (
+        f"Claude completed: {decision} · score {score} · {summary}"
+    )
+
+
+
+OVERRIDES_PATH = MANUAL / "domain_overrides.csv"
+
+def load_overrides() -> pd.DataFrame:
+    return read_csv_safely(OVERRIDES_PATH)
+
+def save_override(
+    domain: str,
+    target: str,
+    note: str = "",
+    *,
+    objective_score: int | None = None,
+) -> None:
+    """Persist a manual classification and its matching training label."""
+    domain = stable_domain(domain)
+    if target in {"Investable Candidate", "Hard Denied"}:
+        if objective_score is None:
+            raise ValueError(
+                f"{target} requires the company's objective score."
+            )
+        objective_score = max(0, min(int(objective_score), 100))
+
+    existing = load_overrides()
+    row = pd.DataFrame([{
+        "domain": domain,
+        "override_target": target,
+        "override_note": note,
+        "updated_at": pd.Timestamp.utcnow().isoformat(),
+    }])
+    if existing.empty:
+        combined = row
+    else:
+        combined = pd.concat([existing, row], ignore_index=True, sort=False)
+        combined["domain"] = combined["domain"].map(stable_domain)
+        combined = combined.drop_duplicates("domain", keep="last")
+    OVERRIDES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_csv(OVERRIDES_PATH, combined)
+    target_to_bucket = {
+        "Investable Candidate": "priority",
+        "Review Candidate": "review",
+        "Potential Comp": "comp",
+        "Hard Denied": "reject",
+        "Coming Soon": "coming_soon",
+        "Insufficient Evidence": "insufficient",
+    }
+    if target in target_to_bucket:
+        record_manual_move(
+            [domain],
+            target_label=target,
+            target_bucket=target_to_bucket[target],
+            scores={domain: int(objective_score or 0)},
+            note=note or "manual_move_from_glasswing",
+            source="glasswing_dashboard",
+        )
+
+    # This is deliberately part of the same classification operation. The
+    # basket writer removes the domain from the opposite basket first, so a
+    # former good candidate cannot remain in Yes after a Hard Denial.
+    if target == "Investable Candidate":
+        save_basket_entry(
+            domain,
+            "yes",
+            objective_score,
+            source="human",
+            reason="manual_investable_classification",
+        )
+    elif target == "Hard Denied":
+        save_basket_entry(
+            domain,
+            "no",
+            objective_score,
+            source="human",
+            reason="manual_hard_denial_classification",
+        )
+    # Classification tables are cached by file version; clear the in-process
+    # snapshot after an override so the next render reflects the write.
+    st.cache_data.clear()
+
+
+def save_bulk_hard_denials(frame: pd.DataFrame) -> int:
+    """Move a whole visible frame to Hard Denied with two atomic writes."""
+    if frame.empty or "domain" not in frame.columns:
+        return 0
+    rows = frame.copy()
+    rows["domain"] = rows["domain"].map(stable_domain)
+    rows = rows[rows["domain"].ne("")].drop_duplicates("domain", keep="last")
+    if rows.empty:
+        return 0
+    scores = pd.to_numeric(
+        rows.get(
+            "_display_score",
+            rows.get(
+                "_fit_score_v2",
+                rows.get("diligence_rank_score", rows.get("rule_score", 0)),
+            ),
+        ),
+        errors="coerce",
+    ).fillna(0).clip(0, 100).astype(int)
+
+    existing = load_overrides()
+    now = pd.Timestamp.utcnow().isoformat()
+    additions = pd.DataFrame({
+        "domain": rows["domain"],
+        "override_target": "Hard Denied",
+        "override_note": "bulk_move_all_to_hard_denied",
+        "updated_at": now,
+    })
+    combined = pd.concat([existing, additions], ignore_index=True, sort=False)
+    combined["domain"] = combined["domain"].map(stable_domain)
+    combined = combined.drop_duplicates("domain", keep="last")
+    atomic_write_csv(OVERRIDES_PATH, combined)
+    record_manual_move(
+        rows["domain"],
+        target_label="Hard Denied",
+        target_bucket="reject",
+        scores=dict(zip(rows["domain"], scores)),
+        note="bulk_move_all_to_hard_denied",
+        source="glasswing_dashboard",
+    )
+    return save_basket_entries(
+        zip(rows["domain"], scores),
+        "no",
+        source="human",
+        reason="bulk_move_all_to_hard_denied",
+    )
+
+def apply_overrides(frame: pd.DataFrame) -> pd.DataFrame:
+    result = frame.copy()
+    if result.empty or "domain" not in result.columns:
+        if "_override_target" not in result.columns:
+            result["_override_target"] = ""
+        return result
+    overrides = load_overrides()
+    mapping = (
+        dict(zip(
+            overrides["domain"].map(stable_domain),
+            overrides["override_target"].astype(str),
+        ))
+        if not overrides.empty
+        else {}
+    )
+    result["_override_target"] = (
+        result["domain"].map(stable_domain).map(mapping).fillna("")
+    )
+    basket_mapping: dict[str, str] = {}
+    for path, basket in (
+        (YES_BASKET_DATA, "yes"),
+        (NO_BASKET_DATA, "no"),
+    ):
+        labels = read_basket_data(path)
+        if not labels.empty:
+            basket_mapping.update({
+                stable_domain(url): basket
+                for url in labels["domain_url"]
+            })
+    normalized_domains = result["domain"].map(stable_domain)
+    basket_labels = normalized_domains.map(basket_mapping).fillna("")
+    result["_training_basket"] = basket_labels
+    no_basket_targets = basket_labels.map({"no": "Hard Denied"}).fillna("")
+    result["_override_target"] = no_basket_targets.where(
+        no_basket_targets.ne(""),
+        result["_override_target"],
+    )
+    return result
+
+def move_overridden_rows(
+    all_screened: pd.DataFrame,
+    target: str,
+) -> pd.DataFrame:
+    if all_screened.empty:
+        return pd.DataFrame()
+    frame = apply_overrides(all_screened)
+    return frame[frame.get("_override_target", "").astype(str).eq(target)].copy()
+
+@st.fragment
+def manual_action_panel(
+    frame: pd.DataFrame,
+    key_prefix: str,
+    *,
+    allow_move_all_to_hard_denied: bool = False,
+) -> None:
+    """Render a scroll-stable, multi-company reclassification control."""
+    if frame.empty or "domain" not in frame.columns:
+        return
+
+    ordered = frame.copy()
+    score_series = pd.to_numeric(
+        ordered.get(
+            "_fit_score_v2",
+            ordered.get(
+                "diligence_rank_score",
+                ordered.get("rule_score", 0),
+            ),
+        ),
+        errors="coerce",
+    ).fillna(0)
+    ordered = ordered.assign(_display_score=score_series)
+    ordered = ordered.sort_values(
+        "_display_score",
+        ascending=False,
+    )
+    moved_key = f"{key_prefix}_moved_domains"
+    moved_domains = {
+        stable_domain(value)
+        for value in st.session_state.get(moved_key, [])
+    }
+    if moved_domains:
+        ordered = ordered[
+            ~ordered["domain"].map(stable_domain).isin(moved_domains)
+        ].copy()
+    message_key = f"{key_prefix}_batch_message"
+    if st.session_state.get(message_key):
+        st.success(st.session_state.pop(message_key))
+    if ordered.empty:
+        return
+
+    with st.expander(
+        "Select and move companies",
+        expanded=False,
+    ):
+        if allow_move_all_to_hard_denied:
+            if st.button(
+                f"Move all {len(ordered):,} to Hard Denied",
+                type="secondary",
+                width="stretch",
+                key=f"{key_prefix}_move_all_hard_denied",
+                help=(
+                    "Moves every company visible in this tab to Hard Denied "
+                    "and the No training basket with its current score."
+                ),
+            ):
+                moved_count = save_bulk_hard_denials(ordered)
+                # The frame was read through st.cache_data.  Invalidate that
+                # snapshot before rerunning so the moved rows disappear from
+                # every tab immediately instead of lingering until Refresh.
+                st.cache_data.clear()
+                st.session_state[moved_key] = sorted(
+                    moved_domains.union(
+                        ordered["domain"].map(stable_domain)
+                    )
+                )
+                st.session_state[message_key] = (
+                    f"Moved all {moved_count:,} companies to Hard Denied."
+                )
+                # A bulk move changes multiple global views (classification,
+                # both baskets, and counts), so use one controlled full rerun.
+                # This avoids the stale-fragment/glitchy double-click state.
+                st.rerun()
+
+        batch = pd.DataFrame(index=ordered.index)
+        batch["Select"] = False
+        batch["Company"] = ordered.get(
+            "page_title",
+            ordered["domain"],
+        ).fillna("").astype(str)
+        batch["Domain"] = ordered["domain"].astype(str)
+        batch["Website"] = ordered.apply(
+            lambda row: (
+                str(row.get("final_url", "")).strip()
+                or normalize_domain_url(row.get("domain", ""))
+            ),
+            axis=1,
+        )
+        batch["Score"] = ordered["_display_score"].fillna(0).astype(int)
+
+        edited = st.data_editor(
+            batch.reset_index(drop=False).rename(
+                columns={"index": "_source_index"}
+            ),
+            width="stretch",
+            hide_index=True,
+            disabled=[
+                "_source_index",
+                "Company",
+                "Domain",
+                "Website",
+                "Score",
+            ],
+            column_config={
+                "_source_index": None,
+                "Select": st.column_config.CheckboxColumn(
+                    "Move",
+                    help="Select as many companies as you want.",
+                ),
+                "Score": st.column_config.ProgressColumn(
+                    "Score",
+                    min_value=0,
+                    max_value=100,
+                    format="%d",
+                ),
+                "Website": st.column_config.LinkColumn(
+                    "Website",
+                    display_text="Open website",
+                    help="Open the company website in a new tab.",
+                ),
+            },
+            key=f"{key_prefix}_batch_editor",
+        )
+
+        action_col, button_col = st.columns([2.5, 1])
+        with action_col:
+            decision = st.selectbox(
+                "Move selected to",
+                [
+                "Needs Review",
+                "Investable Candidate",
+                "Potential Comp",
+                "Insufficient Evidence",
+                "Hard Denied",
+                "Coming Soon",
+                ],
+                key=f"{key_prefix}_batch_decision",
+            )
+        with button_col:
+            st.write("")
+            move_clicked = st.button(
+                "Move selected",
+                type="primary",
+                width="stretch",
+                key=f"{key_prefix}_batch_apply",
+            )
+
+        if move_clicked:
+            selected = edited[edited["Select"]].copy()
+            if selected.empty:
+                st.warning("Select at least one company first.")
+                return
+            target_map = {
+                "Needs Review": "Review Candidate",
+                "Investable Candidate": "Investable Candidate",
+                "Potential Comp": "Potential Comp",
+                "Insufficient Evidence": "Insufficient Evidence",
+                "Hard Denied": "Hard Denied",
+                "Coming Soon": "Coming Soon",
+            }
+            moved = []
+            for _, selected_item in selected.iterrows():
+                selected_domain = stable_domain(selected_item["Domain"])
+                save_override(
+                    selected_domain,
+                    target_map[decision],
+                    objective_score=int(selected_item["Score"]),
+                )
+                moved.append(selected_domain)
+            st.session_state[moved_key] = sorted(
+                moved_domains.union(moved)
+            )
+            st.session_state[message_key] = (
+                f"Moved {len(moved)} compan"
+                f"{'y' if len(moved) == 1 else 'ies'} to {decision}."
+            )
+            st.rerun(scope="fragment")
+
+
+
+def safe_dataframe(frame: pd.DataFrame, **kwargs) -> None:
+    """Render without crashing on duplicate columns or malformed values."""
+    try:
+        cleaned = frame.copy()
+        cleaned = cleaned.loc[:, ~cleaned.columns.duplicated()].copy()
+        st.dataframe(cleaned, **kwargs)
+    except Exception as exc:
+        st.error("This table could not render safely.")
+        st.caption(f"Dashboard detail: {type(exc).__name__}")
+
+def numeric_max(frame: pd.DataFrame, column: str) -> int:
+    if frame.empty or column not in frame.columns:
+        return 0
+    values = pd.to_numeric(frame[column], errors="coerce").dropna()
+    return int(values.max()) if not values.empty else 0
+
+
+
+
+def format_candidate_table(frame: pd.DataFrame) -> pd.DataFrame:
+    """Create the concise main lead table shown on the dashboard."""
+    if frame.empty:
+        return pd.DataFrame()
+
+    result = frame.copy()
+    output = pd.DataFrame(index=result.index)
+
+    def first_available(*columns: str) -> pd.Series:
+        for column in columns:
+            if column in result.columns:
+                return result[column]
+        return pd.Series("", index=result.index)
+
+    output["Company"] = first_available(
+        "llm_company_name",
+        "page_title",
+        "domain",
+    )
+    output["Score"] = pd.to_numeric(
+        first_available("llm_fit_score", "rule_score"),
+        errors="coerce",
+    ).fillna(0).astype(int)
+    output["Description"] = first_available(
+        "llm_product_summary",
+        "meta_description",
+    )
+    output["Category"] = first_available(
+        "llm_category",
+        "rule_thesis_pillar",
+    )
+
+    if "llm_decision" in result.columns:
+        decisions = result["llm_decision"].astype(str).str.upper()
+        output["Classification"] = decisions.map({
+            "KEEP": "Verified Lead",
+            "MAYBE": "Manual Review",
+            "REJECT": "Denied",
+        }).fillna("Needs Review")
+    else:
+        output["Classification"] = first_available(
+            "investment_classification",
+            "routing_bucket",
+        )
+
+    funding = pd.to_numeric(
+        first_available("llm_funding_millions_usd"),
+        errors="coerce",
+    )
+    latest_round = first_available("llm_latest_round").astype(str)
+
+    def funding_stage_label(index) -> str:
+        funding_value = funding.loc[index] if index in funding.index else float("nan")
+        round_value = latest_round.loc[index] if index in latest_round.index else ""
+
+        parts: list[str] = []
+        funding_evidence = str(
+            result.loc[index, "llm_funding_evidence"]
+            if "llm_funding_evidence" in result.columns
+            else ""
+        ).strip().lower()
+
+        funding_verified = (
+            pd.notna(funding_value)
+            and float(funding_value) > 0
+        )
+        verified_zero = (
+            pd.notna(funding_value)
+            and float(funding_value) == 0
+            and any(
+                phrase in funding_evidence
+                for phrase in (
+                    "bootstrapped",
+                    "no external funding",
+                    "no funding",
+                    "self-funded",
+                )
+            )
+        )
+
+        if funding_verified or verified_zero:
+            parts.append(f"${float(funding_value):g}M")
+        else:
+            parts.append("Funding not verified")
+
+        if round_value and round_value not in {"unknown", "nan", "none", ""}:
+            parts.append(round_value.replace("_", " ").title())
+
+        return " · ".join(parts)
+
+    output["Funding / stage"] = [
+        funding_stage_label(index) for index in output.index
+    ]
+    output["Website"] = first_available("final_url")
+
+    output = output.sort_values("Score", ascending=False)
+    return output.reset_index(drop=True)
+
+
+def humanize_reason(value: object) -> str:
+    mapping = {
+        "consumer_b2c_product": "Consumer product",
+        "media_newsletter_or_aggregator": "Media or newsletter",
+        "parked_or_for_sale": "Domain parked or for sale",
+        "website_unavailable": "Website unavailable",
+        "generic_placeholder": "Placeholder website",
+        "agency_or_consultancy": "Agency or consultancy",
+        "confirmed_non_us": "Non-U.S. company",
+        "likely_large_or_established_company": "Too mature or established",
+        "potential_comp": "Potential comp",
+        "potential_comp_too_mature": "Potential comp — too mature",
+        "insufficient_company_or_product_evidence": "Not enough company or product information",
+        "failed_pre_llm_evidence_gate": "Insufficient product evidence",
+        "failed_glasswing_b2b_gate": "Insufficient product evidence",
+        "http_404": "Website returned 404",
+        "http_403": "Website blocked access",
+        "http_500": "Website error",
+        "no_clear_enterprise_or_glasswing_fit": (
+            "No clear enterprise or Glasswing thesis fit"
+        ),
+        "website_unavailable_or_no_usable_company_evidence": (
+            "Website unavailable or no usable company evidence"
+        ),
+        "credible_but_requires_human_review": (
+            "Credible company requiring human review"
+        ),
+        "enterprise_rescue_requires_human_review": (
+            "Strong enterprise signal requiring human review"
+        ),
+    }
+    raw = str(value or "").strip()
+    if raw in mapping:
+        return mapping[raw]
+    if raw.startswith("http_"):
+        return f"Website returned HTTP {raw.split('_', 1)[1]}"
+    return raw.replace("_", " ").strip().title()
+
+
+def format_denied_table(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return pd.DataFrame()
+
+    result = pd.DataFrame(index=frame.index)
+
+    def first_available(*columns: str) -> pd.Series:
+        for column in columns:
+            if column in frame.columns:
+                return frame[column]
+        return pd.Series("", index=frame.index)
+
+    result["Company"] = first_available(
+        "llm_company_name",
+        "page_title",
+        "domain",
+    )
+    result["Domain"] = first_available("domain")
+    result["Reason"] = first_available(
+        "routing_reason",
+        "llm_concerns",
+        "reason",
+    ).map(humanize_reason)
+    result["Description"] = first_available(
+        "meta_description",
+        "llm_product_summary",
+        "homepage_excerpt",
+    )
+    result["Website"] = first_available("final_url")
+    return result.reset_index(drop=True)
+
+
+stream_status = read_stream_status()
+running = bool(stream_status.get("running", False))
+
+# Refresh the complete dashboard at a deliberately slow, predictable cadence
+# while the pipeline is active.  This keeps new rows flowing in without the
+# rapid rerun/flicker that made tables and checkboxes feel unstable.  Stopped
+# runs never schedule an automatic refresh.
+if running:
+    st_autorefresh(
+        interval=30_000,
+        limit=None,
+        key="pipeline_dashboard_refresh_30s",
+    )
+saved_config = load_dashboard_run_config()
+backlog_mode = str(
+    stream_status.get("backlog_mode", "normal")
+).strip().lower()
+
+st.markdown(
+    """
+    <div class="glasswing-header">
+      <div class="glasswing-title">Glasswing Sourcing</div>
+      <div class="glasswing-subtitle">
+        Configurable startup-domain discovery with high-throughput screening
+      </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+with st.expander("Run Filters", expanded=not running):
+    st.markdown("##### Domain discovery")
+    saved_extensions = [
+        extension
+        for extension in saved_config.get(
+            "selected_extensions",
+            EXTENSION_PRESETS["Focused AI & Developer"],
+        )
+        if extension in EXTENSION_OPTIONS
+    ]
+
+    matching_preset = "Custom"
+    for preset_name, preset_extensions in EXTENSION_PRESETS.items():
+        if (
+            preset_name != "Custom"
+            and set(saved_extensions) == set(preset_extensions)
+        ):
+            matching_preset = preset_name
+            break
+
+    preset_names = list(EXTENSION_PRESETS.keys())
+    extension_preset = st.selectbox(
+        "Coverage preset",
+        preset_names,
+        index=preset_names.index(matching_preset),
+        help=(
+            "Focused is recommended. Startup Broad captures more companies. "
+            "Maximum Coverage includes .com and creates substantially more noise."
+        ),
+        disabled=running,
+    )
+
+    preset_extensions = EXTENSION_PRESETS[extension_preset]
+    default_extensions = (
+        saved_extensions
+        if extension_preset == "Custom"
+        else preset_extensions
+    )
+
+    selected_extensions = st.multiselect(
+        "Extensions",
+        options=list(EXTENSION_OPTIONS.keys()),
+        default=default_extensions,
+        format_func=lambda extension: (
+            f"{extension}  ·  {EXTENSION_OPTIONS[extension]}"
+        ),
+        help=(
+            "Only matching CertStream domains enter the queue. "
+            "Use Custom to create your own combination."
+        ),
+        disabled=running or extension_preset != "Custom",
+    )
+
+    selected_extension_text = "  ".join(
+        f"`{extension}`"
+        for extension in selected_extensions
+    )
+    st.caption(
+        f"Active coverage: {selected_extension_text or 'None selected'}"
+    )
+
+    if ".com" in selected_extensions:
+        st.warning(
+            ".com creates extremely high incoming volume and much more noise. "
+            "The pipeline will likely enter Catch-up or Surge mode."
+        )
+    elif extension_preset == "Startup Broad":
+        st.info(
+            "Startup Broad is higher-volume but still targeted toward "
+            "technology and startup-style domains."
+        )
+    else:
+        st.caption(
+            "Focused AI & Developer is the recommended balance of quality "
+            "and throughput."
+        )
+
+    profile = st.selectbox(
+        "Filter preset",
+        [
+            "Balanced Glasswing",
+            "Strict high-conviction",
+            "AI infrastructure",
+            "Cybersecurity",
+            "Vertical AI",
+            "Custom",
+        ],
+        disabled=running,
+    )
+
+    profile_defaults = {
+        "Balanced Glasswing": {
+            "industries": list(INDUSTRY_OPTIONS.keys()),
+            "minimum_score": 55,
+            "minimum_dimensions": 2,
+        },
+        "Strict high-conviction": {
+            "industries": list(INDUSTRY_OPTIONS.keys()),
+            "minimum_score": 80,
+            "minimum_dimensions": 4,
+        },
+        "AI infrastructure": {
+            "industries": [
+                "AI Infrastructure",
+                "Next-Generation Compute",
+            ],
+            "minimum_score": 70,
+            "minimum_dimensions": 3,
+        },
+        "Cybersecurity": {
+            "industries": ["Cybersecurity"],
+            "minimum_score": 68,
+            "minimum_dimensions": 3,
+        },
+        "Vertical AI": {
+            "industries": ["Vertical AI"],
+            "minimum_score": 70,
+            "minimum_dimensions": 3,
+        },
+        "Custom": {
+            "industries": [
+                label
+                for label, value in INDUSTRY_OPTIONS.items()
+                if value in saved_config.get(
+                    "selected_industries",
+                    [],
+                )
+            ],
+            "minimum_score": int(
+                saved_config.get("minimum_score", 55)
+            ),
+            "minimum_dimensions": int(
+                saved_config.get(
+                    "minimum_signal_dimensions",
+                    2,
+                )
+            ),
+        },
+    }
+    selected_profile = profile_defaults[profile]
+
+    filter_left, filter_right = st.columns(2)
+    with filter_left:
+        selected_industry_labels = st.multiselect(
+            "Industries",
+            list(INDUSTRY_OPTIONS.keys()),
+            default=selected_profile["industries"],
+            disabled=running,
+        )
+        include_keywords_text = st.text_area(
+            "Required keywords",
+            value=", ".join(
+                saved_config.get("include_keywords", [])
+            ),
+            placeholder=(
+                "Example: inference, observability, underwriting"
+            ),
+            help=(
+                "Leave blank for no required keywords. Separate terms "
+                "with commas or new lines."
+            ),
+            disabled=running,
+        )
+        exclude_keywords_text = st.text_area(
+            "Excluded keywords",
+            value=", ".join(
+                saved_config.get("exclude_keywords", [])
+            ),
+            placeholder=(
+                "Example: agency, consulting, consumer, course"
+            ),
+            disabled=running,
+        )
+        keyword_mode_label = st.radio(
+            "Required keyword matching",
+            ["Match any", "Match all"],
+            horizontal=True,
+            disabled=running,
+        )
+
+    with filter_right:
+        minimum_score = st.slider(
+            "Minimum investable score",
+            min_value=40,
+            max_value=90,
+            value=selected_profile["minimum_score"],
+            help=(
+                "Companies below this appear under Hard Denied with the "
+                "specific filter reason that caused the rejection."
+            ),
+            disabled=running,
+        )
+        minimum_dimensions = st.slider(
+            "Minimum evidence dimensions",
+            min_value=1,
+            max_value=6,
+            value=selected_profile["minimum_dimensions"],
+            help=(
+                "Requires evidence across dimensions such as buyer, "
+                "workflow, technical depth, value, defensibility, and "
+                "problem importance."
+            ),
+            disabled=running,
+        )
+        require_us_evidence = st.checkbox(
+            "Require explicit U.S. evidence",
+            value=bool(
+                saved_config.get(
+                    "require_us_evidence",
+                    False,
+                )
+            ),
+            help=(
+                "Strict option. It may miss stealth companies whose "
+                "site does not list a location."
+            ),
+            disabled=running,
+        )
+        include_coming_soon = st.checkbox(
+            "Include legitimate Coming Soon companies",
+            value=bool(
+                saved_config.get(
+                    "include_coming_soon",
+                    True,
+                )
+            ),
+            disabled=running,
+        )
+
+    st.markdown("##### Screening speed")
+    speed_preset = st.selectbox(
+        "Throughput preset",
+        [
+            "Balanced",
+            "Fast",
+            "Turbo",
+            "Custom",
+        ],
+        index=1,
+        help=(
+            "Higher settings process more websites simultaneously but "
+            "use more CPU, memory, and network bandwidth."
+        ),
+        disabled=running,
+    )
+
+    speed_defaults = {
+        "Balanced": (40, 16, 7),
+        "Fast": (75, 28, 6),
+        "Turbo": (100, 36, 6),
+        "Custom": (
+            min(100, int(saved_config.get("screening_batch_size", 75))),
+            min(40, int(saved_config.get("scraper_workers", 28))),
+            min(7, int(saved_config.get("scrape_timeout", 6))),
+        ),
+    }
+    default_batch, default_workers, default_timeout = speed_defaults[
+        speed_preset
+    ]
+
+    speed_left, speed_mid, speed_right = st.columns(3)
+    with speed_left:
+        screening_batch_size = st.number_input(
+            "Domains per batch",
+            min_value=1,
+            max_value=500,
+            value=default_batch,
+            help=(
+                "The number of queued domains claimed for each screening "
+                "cycle."
+            ),
+            disabled=running,
+        )
+    with speed_mid:
+        scraper_workers = st.number_input(
+            "Concurrent website scrapers",
+            min_value=1,
+            max_value=40,
+            value=default_workers,
+            help=(
+                "Network-bound website requests processed at the same "
+                "time. The pipeline caps this at 40 to protect your Mac."
+            ),
+            disabled=running,
+        )
+    with speed_right:
+        scrape_timeout = st.number_input(
+            "Website timeout in seconds",
+            min_value=5,
+            max_value=45,
+            value=default_timeout,
+            help=(
+                "Lower values clear dead sites faster. Very low values "
+                "can miss slow but legitimate websites."
+            ),
+            disabled=running,
+        )
+
+    estimated_waves = max(
+        1,
+        (
+            int(screening_batch_size)
+            + int(scraper_workers)
+            - 1
+        )
+        // int(scraper_workers),
+    )
+    st.caption(
+        f"Each batch runs in about {estimated_waves} concurrent request "
+        f"wave{'s' if estimated_waves != 1 else ''}, excluding slow-site "
+        "timeouts."
+    )
+
+    st.markdown("##### Claude budget")
+    claude_left, claude_mid, claude_right = st.columns(3)
+    with claude_left:
+        saved_claude_threshold = max(
+            0,
+            min(100, int(saved_config.get("claude_minimum_score", 51))),
+        )
+        auto_claude = st.checkbox(
+            "Automatically diligence companies at or above the Claude threshold",
+            value=bool(saved_config.get("auto_claude", True)),
+            disabled=running,
+        )
+        claude_minimum_score = st.slider(
+            "Claude minimum score",
+            min_value=0,
+            max_value=100,
+            value=saved_claude_threshold,
+            step=1,
+            disabled=running or not auto_claude,
+            help=(
+                "Every company with an objective score greater than or equal "
+                "to this value is eligible for Claude."
+            ),
+        )
+        if auto_claude:
+            st.caption(
+                f"Claude will review every score ≥ {int(claude_minimum_score)}."
+            )
+        claude_batch_max = st.number_input(
+            "Maximum per processed batch",
+            min_value=0,
+            max_value=10,
+            value=int(saved_config.get("claude_batch_max", 1)),
+            disabled=running or not auto_claude,
+        )
+    with claude_mid:
+        claude_hourly_limit = st.number_input(
+            "Maximum per hour",
+            min_value=0,
+            max_value=100,
+            value=int(
+                saved_config.get("claude_hourly_limit", 3)
+            ),
+            disabled=running or not auto_claude,
+        )
+    with claude_right:
+        claude_daily_limit = st.number_input(
+            "Maximum per day",
+            min_value=0,
+            max_value=500,
+            value=int(
+                saved_config.get("claude_daily_limit", 12)
+            ),
+            disabled=running or not auto_claude,
+        )
+
+run_config = {
+    "selected_extensions": list(selected_extensions),
+    "selected_industries": [
+        INDUSTRY_OPTIONS[label]
+        for label in selected_industry_labels
+    ],
+    "include_keywords": parse_keyword_text(
+        include_keywords_text
+    ),
+    "exclude_keywords": parse_keyword_text(
+        exclude_keywords_text
+    ),
+    "keyword_mode": (
+        "all"
+        if keyword_mode_label == "Match all"
+        else "any"
+    ),
+    "minimum_score": int(minimum_score),
+    "minimum_signal_dimensions": int(minimum_dimensions),
+    "screening_batch_size": int(screening_batch_size),
+    "scraper_workers": int(scraper_workers),
+    "scrape_timeout": int(scrape_timeout),
+    "require_us_evidence": bool(require_us_evidence),
+    "include_coming_soon": bool(include_coming_soon),
+    "auto_claude": bool(auto_claude),
+    "claude_minimum_score": int(claude_minimum_score),
+    "claude_batch_max": int(claude_batch_max),
+    "claude_hourly_limit": int(claude_hourly_limit),
+    "claude_daily_limit": int(claude_daily_limit),
+    "claude_percentage_cap": 1.0,
+    "claude_exceptional_score": 80,
+}
+
+start_col, stop_col, reset_col, status_col = st.columns(
+    [1, 1, 1.25, 2.75]
+)
+
+with start_col:
+    if st.button(
+        "Start",
+        disabled=running,
+        type="primary",
+        width="stretch",
+    ):
+        if not selected_extensions:
+            st.error("Select at least one domain extension.")
+        elif not selected_industry_labels:
+            st.error("Select at least one industry.")
+        else:
+            start_continuous_pipeline(run_config)
+
+with stop_col:
+    if st.button(
+        "Stop",
+        disabled=not running,
+        width="stretch",
+    ):
+        stop_continuous_pipeline()
+
+with reset_col:
+    if st.button(
+        "Reset current run",
+        width="stretch",
+    ):
+        st.session_state["confirm_reset_run"] = True
+
+with status_col:
+    stage = str(
+        stream_status.get("stage", "stopped")
+    ).replace("_", " ").title()
+    state = "Running" if running else "Stopped"
+    st.markdown(
+        f'<div class="status-card"><strong>{state}</strong>'
+        f'<br><span style="opacity:.65;font-size:.85rem">'
+        f'{stage}</span></div>',
+        unsafe_allow_html=True,
+    )
+
+refresh_col, refresh_note_col = st.columns([1, 4])
+with refresh_col:
+    if st.button(
+        "Refresh now",
+        width="stretch",
+        key="manual_dashboard_refresh",
+    ):
+        st.rerun()
+with refresh_note_col:
+    if running:
+        st.caption(
+            "Automatically refreshes every 30 seconds while the pipeline is "
+            "running. Use Refresh now for an immediate update."
+        )
+    else:
+        st.caption("Use Refresh now whenever you want to reload saved data.")
+
+if st.session_state.get("confirm_reset_run", False):
+    st.warning(
+        "Reset stops the pipeline and clears unfinished queue work. "
+        "Previously screened companies remain saved."
+    )
+    confirm_col, cancel_col, _ = st.columns([1.2, 1, 4])
+    with confirm_col:
+        if st.button(
+            "Confirm reset",
+            type="primary",
+            width="stretch",
+        ):
+            reset_current_run()
+    with cancel_col:
+        if st.button("Cancel", width="stretch"):
+            st.session_state["confirm_reset_run"] = False
+            st.rerun()
+
+queue = stream_status.get("queue", {}) or {}
+status_metrics = st.columns(5)
+status_metrics[0].metric(
+    "New domains",
+    int(
+        stream_status.get(
+            "new_domains_received",
+            stream_status.get("domains_received", 0),
+        )
+        or 0
+    ),
+    help=(
+        "Domains the persistent registry has never seen before. "
+        "Only these enter screening."
+    ),
+)
+status_metrics[1].metric(
+    "Screened",
+    int(stream_status.get("screened", 0) or 0),
+    help=(
+        "New domains successfully classified during this run. "
+        "Ghost sites and failed fetches are excluded."
+    ),
+)
+status_metrics[2].metric(
+    "Ignored repeats",
+    int(stream_status.get("repeat_events_ignored", 0) or 0),
+    help=(
+        "Certificate renewals and repeat sightings ignored before scraping."
+    ),
+)
+status_metrics[3].metric(
+    "Claude calls",
+    int(stream_status.get("claude_calls", 0) or 0),
+    help=(
+        f"Automatic: {int(stream_status.get('automatic_claude_calls', 0) or 0)} "
+        f"· Manual: {int(stream_status.get('manual_claude_calls', 0) or 0)}"
+    ),
+)
+status_metrics[4].metric(
+    "Failed",
+    int(stream_status.get("failed_this_run", 0) or 0),
+    help="New domains that exhausted retries during this run.",
+)
+
+selected_status_extensions = stream_status.get(
+    "selected_extensions",
+    saved_config.get("selected_extensions", [".ai"]),
+)
+received_by_extension = stream_status.get(
+    "received_by_extension",
+    {},
+) or {}
+queue_by_extension = stream_status.get(
+    "queue_by_extension",
+    {},
+) or {}
+
+st.markdown("#### New domains by extension")
+extension_columns = st.columns(
+    max(1, len(selected_status_extensions))
+)
+for column, extension in zip(
+    extension_columns,
+    selected_status_extensions,
+):
+    received_count = int(
+        received_by_extension.get(extension, 0) or 0
+    )
+    column.metric(
+        extension,
+        received_count,
+        help=f"{received_count} genuinely new domains this run.",
+    )
+
+last_domain = (
+    stream_status.get("last_domain_processed")
+    or stream_status.get("last_domain_received")
+    or ""
+)
+if last_domain:
+    st.caption(f"Latest new domain: {last_domain}")
+
+certificate_events = int(
+    stream_status.get("certificate_events_received", 0) or 0
+)
+repeat_events = int(
+    stream_status.get("repeat_events_ignored", 0) or 0
+)
+if certificate_events or repeat_events:
+    st.caption(
+        f"New-domain gate: {certificate_events} relevant certificate "
+        f"events observed · {repeat_events} repeat events ignored "
+        f"before scraping."
+    )
+
+mode = str(
+    stream_status.get("backlog_mode", "normal")
+)
+if backlog_mode == "surge":
+    st.warning(
+        "Backlog Surge mode is active: homepage-only screening with "
+        "safe concurrency. Ghost sites are separated and retried later."
+    )
+elif backlog_mode == "catch_up":
+    st.info(
+        "Catch-up mode is active: the queue exceeded 500 domains, "
+        "so screening is using larger homepage-only batches."
+    )
+
+if running:
+    active_batch = int(
+        stream_status.get("screening_batch_size", 200) or 200
+    )
+    active_workers = int(
+        stream_status.get("scraper_workers", 28) or 28
+    )
+    st.caption(
+        f"Active throughput: {active_batch} domains per batch, "
+        f"{active_workers} concurrent website scrapers."
+    )
+
+if stream_status.get("last_error"):
+    stream_stage = str(stream_status.get("stage", "")).lower()
+    if stream_stage == "reconnecting":
+        st.warning(
+            "CertStream connection was interrupted. The pipeline is "
+            f"reconnecting automatically: {stream_status['last_error']}"
+        )
+    else:
+        st.error(
+            f"Python pipeline issue: {stream_status['last_error']}"
+        )
+    if stream_stage == "crashed":
+        crash_log = ROOT / "logs" / "continuous_pipeline.log"
+        if crash_log.exists():
+            with st.expander("Show startup error log", expanded=True):
+                lines = crash_log.read_text(
+                    encoding="utf-8",
+                    errors="ignore",
+                ).splitlines()
+                st.code("\n".join(lines[-60:]) or "No log output.")
+
+manual_message = st.session_state.pop(
+    "last_manual_claude_message",
+    "",
+)
+if manual_message:
+    st.success(manual_message)
+    manual_result = read_stream_status().get(
+        "last_manual_claude_result",
+        {},
+    )
+    if manual_result:
+        st.json(manual_result)
+
+reclassification_message = st.session_state.pop(
+    "last_reclassification_message",
+    "",
+)
+if reclassification_message:
+    st.success(reclassification_message)
+
+
+if running:
+    st.caption(
+        "The pipeline is live. This page refreshes automatically every 30 "
+        "seconds; press Refresh now for an immediate update."
+    )
+
+current_run_id = str(
+    stream_status.get("run_id", "")
+).strip()
+
+scope_col, run_id_col = st.columns([1.4, 3.6])
+with scope_col:
+    result_scope = st.radio(
+        "Results view",
+        ["Current Run", "All History"],
+        horizontal=True,
+        label_visibility="collapsed",
+        key="result_scope",
+    )
+with run_id_col:
+    if result_scope == "Current Run":
+        if current_run_id:
+            st.caption(f"Current run: `{current_run_id}`")
+        else:
+            st.caption("No active or recently completed run is selected.")
+    else:
+        st.caption("Showing the latest saved result for every known domain.")
+
+approved_all = read_csv_safely(LLM / "llm_approved_master.csv")
+verified_leads = (
+    approved_all[
+        approved_all.get("llm_decision", "").astype(str).str.upper() == "KEEP"
+    ].copy()
+    if not approved_all.empty and "llm_decision" in approved_all.columns
+    else pd.DataFrame()
+)
+manual_review = (
+    approved_all[
+        approved_all.get("llm_decision", "").astype(str).str.upper() == "MAYBE"
+    ].copy()
+    if not approved_all.empty and "llm_decision" in approved_all.columns
+    else pd.DataFrame()
+)
+
+python_shortlist = read_csv_safely(
+    FILTERED / "python_shortlist_master.csv"
+)
+llm_denied = read_csv_safely(LLM / "llm_denied_master.csv")
+python_denied = read_csv_safely(FILTERED / "python_denied_master.csv")
+coming = read_csv_safely(FILTERED / "coming_soon_master.csv")
+
+all_screened = read_csv_safely(FILTERED / "all_screened.csv")
+all_screened = apply_overrides(all_screened)
+
+active_display_extensions = set(
+    saved_config.get("selected_extensions", [".ai"])
+)
+if not all_screened.empty and "domain" in all_screened.columns:
+    visible_extensions = (
+        all_screened["domain"]
+        .astype(str)
+        .str.extract(r"(\.[^.]+)$", expand=False)
+        .fillna("")
+    )
+    all_screened = all_screened[
+        visible_extensions.isin(active_display_extensions)
+    ].copy()
+
+all_history_screened = all_screened.copy()
+if result_scope == "Current Run":
+    if (
+        current_run_id
+        and not all_screened.empty
+        and "run_id" in all_screened.columns
+    ):
+        all_screened = all_screened[
+            all_screened["run_id"].astype(str).eq(current_run_id)
+        ].copy()
+    else:
+        all_screened = pd.DataFrame(
+            columns=all_screened.columns
+            if not all_screened.empty
+            else []
+        )
+
+def latest_claude_results() -> pd.DataFrame:
+    frames = []
+    for path in (
+        LLM / "llm_approved_master.csv",
+        LLM / "llm_denied_master.csv",
+    ):
+        frame = read_csv_safely(path)
+        if not frame.empty and "domain" in frame.columns:
+            frames.append(frame.copy())
+
+    if not frames:
+        return pd.DataFrame()
+
+    combined = pd.concat(frames, ignore_index=True, sort=False)
+    combined["domain"] = combined["domain"].map(stable_domain)
+    combined = combined.drop_duplicates("domain", keep="last")
+
+    columns = [
+        column
+        for column in (
+            "domain",
+            "llm_decision",
+            "llm_fit_score",
+            "llm_product_summary",
+            "llm_reasoning",
+            "llm_concerns",
+            "llm_model",
+        )
+        if column in combined.columns
+    ]
+    return combined[columns].copy()
+
+
+def merge_claude_results(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty or "domain" not in frame.columns:
+        return frame
+
+    latest = latest_claude_results()
+    if latest.empty:
+        return frame
+
+    output = frame.copy()
+    output["domain"] = output["domain"].map(stable_domain)
+
+    for column in latest.columns:
+        if column != "domain" and column in output.columns:
+            output = output.drop(columns=[column])
+
+    return output.merge(
+        latest,
+        how="left",
+        on="domain",
+        validate="many_to_one",
+    )
+
+
+@st.cache_data(show_spinner=False, max_entries=4)
+def visible_classification_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    """Assign every screened row to one useful visible outcome.
+
+    Needs Review is intentionally narrow: a company must have meaningful
+    score and enterprise evidence. Uncertain rows remain visible as
+    Insufficient Evidence; Hard Denied requires a factual disqualifier.
+    """
+    if frame.empty:
+        result = frame.copy()
+        result["_visible_bucket"] = ""
+        return result
+
+    result = frame.copy()
+    routing = result.get(
+        "routing_bucket",
+        pd.Series("", index=result.index),
+    ).astype(str).str.strip().str.lower()
+    overrides = result.get(
+        "_override_target",
+        pd.Series("", index=result.index),
+    ).astype(str).str.strip()
+    decisions = result.get(
+        "llm_decision",
+        pd.Series("", index=result.index),
+    ).astype(str).str.strip().str.upper()
+
+    scores = pd.to_numeric(
+        result.get(
+            "diligence_rank_score",
+            result.get(
+                "rule_score",
+                pd.Series(0, index=result.index),
+            ),
+        ),
+        errors="coerce",
+    ).fillna(0)
+    website_copy = (
+        result.get("page_title", pd.Series("", index=result.index)).astype(str)
+        + " "
+        + result.get(
+            "meta_description",
+            pd.Series("", index=result.index),
+        ).astype(str)
+        + " "
+        + result.get(
+            "homepage_excerpt",
+            pd.Series("", index=result.index),
+        ).astype(str)
+    ).str.strip()
+    website_copy_is_usable = website_copy.ne("")
+    rescored = website_copy.map(score_text)
+    revised_scores = rescored.map(lambda item: int(item[0]))
+    revised_pillars = rescored.map(lambda item: str(item[1]))
+    scores = scores.where(~website_copy_is_usable, revised_scores)
+
+    def stored_truth(column: str) -> pd.Series:
+        return result.get(
+            column,
+            pd.Series("", index=result.index),
+        ).astype(str).str.strip().str.lower().isin({"true", "1", "yes"})
+
+    routing_reasons_for_score = result.get(
+        "routing_reason",
+        pd.Series("", index=result.index),
+    ).astype(str).str.lower()
+    placeholder_reasons_for_score = result.get(
+        "placeholder_reason",
+        pd.Series("", index=result.index),
+    ).astype(str).str.lower()
+    location_for_score = result.get(
+        "location_status",
+        pd.Series("", index=result.index),
+    ).astype(str)
+    investment_labels_for_score = result.get(
+        "investment_classification",
+        pd.Series("", index=result.index),
+    ).astype(str)
+    non_english_for_score = stored_truth("predominantly_non_english")
+    placeholder_for_score = stored_truth("placeholder_detected")
+    media_for_score = stored_truth("media_newsletter")
+    commodity_for_score = stored_truth("commodity_wrapper")
+    adjusted_scores = []
+    score_cap_reasons = []
+    for index, score in scores.items():
+        adjusted, applied = investment_eligibility_adjusted_score(
+            score,
+            predominantly_non_english=bool(non_english_for_score.loc[index]),
+            location_status=location_for_score.loc[index],
+            parked=placeholder_reasons_for_score.loc[index] == "parked_or_for_sale",
+            placeholder=bool(placeholder_for_score.loc[index]),
+            agency="agency_or_consultancy" in routing_reasons_for_score.loc[index],
+            consumer="consumer_b2c_product" in routing_reasons_for_score.loc[index],
+            media=bool(media_for_score.loc[index]),
+            commodity_ai_service=bool(commodity_for_score.loc[index]),
+            mature_or_funded=(
+                investment_labels_for_score.loc[index] == "Potential Comp"
+                or "mature_or_funded" in routing_reasons_for_score.loc[index]
+            ),
+        )
+        adjusted_scores.append(adjusted)
+        score_cap_reasons.append("; ".join(applied))
+    scores = pd.Series(adjusted_scores, index=result.index, dtype="int64")
+    result["_score_eligibility_caps"] = score_cap_reasons
+    result["_fit_score_v2"] = scores.astype(int)
+    result["_fit_pillar_v2"] = revised_pillars.where(
+        website_copy_is_usable,
+        result.get(
+            "rule_thesis_pillar",
+            pd.Series("", index=result.index),
+        ).astype(str),
+    )
+
+    signal_columns = (
+        "score_defensibility_signals",
+        "score_important_problem_signals",
+        "score_technical_signals",
+        "workflow_depth_count",
+        "business_value_count",
+        "buyer_signal_count",
+    )
+    signal_dimensions = pd.Series(0, index=result.index, dtype="int64")
+    for column in signal_columns:
+        values = pd.to_numeric(
+            result.get(
+                column,
+                pd.Series(0, index=result.index),
+            ),
+            errors="coerce",
+        ).fillna(0)
+        signal_dimensions += values.gt(0).astype(int)
+
+    clear_enterprise = pd.Series(
+        False,
+        index=result.index,
+        dtype="bool",
+    )
+    for column in (
+        "clear_enterprise_idea",
+        "sparse_deep_tech_idea",
+        "sparse_vertical_workflow_idea",
+        "potential_glasswing_fit",
+    ):
+        values = result.get(
+            column,
+            pd.Series("", index=result.index),
+        ).astype(str).str.strip().str.lower()
+        clear_enterprise |= values.isin({"true", "1", "yes"})
+
+    saved_rescue = result.get(
+        "enterprise_rescue_signal",
+        pd.Series("", index=result.index),
+    ).astype(str).str.strip().str.lower().isin({"true", "1", "yes"})
+    rescue_text = (
+        result.get("page_title", pd.Series("", index=result.index)).astype(str)
+        + " "
+        + result.get(
+            "meta_description",
+            pd.Series("", index=result.index),
+        ).astype(str)
+    )
+    inferred_rescue = enterprise_rescue_mask(rescue_text)
+    enterprise_rescue = saved_rescue | inferred_rescue
+
+    review_floor = 25
+    review_eligible = (
+        scores.ge(review_floor)
+        & (
+            signal_dimensions.ge(1)
+            | clear_enterprise
+            | enterprise_rescue
+        )
+    )
+
+    visible = pd.Series(
+        "insufficient_evidence",
+        index=result.index,
+        dtype="object",
+    )
+
+    visible.loc[routing.eq("priority")] = "investable"
+    visible.loc[routing.eq("coming_soon")] = "coming_soon"
+    visible.loc[routing.eq("comp")] = "needs_review"
+    visible.loc[
+        routing.isin({"review", "screened_out", "insufficient", "reject"})
+        & review_eligible
+    ] = "needs_review"
+    visible.loc[routing.eq("ghost")] = "insufficient_evidence"
+
+    legacy_reasons = result.get(
+        "screened_out_reasons",
+        pd.Series("", index=result.index),
+    ).astype(str).str.lower()
+    routing_reasons = result.get(
+        "routing_reason",
+        pd.Series("", index=result.index),
+    ).astype(str).str.lower()
+    combined_reasons = legacy_reasons + ";" + routing_reasons
+    keyword_failed = combined_reasons.str.contains(
+        "missing_required_keywords",
+        case=False,
+        regex=False,
+    )
+    # Re-apply the current run's keyword constraint to historical rows too.
+    # Older rows may predate the setting and therefore have no persisted
+    # screened-out reason yet.
+    current_keywords = [
+        str(term).strip().lower()
+        for term in saved_config.get("include_keywords", [])
+        if str(term).strip()
+    ]
+    if current_keywords:
+        searchable = (
+            result.get("page_title", pd.Series("", index=result.index)).astype(str)
+            + " " + result.get("meta_description", pd.Series("", index=result.index)).astype(str)
+            + " " + result.get("homepage_excerpt", pd.Series("", index=result.index)).astype(str)
+            + " " + result.get("rule_evidence", pd.Series("", index=result.index)).astype(str)
+            + " " + result.get("prelaunch_evidence", pd.Series("", index=result.index)).astype(str)
+        ).str.lower()
+        keyword_matches = searchable.map(
+            lambda value: [term for term in current_keywords if term in value]
+        )
+        current_keyword_failed = (
+            keyword_matches.map(len).eq(len(current_keywords))
+            if str(saved_config.get("keyword_mode", "any")).lower() == "all"
+            else keyword_matches.map(bool).eq(False)
+        )
+        keyword_failed |= current_keyword_failed
+    # Required-keyword filtering is an explicit user constraint.  It must
+    # outrank the generic score/evidence rescue below; otherwise a historical
+    # row can incorrectly reappear in Needs Review after dashboard reload.
+    visible.loc[keyword_failed] = "insufficient_evidence"
+
+    factual_denial_terms = (
+        "parked_or_for_sale|generic_hosting_or_registrar_placeholder|"
+        "confirmed_non_us|predominantly_non_english|consumer_b2c_product|"
+        "agency_or_consultancy|media_newsletter_or_aggregator|"
+        "commodity_ai_wrapper_or_service|mature_or_funded_company|"
+        "substantive_site_no_glasswing_fit_signals"
+    )
+    explicit_denial = combined_reasons.str.contains(
+        factual_denial_terms,
+        regex=True,
+        na=False,
+    )
+
+    # Historical rows receive the same conservative, evidence-based rule as
+    # newly screened rows. Fetch failures and sparse sites remain insufficient.
+    fetch_errors = result.get(
+        "fetch_error",
+        pd.Series("", index=result.index),
+    ).fillna("").astype(str).str.strip()
+    http_statuses = pd.to_numeric(
+        result.get("http_status", pd.Series(0, index=result.index)),
+        errors="coerce",
+    ).fillna(0)
+    word_counts = pd.to_numeric(
+        result.get("word_count", pd.Series(0, index=result.index)),
+        errors="coerce",
+    ).fillna(0)
+
+    substantive_no_fit = (
+        fetch_errors.eq("")
+        & http_statuses.between(200, 399)
+        & word_counts.ge(80)
+        & ~review_eligible
+        & ~result.get(
+            "domain",
+            pd.Series("", index=result.index),
+        ).map(stable_domain).isin(set(GLASSWING_PORTFOLIO_DOMAINS))
+    )
+    result.loc[
+        substantive_no_fit,
+        "routing_reason",
+    ] = "substantive_site_no_glasswing_fit_signals"
+    explicit_denial |= substantive_no_fit
+    visible.loc[explicit_denial] = "hard_denied"
+
+    # Claude decisions override automatic routing.
+    visible.loc[decisions.eq("KEEP")] = "investable"
+    visible.loc[
+        decisions.eq("MAYBE")
+        & review_eligible
+    ] = "needs_review"
+    visible.loc[
+        decisions.eq("MAYBE")
+        & ~review_eligible
+    ] = "insufficient_evidence"
+    visible.loc[decisions.eq("REJECT")] = "hard_denied"
+
+    # Persistent manual decisions are final.
+    visible.loc[overrides.eq("Investable Candidate")] = "investable"
+    visible.loc[overrides.eq("Review Candidate")] = "needs_review"
+    visible.loc[overrides.eq("Potential Comp")] = "needs_review"
+    visible.loc[overrides.eq("Hard Denied")] = "hard_denied"
+    visible.loc[overrides.eq("Coming Soon")] = "coming_soon"
+
+    result["_visible_bucket"] = visible
+    result["_review_score_floor"] = review_floor
+    result["_signal_dimensions"] = signal_dimensions
+
+    if "routing_reason" not in result.columns:
+        result["routing_reason"] = ""
+    if "denial_evidence" not in result.columns:
+        result["denial_evidence"] = ""
+
+    rescue_promoted = enterprise_rescue & visible.eq("needs_review")
+    result.loc[
+        rescue_promoted,
+        "routing_reason",
+    ] = "enterprise_rescue_requires_human_review"
+
+    low_signal_mask = (
+        visible.eq("insufficient_evidence")
+        & ~routing.eq("reject")
+        & ~explicit_denial
+        & ~decisions.eq("REJECT")
+        & ~overrides.eq("Hard Denied")
+    )
+    page_errors = result.get(
+        "fetch_error",
+        pd.Series("", index=result.index),
+    ).astype(str).str.strip()
+    statuses = result.get(
+        "http_status",
+        pd.Series("", index=result.index),
+    ).astype(str).str.strip()
+    word_counts = pd.to_numeric(
+        result.get(
+            "word_count",
+            pd.Series(0, index=result.index),
+        ),
+        errors="coerce",
+    ).fillna(0)
+    inaccessible = (
+        page_errors.ne("")
+        | statuses.str.startswith(("4", "5"))
+        | word_counts.lt(3)
+    )
+
+    result.loc[
+        low_signal_mask & inaccessible,
+        "routing_reason",
+    ] = "website_unavailable_or_no_usable_company_evidence"
+    result.loc[
+        low_signal_mask & ~inaccessible,
+        "routing_reason",
+    ] = "no_clear_enterprise_or_glasswing_fit"
+
+    result.loc[
+        low_signal_mask,
+        "denial_evidence",
+    ] = (
+        "Score "
+        + scores.astype(int).astype(str)
+        + "; enterprise evidence dimensions "
+        + signal_dimensions.astype(str)
+        + "; review requires score 25+ and at least 1 evidence dimension "
+        + "or a clear enterprise signal"
+    )
+
+    return result
+
+
+classified_screened = visible_classification_frame(
+    merge_claude_results(all_screened)
+)
+
+
+def visible_bucket_frame(bucket: str) -> pd.DataFrame:
+    if classified_screened.empty:
+        return pd.DataFrame(columns=classified_screened.columns)
+    return classified_screened[
+        classified_screened["_visible_bucket"].astype(str).eq(bucket)
+    ].copy()
+
+
+def classification_reason_summary(frame: pd.DataFrame) -> pd.DataFrame:
+    """Count specific visible outcomes without collapsing missing reasons."""
+    if frame.empty:
+        return pd.DataFrame(columns=["Reason", "Count", "Share"])
+
+    reasons = frame.get(
+        "routing_reason",
+        pd.Series("", index=frame.index),
+    ).astype(str).str.strip()
+    reasons = reasons.mask(reasons.eq(""), "reason_not_recorded")
+    counts = reasons.value_counts(dropna=False)
+    summary = counts.rename_axis("Reason").reset_index(name="Count")
+    summary["Reason"] = summary["Reason"].map(humanize_reason)
+    summary["Share"] = (
+        summary["Count"].div(len(frame)).mul(100).round(1)
+    )
+    return summary
+
+
+investable_candidates = visible_bucket_frame("investable")
+coming_soon = visible_bucket_frame("coming_soon")
+needs_review = visible_bucket_frame("needs_review")
+insufficient_evidence = visible_bucket_frame("insufficient_evidence")
+hard_denied = visible_bucket_frame("hard_denied")
+
+for visible_frame_name in (
+    "investable_candidates",
+    "coming_soon",
+    "needs_review",
+    "insufficient_evidence",
+    "hard_denied",
+):
+    visible_frame = locals()[visible_frame_name]
+    if not visible_frame.empty and "domain" in visible_frame.columns:
+        locals()[visible_frame_name] = visible_frame.drop_duplicates(
+            "domain",
+            keep="last",
+        )
+
+# Training baskets contain human decisions only. Automated classifications are
+# displayed here for review, but never write their own training labels.
+positive_training = investable_candidates.copy()
+
+# This is an audit view of the Hard Denied bucket, not an additional
+# classification bucket. Exclude persistent manual overrides so the tab
+# reflects Claude's currently active REJECT decisions specifically.
+claude_reject_decisions = hard_denied.get(
+    "llm_decision",
+    pd.Series("", index=hard_denied.index),
+).astype(str).str.strip().str.upper()
+claude_reject_overrides = hard_denied.get(
+    "_override_target",
+    pd.Series("", index=hard_denied.index),
+).astype(str).str.strip()
+claude_rejected = hard_denied[
+    claude_reject_decisions.eq("REJECT")
+    & claude_reject_overrides.eq("")
+].copy()
+
+st.markdown("#### Sourcing funnel")
+funnel_1, funnel_2, funnel_3, funnel_4, funnel_5 = st.columns(5)
+
+if result_scope == "Current Run":
+    funnel_received = int(
+        stream_status.get(
+            "new_domains_received",
+            stream_status.get("domains_received", 0),
+        )
+        or 0
+    )
+else:
+    funnel_received = len(all_history_screened)
+
+screened_rows = classified_screened.copy()
+visible_screened = pd.concat(
+    [
+        investable_candidates,
+        coming_soon,
+        needs_review,
+        insufficient_evidence,
+        hard_denied,
+    ],
+    ignore_index=True,
+    sort=False,
+)
+if not visible_screened.empty and "domain" in visible_screened.columns:
+    visible_screened = visible_screened.drop_duplicates("domain", keep="last")
+
+funnel_screened = len(visible_screened)
+funnel_usable = len(visible_screened)
+funnel_in_scope = (
+    len(investable_candidates)
+    + len(coming_soon)
+    + len(needs_review)
+)
+
+funnel_1.metric("New domains", funnel_received)
+funnel_2.metric("Screened", funnel_screened)
+funnel_3.metric("Usable websites", funnel_usable)
+funnel_4.metric("Within scope", funnel_in_scope)
+funnel_5.metric("Investable", len(investable_candidates))
+
+metric_1, metric_2, metric_3, metric_4, metric_5 = st.columns(5)
+metric_1.metric(
+    "Investable candidates",
+    len(investable_candidates),
+)
+metric_2.metric("Coming soon", len(coming_soon))
+metric_3.metric("Needs review", len(needs_review))
+metric_4.metric("Insufficient evidence", len(insufficient_evidence))
+metric_5.metric("Hard denied", len(hard_denied))
+
+visible_total = (
+    len(investable_candidates)
+    + len(coming_soon)
+    + len(needs_review)
+    + len(insufficient_evidence)
+    + len(hard_denied)
+)
+if visible_total != funnel_screened:
+    st.error(
+        "Classification reconciliation error: visible result buckets do "
+        "not equal the screened total."
+    )
+else:
+    st.caption(
+        f"All {visible_total:,} screened websites are represented in the "
+        "five visible result buckets."
+    )
+
+tabs = st.tabs([
+    "Investable Candidates",
+    "Coming Soon",
+    "Needs Review",
+    "Insufficient Evidence",
+    "Hard Denied",
+    "Rejected by Claude",
+    "Yes Basket",
+    "No Basket",
+    "Training Data",
+    "Run Details",
+])
+
+def candidate_table(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return pd.DataFrame()
+
+    output = pd.DataFrame(index=frame.index)
+    output["Company"] = frame.get(
+        "page_title",
+        frame.get("domain", ""),
+    )
+    output["Domain"] = frame.get("domain", "")
+    output["Extension"] = (
+        output["Domain"]
+        .astype(str)
+        .str.extract(r"(\.[^.]+)$", expand=False)
+        .fillna("")
+    )
+    output["Score"] = pd.to_numeric(
+        frame.get(
+            "_fit_score_v2",
+            frame.get("rule_score", 0),
+        ),
+        errors="coerce",
+    ).fillna(0).astype(int)
+    output["Description"] = frame.get("meta_description", "")
+    output["Category"] = frame.get(
+        "_fit_pillar_v2",
+        pd.Series("", index=frame.index),
+    ).astype(str).str.replace("_", " ").str.title()
+    decisions = frame.get(
+        "llm_decision",
+        pd.Series("", index=frame.index),
+    ).astype(str).str.upper()
+
+    output["Claude Decision"] = decisions.replace({
+        "KEEP": "KEEP",
+        "MAYBE": "MAYBE",
+        "REJECT": "REJECT",
+        "": "Not reviewed",
+        "NAN": "Not reviewed",
+    })
+    output["Claude Score"] = pd.to_numeric(
+        frame.get(
+            "llm_fit_score",
+            pd.Series("", index=frame.index),
+        ),
+        errors="coerce",
+    )
+    output["Claude Summary"] = frame.get(
+        "llm_product_summary",
+        pd.Series("", index=frame.index),
+    )
+    output["Claude Reasoning"] = frame.get(
+        "llm_reasoning",
+        pd.Series("", index=frame.index),
+    )
+    output["Website"] = frame.get("final_url", "")
+    return output.reset_index(drop=True)
+
+
+def basket_ratings() -> tuple[dict[str, int], dict[str, int]]:
+    mappings = []
+    for path in (YES_BASKET_DATA, NO_BASKET_DATA):
+        frame = read_basket_data(path)
+        mappings.append({
+            stable_domain(row["domain_url"]): int(row["rating"])
+            for _, row in frame.iterrows()
+        })
+    return mappings[0], mappings[1]
+
+
+def basket_selection_editor(frame: pd.DataFrame, key_prefix: str) -> None:
+    """Label visible companies directly without a company dropdown."""
+    if frame.empty or "domain" not in frame.columns:
+        return
+    with st.expander("Add or edit training basket labels", expanded=False):
+        search = st.text_input(
+            "Filter companies",
+            placeholder="Search company or domain",
+            key=f"{key_prefix}_basket_search",
+        ).strip().lower()
+        source = frame.drop_duplicates("domain", keep="last").copy()
+        if search:
+            searchable = (
+                source.get("page_title", pd.Series("", index=source.index))
+                .astype(str)
+                + " "
+                + source["domain"].astype(str)
+            ).str.lower()
+            source = source[searchable.str.contains(search, regex=False)]
+
+        score = pd.to_numeric(
+            source.get(
+                "_fit_score_v2",
+                source.get("diligence_rank_score", source.get("rule_score", 0)),
+            ),
+            errors="coerce",
+        ).fillna(0).clip(0, 100).astype(int)
+        source = source.assign(_basket_sort_score=score).sort_values(
+            "_basket_sort_score",
+            ascending=False,
+        ).head(250)
+        if source.empty:
+            st.info("No matching companies.")
+            return
+
+        yes_map, no_map = basket_ratings()
+        editor = pd.DataFrame(index=source.index)
+        domains = source["domain"].map(stable_domain)
+        editor["Yes"] = domains.isin(yes_map)
+        editor["No"] = domains.isin(no_map)
+        editor["Rating"] = [
+            yes_map.get(domain, no_map.get(domain, int(score.loc[index])))
+            for index, domain in domains.items()
+        ]
+        editor["Company"] = source.get(
+            "page_title",
+            source["domain"],
+        )
+        editor["Domain URL"] = source.apply(
+            lambda row: normalize_domain_url(
+                row.get("final_url") or row.get("domain")
+            ),
+            axis=1,
+        )
+        editor["Description"] = source.get("meta_description", "")
+        baseline = editor[["Yes", "No", "Rating", "Domain URL"]].copy()
+
+        edited = st.data_editor(
+            editor.reset_index(drop=True),
+            width="stretch",
+            hide_index=True,
+            disabled=["Company", "Domain URL", "Description"],
+            column_config={
+                "Yes": st.column_config.CheckboxColumn("Yes basket"),
+                "No": st.column_config.CheckboxColumn("No basket"),
+                "Rating": st.column_config.NumberColumn(
+                    "Rating",
+                    min_value=0,
+                    max_value=100,
+                    step=1,
+                    format="%d",
+                ),
+                "Domain URL": st.column_config.LinkColumn("Domain URL"),
+                "Description": st.column_config.TextColumn(
+                    "Description",
+                    width="large",
+                ),
+            },
+            key=f"{key_prefix}_basket_editor",
+        )
+        if st.button(
+            "Save basket edits",
+            type="primary",
+            key=f"{key_prefix}_basket_save",
+        ):
+            conflicts = edited[edited["Yes"] & edited["No"]]
+            if not conflicts.empty:
+                st.error("A company cannot be in both baskets.")
+                return
+            changed = 0
+            baseline = baseline.reset_index(drop=True)
+            for index, row in edited.iterrows():
+                before = baseline.loc[index]
+                if (
+                    bool(row["Yes"]) == bool(before["Yes"])
+                    and bool(row["No"]) == bool(before["No"])
+                    and int(row["Rating"]) == int(before["Rating"])
+                ):
+                    continue
+                if bool(row["Yes"]):
+                    save_basket_entry(row["Domain URL"], "yes", row["Rating"])
+                elif bool(row["No"]):
+                    save_basket_entry(row["Domain URL"], "no", row["Rating"])
+                else:
+                    remove_basket_entry(row["Domain URL"])
+                changed += 1
+            st.success(f"Saved {changed} basket edit{'s' if changed != 1 else ''}.")
+            st.rerun()
+
+
+def render_basket_editor(*, basket: str, path) -> None:
+    frame = read_basket_data(path)
+    label = "Yes" if basket == "yes" else "No"
+    other = "No" if basket == "yes" else "Yes"
+    st.metric(f"{label} basket companies", len(frame))
+    if frame.empty:
+        st.info(f"No companies are in the {label} basket yet.")
+        return
+    st.download_button(
+        f"Download {label} basket CSV",
+        data=frame.to_csv(index=False).encode("utf-8"),
+        file_name=path.name,
+        mime="text/csv",
+        key=f"download_{basket}_basket",
+    )
+    editor = frame.copy()
+    editor[f"Move to {other}"] = False
+    editor["Remove"] = False
+    edited = st.data_editor(
+        editor,
+        width="stretch",
+        hide_index=True,
+        disabled=["domain_url"],
+        column_config={
+            "domain_url": st.column_config.LinkColumn("Domain URL"),
+            "rating": st.column_config.NumberColumn(
+                "Rating",
+                min_value=0,
+                max_value=100,
+                step=1,
+                format="%d",
+            ),
+            f"Move to {other}": st.column_config.CheckboxColumn(
+                f"Move to {other}"
+            ),
+            "Remove": st.column_config.CheckboxColumn("Remove"),
+        },
+        key=f"{basket}_basket_editor",
+    )
+    if st.button(
+        "Save table edits",
+        type="primary",
+        key=f"save_{basket}_basket",
+    ):
+        for index, row in edited.iterrows():
+            if bool(row["Remove"]):
+                remove_basket_entry(row["domain_url"])
+            elif bool(row[f"Move to {other}"]):
+                save_basket_entry(row["domain_url"], other.lower(), row["rating"])
+            elif int(row["rating"]) != int(frame.loc[index, "rating"]):
+                save_basket_entry(row["domain_url"], basket, row["rating"])
+        st.success("Basket changes saved.")
+        st.rerun()
+
+def render_candidate_table(
+    frame: pd.DataFrame,
+    empty_message: str,
+    *,
+    show_claude_status: bool = False,
+) -> None:
+    if frame.empty:
+        st.info(empty_message)
+        return
+
+    table = candidate_table(frame)
+    if not show_claude_status:
+        table = table.drop(
+            columns=[
+                "Claude Decision",
+                "Claude Score",
+                "Claude Summary",
+                "Claude Reasoning",
+            ],
+            errors="ignore",
+        )
+
+    safe_dataframe(
+        table,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "Website": st.column_config.LinkColumn(
+                "Website",
+                display_text="Open",
+            ),
+            "Score": st.column_config.ProgressColumn(
+                "Score",
+                min_value=0,
+                max_value=96,
+                format="%d",
+            ),
+        },
+    )
+
+def manual_claude_panel(frame: pd.DataFrame) -> None:
+    if frame.empty or "domain" not in frame.columns:
+        return
+
+    selectable = frame.copy()
+    if "llm_decision" in selectable.columns:
+        decisions = selectable[
+            "llm_decision"
+        ].astype(str).str.upper()
+        selectable = selectable[
+            ~decisions.isin({"KEEP", "MAYBE", "REJECT"})
+        ].copy()
+
+    if selectable.empty:
+        return
+
+    labels = []
+    row_map = {}
+    for idx, row in selectable.iterrows():
+        company = str(
+            row.get("page_title")
+            or row.get("domain")
+            or "Unknown company"
+        )
+        domain = str(row.get("domain", ""))
+        score = str(
+            row.get(
+                "_fit_score_v2",
+                row.get(
+                    "diligence_rank_score",
+                    row.get("rule_score", ""),
+                ),
+            )
+        )
+        label = f"{company} — {domain} — score {score}"
+        labels.append(label)
+        row_map[label] = idx
+
+    selected = st.selectbox(
+        "Company to review with Claude",
+        labels,
+        key="manual_claude_company_filtered",
+    )
+
+    if st.button(
+        "Send selected company through Claude",
+        type="primary",
+        key="manual_claude_button_filtered",
+    ):
+        selected_row = selectable.loc[row_map[selected]]
+        with st.spinner(
+            "Running one Claude diligence call..."
+        ):
+            ok, message = run_manual_diligence(selected_row)
+        if ok:
+            st.session_state["last_manual_claude_message"] = message
+            st.rerun()
+        else:
+            st.error(message)
+
+with tabs[0]:
+    st.caption(
+        "Only high-conviction companies that clear the active run "
+        "filters appear here. Uncertain and mismatched companies are "
+        "retained outside the visible dashboard, not mislabeled."
+    )
+    basket_selection_editor(investable_candidates, "investable")
+    manual_action_panel(
+        investable_candidates,
+        "investable_actions",
+        allow_move_all_to_hard_denied=True,
+    )
+    manual_claude_panel(investable_candidates)
+    render_candidate_table(
+        investable_candidates,
+        "No companies have cleared the current investable filters.",
+        show_claude_status=True,
+    )
+
+with tabs[1]:
+    st.caption(
+        "Legitimate founder-controlled prelaunch pages that match the "
+        "active industry and keyword filters. Squarespace templates and "
+        "pages that only say Coming Soon remain excluded."
+    )
+    basket_selection_editor(coming_soon, "coming_soon")
+    render_candidate_table(
+        coming_soon,
+        "No valid coming-soon companies have cleared the filters.",
+    )
+
+with tabs[2]:
+    st.caption(
+        "Credible borderline companies appear here: score 25+ plus "
+        "at least one enterprise evidence dimension, or a clear enterprise "
+        "signal. Low-signal sites are excluded from this queue."
+    )
+    basket_selection_editor(needs_review, "needs_review")
+    manual_action_panel(
+        needs_review,
+        "needs_review_actions",
+        allow_move_all_to_hard_denied=True,
+    )
+    render_candidate_table(
+        needs_review,
+        "No companies currently need review.",
+        show_claude_status=True,
+    )
+
+with tabs[3]:
+    st.caption(
+        "Sites that are inaccessible, sparse, login-only, or below the "
+        "evidence threshold live here. This is an uncertainty state, not "
+        "an investment rejection."
+    )
+    basket_selection_editor(insufficient_evidence, "insufficient")
+    manual_action_panel(
+        insufficient_evidence,
+        "insufficient_evidence_actions",
+    )
+    if insufficient_evidence.empty:
+        st.info("No companies currently have insufficient evidence.")
+    else:
+        readable_mask = insufficient_evidence.get(
+            "homepage_excerpt",
+            pd.Series("", index=insufficient_evidence.index),
+        ).astype(str).str.strip().ne("")
+        evidence_counts = st.columns(2)
+        evidence_counts[0].metric(
+            "Fetched, low signal",
+            int(readable_mask.sum()),
+        )
+        evidence_counts[1].metric(
+            "Website unavailable",
+            int((~readable_mask).sum()),
+        )
+        uncertain = pd.DataFrame(index=insufficient_evidence.index)
+        uncertain["Company"] = insufficient_evidence.get(
+            "page_title",
+            insufficient_evidence.get("domain", ""),
+        )
+        uncertain["Domain"] = insufficient_evidence.get("domain", "")
+        uncertain["Score"] = pd.to_numeric(
+            insufficient_evidence.get("_fit_score_v2", 1),
+            errors="coerce",
+        ).fillna(1).astype(int)
+        uncertain["Evidence Status"] = readable_mask.map({
+            True: "Fetched — insufficient Glasswing signal",
+            False: "Website unreachable after retry",
+        })
+        uncertain["Reason"] = insufficient_evidence.get(
+            "routing_reason",
+            pd.Series("", index=insufficient_evidence.index),
+        ).map(humanize_reason)
+        uncertain["Why it did not advance"] = insufficient_evidence.get(
+            "review_reasons",
+            "",
+        )
+        uncertain["Description"] = insufficient_evidence.get(
+            "meta_description",
+            "",
+        )
+        uncertain["Website"] = insufficient_evidence.get("final_url", "")
+        safe_dataframe(
+            uncertain.reset_index(drop=True),
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Score": st.column_config.ProgressColumn(
+                    "Score",
+                    min_value=0,
+                    max_value=100,
+                    format="%d",
+                ),
+                "Website": st.column_config.LinkColumn(
+                    "Website",
+                    display_text="Open",
+                ),
+            },
+        )
+
+with tabs[4]:
+    st.caption(
+        "Only companies with explicit factual disqualifying evidence "
+        "appear here. Low score or incomplete evidence is not a denial."
+    )
+    basket_selection_editor(hard_denied, "hard_denied")
+    manual_action_panel(hard_denied, "hard_denied_actions")
+
+    if hard_denied.empty:
+        st.info("No hard-denied companies.")
+    else:
+        denied = pd.DataFrame(index=hard_denied.index)
+        denied["Company"] = hard_denied.get(
+            "page_title",
+            hard_denied.get("domain", ""),
+        )
+        denied["Domain"] = hard_denied.get("domain", "")
+        denied["Score"] = pd.to_numeric(
+            hard_denied.get("_fit_score_v2", 0),
+            errors="coerce",
+        ).fillna(0).astype(int)
+        denied["Extension"] = (
+            denied["Domain"]
+            .astype(str)
+            .str.extract(r"(\.[^.]+)$", expand=False)
+            .fillna("")
+        )
+        denied["Reason"] = hard_denied.get(
+            "routing_reason",
+            "",
+        )
+        denied["Evidence"] = hard_denied.get(
+            "denial_evidence",
+            "",
+        )
+        denied["Description"] = hard_denied.get(
+            "meta_description",
+            "",
+        )
+        denied["Website"] = hard_denied.get(
+            "final_url",
+            "",
+        )
+
+        safe_dataframe(
+            denied.reset_index(drop=True),
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Score": st.column_config.ProgressColumn(
+                    "Score",
+                    min_value=0,
+                    max_value=100,
+                    format="%d",
+                ),
+                "Website": st.column_config.LinkColumn(
+                    "Website",
+                    display_text="Open",
+                ),
+                "Evidence": st.column_config.TextColumn(
+                    "Evidence",
+                    width="large",
+                ),
+            },
+        )
+
+with tabs[5]:
+    st.caption(
+        "Companies Claude explicitly marked REJECT after selective "
+        "diligence. This is an audit subset of Hard Denied, not a sixth "
+        "classification bucket; companies with persistent manual "
+        "overrides are excluded."
+    )
+    basket_selection_editor(claude_rejected, "claude_rejected")
+    manual_action_panel(claude_rejected, "claude_rejected_actions")
+
+    if claude_rejected.empty:
+        st.info("Claude has no active rejected companies in this view.")
+    else:
+        rejected = pd.DataFrame(index=claude_rejected.index)
+        rejected["Company"] = claude_rejected.get(
+            "page_title",
+            claude_rejected.get("domain", ""),
+        )
+        rejected["Domain"] = claude_rejected.get("domain", "")
+        rejected["Glasswing Score"] = pd.to_numeric(
+            claude_rejected.get(
+                "_fit_score_v2",
+                claude_rejected.get("rule_score", 0),
+            ),
+            errors="coerce",
+        ).fillna(0).astype(int)
+        rejected["Claude Score"] = pd.to_numeric(
+            claude_rejected.get(
+                "llm_fit_score",
+                pd.Series("", index=claude_rejected.index),
+            ),
+            errors="coerce",
+        )
+        rejected["Claude Summary"] = claude_rejected.get(
+            "llm_product_summary",
+            "",
+        )
+        rejected["Claude Reasoning"] = claude_rejected.get(
+            "llm_reasoning",
+            "",
+        )
+        rejected["Claude Concerns"] = claude_rejected.get(
+            "llm_concerns",
+            "",
+        )
+        rejected["Claude Model"] = claude_rejected.get("llm_model", "")
+        rejected["Website"] = claude_rejected.get("final_url", "")
+
+        safe_dataframe(
+            rejected.reset_index(drop=True),
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Website": st.column_config.LinkColumn(
+                    "Website",
+                    display_text="Open",
+                ),
+                "Glasswing Score": st.column_config.ProgressColumn(
+                    "Glasswing Score",
+                    min_value=0,
+                    max_value=96,
+                    format="%d",
+                ),
+                "Claude Score": st.column_config.ProgressColumn(
+                    "Claude Score",
+                    min_value=0,
+                    max_value=100,
+                    format="%d",
+                ),
+                "Claude Reasoning": st.column_config.TextColumn(
+                    "Claude Reasoning",
+                    width="large",
+                ),
+                "Claude Concerns": st.column_config.TextColumn(
+                    "Claude Concerns",
+                    width="large",
+                ),
+            },
+        )
+
+with tabs[6]:
+    st.caption(
+        "General Yes investments for Glasswing. Edit ratings directly, move "
+        "companies to No, or remove rows from the training set."
+    )
+    render_basket_editor(
+        basket="yes",
+        path=YES_BASKET_DATA,
+    )
+
+with tabs[7]:
+    st.caption(
+        "General No investments for Glasswing. Zero is a valid rating for an "
+        "obvious poor fit. Edit ratings or move companies to Yes in-place."
+    )
+    render_basket_editor(
+        basket="no",
+        path=NO_BASKET_DATA,
+    )
+
+with tabs[8]:
+    st.caption(
+        "Compact evidence and deterministic splits for small local models. "
+        "Missing-page examples are excluded rather than taught as negative fit."
+    )
+    all_training, training_excluded, _ = build_training_dataset()
+    training_ready = all_training[
+        all_training["trust_tier"].eq("gold")
+    ].copy()
+    training_manifest = {
+        "instruction_tuning_examples": len(
+            balanced_instruction_frame(training_ready)
+        )
+    }
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("Trusted model-ready", len(training_ready))
+    metric_cols[1].metric(
+        "Yes / No",
+        f"{int((training_ready['label'] == 'yes').sum())} / "
+        f"{int((training_ready['label'] == 'no').sum())}",
+    )
+    metric_cols[2].metric("No-evidence excluded", len(training_excluded))
+    metric_cols[3].metric(
+        "Balanced tuning rows",
+        training_manifest["instruction_tuning_examples"],
+    )
+    if st.button("Rebuild training files", type="primary"):
+        training_ready, training_excluded, training_manifest = write_training_exports()
+        st.success(f"Built {len(training_ready)} model-ready examples.")
+    trusted_yes = int((training_ready["label"] == "yes").sum())
+    trusted_no = int((training_ready["label"] == "no").sum())
+    st.progress(min(trusted_yes / 300, 1.0), text=f"Trusted Yes: {trusted_yes}/300")
+    st.progress(min(trusted_no / 600, 1.0), text=f"Trusted No: {trusted_no}/600")
+    if trusted_yes < 300 or trusted_no < 600:
+        st.warning(
+            "Not ready for final training yet. Review labels below; automatic "
+            "rule labels are preserved separately and excluded from trusted exports."
+        )
+    csv_col, jsonl_col = st.columns(2)
+    csv_col.download_button(
+        "Download model-ready CSV",
+        training_ready.to_csv(index=False).encode("utf-8"),
+        file_name="glasswing_model_ready.csv",
+        mime="text/csv",
+    )
+    tuning_download = balanced_instruction_frame(training_ready)
+    jsonl_content = "\n".join(
+        json.dumps({
+            "messages": [
+                {"role": "system", "content": "Classify Glasswing Ventures investment fit and score it 0-100."},
+                {"role": "user", "content": row["input_text"]},
+                {"role": "assistant", "content": row["target_json"]},
+            ],
+            "metadata": {"domain": row["domain"], "split": row["split"], "source": row["label_source"]},
+        }, ensure_ascii=False)
+        for _, row in tuning_download.iterrows()
+    )
+    jsonl_col.download_button(
+        "Download instruction JSONL",
+        (jsonl_content + ("\n" if jsonl_content else "")).encode("utf-8"),
+        file_name="glasswing_instruction_tuning.jsonl",
+        mime="application/jsonl",
+    )
+    st.dataframe(
+        training_ready[[
+            "domain", "split", "label", "rating", "label_source", "trust_tier",
+        ]],
+        width="stretch",
+        hide_index=True,
+    )
+
+    st.markdown("#### Label Next")
+    st.caption(
+        "The highest-value unlabeled companies: likely positives, borderline "
+        "cases, and places where the rule, learned, or Claude signals disagree. "
+        "Only checked Yes/No decisions become Gold human labels."
+    )
+    review_queue = build_active_review_queue(250)
+    if review_queue.empty:
+        st.info("No evidence-backed companies are waiting for human review.")
+    else:
+        review_editor = st.data_editor(
+            review_queue,
+            width="stretch",
+            hide_index=True,
+            disabled=[
+                "Domain", "Company", "Current Label", "Description",
+                "Website", "Suggested Score", "Python suggestion",
+                "Why review", "Claude", "Evidence confidence",
+            ],
+            column_config={
+                "Review": st.column_config.CheckboxColumn("Save"),
+                "Decision": st.column_config.SelectboxColumn(
+                    "Human decision",
+                    options=["", "yes", "no"],
+                    required=False,
+                ),
+                "Rating": st.column_config.NumberColumn(
+                    "Human score", min_value=0, max_value=100, step=1,
+                ),
+                "Reason": st.column_config.SelectboxColumn(
+                    "Primary reason",
+                    options=[
+                        "", "enterprise_buyer", "strong_technical_moat",
+                        "cybersecurity", "vertical_ai", "physical_ai",
+                        "ai_infrastructure", "consumer_product",
+                        "agency_or_services", "weak_technical_moat",
+                        "too_mature_or_funded", "non_us",
+                        "insufficient_evidence", "other",
+                    ],
+                    required=False,
+                ),
+                "Website": st.column_config.LinkColumn("Website"),
+            },
+            key="active_training_review_editor",
+        )
+        if st.button("Save reviewed labels", type="primary"):
+            selected = review_editor[review_editor["Review"]]
+            invalid = selected[selected["Decision"].astype(str).eq("")]
+            if not invalid.empty:
+                st.error("Every checked row needs a Yes or No decision.")
+            else:
+                for label, target, bucket in (
+                    ("yes", "Investable Candidate", "priority"),
+                    ("no", "Hard Denied", "reject"),
+                ):
+                    group = selected[
+                        selected["Decision"].astype(str).eq(label)
+                    ]
+                    if group.empty:
+                        continue
+                    domains = group["Domain"].map(stable_domain)
+                    scores = dict(zip(
+                        domains,
+                        pd.to_numeric(
+                            group["Rating"], errors="coerce"
+                        ).fillna(0).astype(int),
+                    ))
+                    record_manual_move(
+                        domains,
+                        target_label=target,
+                        target_bucket=bucket,
+                        scores=scores,
+                        note="label_next_human_review",
+                        source="glasswing_dashboard",
+                    )
+                    for reason, reason_group in group.groupby(
+                        group["Reason"].astype(str).replace(
+                            "", "human_reviewed"
+                        )
+                    ):
+                        save_basket_entries(
+                            [
+                                (
+                                    stable_domain(row["Domain"]),
+                                    int(row["Rating"]),
+                                )
+                                for _, row in reason_group.iterrows()
+                            ],
+                            label,
+                            source="human",
+                            reason=str(reason),
+                        )
+                st.success(f"Saved {len(selected)} Gold human labels.")
+                st.rerun()
+
+with tabs[9]:
+    left, right = st.columns(2)
+    with left:
+        st.markdown("#### Pipeline status")
+        st.json(stream_status)
+    with right:
+        st.markdown("#### Active run filters")
+        st.json(load_dashboard_run_config())
+
+    claude_warning = str(
+        stream_status.get("claude_warning", "")
+    ).strip()
+    if claude_warning:
+        st.info(claude_warning)
+
+    st.markdown("#### New-domain registry")
+    registry_cols = st.columns(3)
+    registry_cols[0].metric(
+        "Certificate events",
+        int(
+            stream_status.get(
+                "certificate_events_received",
+                0,
+            )
+            or 0
+        ),
+    )
+    registry_cols[1].metric(
+        "New domains queued",
+        int(
+            stream_status.get(
+                "new_domains_received",
+                stream_status.get("domains_received", 0),
+            )
+            or 0
+        ),
+    )
+    registry_cols[2].metric(
+        "Repeat events ignored",
+        int(
+            stream_status.get(
+                "repeat_events_ignored",
+                0,
+            )
+            or 0
+        ),
+    )
+
+    st.markdown("#### Visible classification reconciliation")
+    reconciliation = pd.DataFrame([
+        {"Bucket": "Investable", "Count": len(investable_candidates)},
+        {"Bucket": "Coming soon", "Count": len(coming_soon)},
+        {"Bucket": "Needs review", "Count": len(needs_review)},
+        {
+            "Bucket": "Insufficient evidence",
+            "Count": len(insufficient_evidence),
+        },
+        {"Bucket": "Hard denied", "Count": len(hard_denied)},
+        {"Bucket": "Visible total", "Count": visible_total},
+    ])
+    st.dataframe(
+        reconciliation,
+        width="stretch",
+        hide_index=True,
+    )
+
+    st.markdown("#### Classification quality")
+    quality_cols = st.columns(3)
+    inaccessible_count = int(
+        insufficient_evidence.get(
+            "routing_reason",
+            pd.Series("", index=insufficient_evidence.index),
+        )
+        .astype(str)
+        .eq("website_unavailable_or_no_usable_company_evidence")
+        .sum()
+    )
+    low_signal_count = int(
+        insufficient_evidence.get(
+            "routing_reason",
+            pd.Series("", index=insufficient_evidence.index),
+        )
+        .astype(str)
+        .eq("no_clear_enterprise_or_glasswing_fit")
+        .sum()
+    )
+    review_with_clear_reason = int(
+        needs_review.get(
+            "routing_reason",
+            pd.Series("", index=needs_review.index),
+        ).astype(str).str.strip().ne("").sum()
+    )
+    quality_cols[0].metric("Inaccessible / no evidence", inaccessible_count)
+    quality_cols[1].metric("Readable but low signal", low_signal_count)
+    quality_cols[2].metric(
+        "Review rows with a reason",
+        f"{review_with_clear_reason}/{len(needs_review)}",
+    )
+    st.caption(
+        "Use these distributions to identify systematic fetch failures or "
+        "classification rules that deserve calibration. Counts respect the "
+        "current-run/history scope and persistent manual overrides."
+    )
+
+    reason_left, reason_right = st.columns(2)
+    with reason_left:
+        st.markdown("##### Hard-denial reasons")
+        safe_dataframe(
+            classification_reason_summary(hard_denied),
+            width="stretch",
+            hide_index=True,
+        )
+    with reason_right:
+        st.markdown("##### Needs-review reasons")
+        safe_dataframe(
+            classification_reason_summary(needs_review),
+            width="stretch",
+            hide_index=True,
+        )
+
+    with st.expander(
+        "Latest continuous pipeline log",
+        expanded=False,
+    ):
+        continuous_log = (
+            ROOT / "logs" / "continuous_pipeline.log"
+        )
+        if continuous_log.exists():
+            lines = continuous_log.read_text(
+                encoding="utf-8",
+                errors="ignore",
+            ).splitlines()
+            st.code(
+                "\n".join(lines[-200:])
+                or "No log entries yet."
+            )
+        else:
+            st.caption("No pipeline log yet.")

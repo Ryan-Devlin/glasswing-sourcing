@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "anysite-ai-search"
+version = "0.1.0"
+description = "Standalone content search engine for .ai websites"
+requires-python = ">=3.11"
+dependencies = [
+  "aiohttp>=3.10,<4",
+  "beautifulsoup4>=4.12,<5",
+  "python-dotenv>=1.0,<2",
+  "streamlit>=1.46,<2",
+  "streamlit-autorefresh>=1.0.1,<2",
+  "websockets>=12,<17",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<9"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

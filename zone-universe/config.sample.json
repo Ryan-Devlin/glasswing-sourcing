@@ -1,0 +1,5 @@
+{
+  "_comment": "cp to config.json, then: chmod 600 config.json. Prefer the macOS keychain (./czds.py store-credentials) over storing a password here. Never put real credentials in this sample file -- it is tracked by git; config.json is not.",
+  "icann.account.username": "you@example.com",
+  "icann.account.password": ""
+}
