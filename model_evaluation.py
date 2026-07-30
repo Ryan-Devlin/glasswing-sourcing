@@ -7,6 +7,7 @@ from pathlib import Path
 
 from classification_store import CLASSIFICATION_DB, MODEL_VERSION, connect_store
 from common import DATA, atomic_write_json, stable_domain
+from db_backend import using_postgres
 
 
 METRICS_PATH = DATA / "metrics" / "model_performance.json"
@@ -43,7 +44,7 @@ def performance_metrics(
         "by_model_version": {},
         "by_extension": {},
     }
-    if not database.exists():
+    if not using_postgres() and not database.exists():
         return empty
     with connect_store(database, read_only=True) as conn:
         rows = conn.execute(

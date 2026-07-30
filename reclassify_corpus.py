@@ -27,10 +27,12 @@ import filter as screening_filter
 from classification_store import (
     CLASSIFICATION_DB,
     MODEL_VERSION,
+    connect_store,
     export_all_screened_csv,
     upsert_classifications,
 )
 from common import AI_SEARCH_DB, DATA, ZONE_UNIVERSE_DB, stable_domain
+from db_backend import using_postgres
 
 
 ZONE_DB = ZONE_UNIVERSE_DB
@@ -139,17 +141,11 @@ def classification_records(
 ) -> dict[str, dict[str, object]]:
     normalized = list(dict.fromkeys(stable_domain(item) for item in domains))
     normalized = [item for item in normalized if item]
-    if not normalized or not path.exists():
+    if not normalized or (not using_postgres() and not path.exists()):
         return {}
 
     results: dict[str, dict[str, object]] = {}
-    with sqlite3.connect(
-        f"file:{path}?mode=ro",
-        uri=True,
-        timeout=30,
-    ) as conn:
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA query_only=ON")
+    with connect_store(path, read_only=True) as conn:
         for start in range(0, len(normalized), 800):
             batch = normalized[start : start + 800]
             marks = ",".join("?" for _ in batch)

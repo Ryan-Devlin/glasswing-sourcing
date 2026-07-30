@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pandas as pd
 from classification_store import CLASSIFICATION_DB, connect_store
+from db_backend import using_postgres
 
 from common import (
     FILTERED,
@@ -61,7 +62,7 @@ def _latest_evidence() -> pd.DataFrame:
     # isolated dataset.  Only consult the default canonical database when this
     # module is using the default data root; otherwise we could mix two stores.
     use_canonical_store = FILTERED.resolve() == DEFAULT_FILTERED_ROOT
-    if use_canonical_store and Path(CLASSIFICATION_DB).exists():
+    if use_canonical_store and (using_postgres() or Path(CLASSIFICATION_DB).exists()):
         records: list[dict[str, object]] = []
         with connect_store(CLASSIFICATION_DB, read_only=True) as conn:
             rows = conn.execute(

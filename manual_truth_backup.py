@@ -22,6 +22,7 @@ from common import (
     read_label_metadata,
     stable_domain,
 )
+from db_backend import begin_immediate, using_postgres
 
 
 SNAPSHOT_ROOT = Path(
@@ -103,7 +104,7 @@ def create_manual_snapshot(
     database = Path(classification_db)
     decisions: list[dict[str, object]] = []
     movements: list[dict[str, object]] = []
-    if database.exists():
+    if using_postgres() or database.exists():
         with connect_store(database, read_only=True) as conn:
             decisions = [
                 dict(row)
@@ -240,7 +241,7 @@ def restore_manual_snapshot(
     overrides = list(payload.get("domain_overrides", []))
     database = Path(classification_db)
     with connect_store(database) as conn:
-        conn.execute("BEGIN IMMEDIATE")
+        begin_immediate(conn)
         conn.execute(
             "DELETE FROM manual_decisions WHERE lower(source) IN "
             f"({','.join('?' for _ in HUMAN_SOURCES)})",

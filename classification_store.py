@@ -17,6 +17,13 @@ from typing import Iterable
 import pandas as pd
 
 from common import DATA, FILTERED, atomic_write_csv, clean, stable_domain
+from db_backend import (
+    PostgresConnection,
+    begin_immediate,
+    connect_postgres,
+    table_columns_postgres,
+    using_postgres,
+)
 
 
 CLASSIFICATION_DB = Path(
@@ -63,7 +70,11 @@ def connect_store(
     path: Path | str = CLASSIFICATION_DB,
     *,
     read_only: bool = False,
-) -> sqlite3.Connection:
+) -> sqlite3.Connection | PostgresConnection:
+    if using_postgres():
+        conn = connect_postgres(read_only=read_only)
+        migrate(conn)
+        return conn
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     if read_only and path.exists():
@@ -84,9 +95,13 @@ def connect_store(
     return conn
 
 
-def migrate(conn: sqlite3.Connection) -> None:
+def migrate(conn: sqlite3.Connection | PostgresConnection) -> None:
+    postgres = isinstance(conn, PostgresConnection)
+    movement_id_column = (
+        "id SERIAL PRIMARY KEY" if postgres else "id INTEGER PRIMARY KEY AUTOINCREMENT"
+    )
     conn.executescript(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS classifications (
             domain TEXT PRIMARY KEY,
             company_name TEXT NOT NULL DEFAULT '',
@@ -108,7 +123,7 @@ def migrate(conn: sqlite3.Connection) -> None:
             word_count INTEGER NOT NULL DEFAULT 0,
             manual_override INTEGER NOT NULL DEFAULT 0,
             manual_override_target TEXT NOT NULL DEFAULT '',
-            record_json TEXT NOT NULL DEFAULT '{}',
+            record_json TEXT NOT NULL DEFAULT '{{}}',
             classified_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             model_version TEXT NOT NULL DEFAULT ''
@@ -133,7 +148,7 @@ def migrate(conn: sqlite3.Connection) -> None:
             ON manual_decisions(target_bucket, decided_at DESC);
 
         CREATE TABLE IF NOT EXISTS movement_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            {movement_id_column},
             domain TEXT NOT NULL,
             from_bucket TEXT NOT NULL DEFAULT '',
             to_bucket TEXT NOT NULL,
@@ -154,10 +169,13 @@ def migrate(conn: sqlite3.Connection) -> None:
         );
         """
     )
-    movement_columns = {
-        str(row["name"])
-        for row in conn.execute("PRAGMA table_info(movement_log)")
-    }
+    if postgres:
+        movement_columns = table_columns_postgres(conn, "movement_log")
+    else:
+        movement_columns = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(movement_log)")
+        }
     if "predicted_bucket" not in movement_columns:
         conn.execute(
             "ALTER TABLE movement_log ADD COLUMN "
@@ -425,7 +443,7 @@ def upsert_classifications(
         f"ON CONFLICT(domain) DO UPDATE SET {updates}"
     )
     with connect_store(path) as conn:
-        conn.execute("BEGIN IMMEDIATE")
+        begin_immediate(conn)
         conn.executemany(
             sql,
             [tuple(record[column] for column in CORE_COLUMNS) for record in records],
@@ -437,11 +455,13 @@ def upsert_classifications(
 def count_classifications(
     path: Path | str = CLASSIFICATION_DB,
 ) -> int:
-    if not Path(path).exists():
+    if not using_postgres() and not Path(path).exists():
         return 0
     with connect_store(path, read_only=True) as conn:
         return int(
-            conn.execute("SELECT count(*) FROM classifications").fetchone()[0]
+            conn.execute(
+                "SELECT count(*) AS total FROM classifications"
+            ).fetchone()["total"]
         )
 
 
@@ -468,7 +488,7 @@ def classification_map(
     domains: Iterable[str] | None = None,
     path: Path | str = CLASSIFICATION_DB,
 ) -> dict[str, str]:
-    if not Path(path).exists():
+    if not using_postgres() and not Path(path).exists():
         return {}
     with connect_store(path, read_only=True) as conn:
         if domains is None:
@@ -521,7 +541,7 @@ def record_manual_move(
     scores = scores or {}
     now = utc_now()
     with connect_store(path) as conn:
-        conn.execute("BEGIN IMMEDIATE")
+        begin_immediate(conn)
         for domain in normalized:
             current = conn.execute(
                 "SELECT routing_bucket, record_json, model_version "
@@ -638,7 +658,7 @@ def recent_movements(
     limit: int = 100,
     path: Path | str = CLASSIFICATION_DB,
 ) -> list[dict[str, object]]:
-    if not Path(path).exists():
+    if not using_postgres() and not Path(path).exists():
         return []
     with connect_store(path, read_only=True) as conn:
         rows = conn.execute(
@@ -654,12 +674,48 @@ def recent_movements(
     return [dict(row) for row in rows]
 
 
+def _crawled_corpus_domains(search_db: Path) -> list[str]:
+    """Domains with crawl evidence in a corpus DB (.AI search / Zone Universe).
+
+    Those corpora stay on SQLite in every deployment mode for now, so this is
+    a plain sqlite3 read regardless of which backend classifications live in.
+    """
+    with sqlite3.connect(f"file:{search_db}?mode=ro", uri=True, timeout=30) as conn:
+        return [
+            str(row[0])
+            for row in conn.execute(
+                "SELECT domain FROM domains WHERE last_crawled_at IS NOT NULL"
+            )
+        ]
+
+
 def corpus_bucket_counts(
     search_db: Path,
     path: Path | str = CLASSIFICATION_DB,
 ) -> dict[str, int]:
-    if not Path(path).exists() or not search_db.exists():
+    if not using_postgres() and not Path(path).exists():
         return {}
+    if not search_db.exists():
+        return {}
+    if using_postgres():
+        domains = _crawled_corpus_domains(search_db)
+        if not domains:
+            return {}
+        counts: dict[str, int] = {}
+        with connect_store(path) as conn:
+            for start in range(0, len(domains), 800):
+                batch = domains[start : start + 800]
+                marks = ",".join("?" for _ in batch)
+                for row in conn.execute(
+                    "SELECT routing_bucket, count(*) AS total "
+                    "FROM classifications "
+                    f"WHERE domain IN ({marks}) "
+                    "GROUP BY routing_bucket",
+                    batch,
+                ).fetchall():
+                    bucket = str(row["routing_bucket"])
+                    counts[bucket] = counts.get(bucket, 0) + int(row["total"])
+        return counts
     with connect_store(path) as conn:
         conn.execute("ATTACH DATABASE ? AS corpus", (str(search_db),))
         rows = conn.execute(
@@ -684,34 +740,75 @@ def query_corpus_classifications(
     path: Path | str = CLASSIFICATION_DB,
 ) -> list[dict[str, object]]:
     bucket_values = list(dict.fromkeys(str(bucket) for bucket in buckets))
-    if not bucket_values or not Path(path).exists() or not search_db.exists():
+    if not bucket_values or not search_db.exists():
+        return []
+    if not using_postgres() and not Path(path).exists():
         return []
     order = {
-        "Fit: high to low": "c.fit_score DESC, c.domain",
-        "Confidence: high to low": "c.confidence_score DESC, c.domain",
-        "Company: A to Z": "lower(c.company_name), c.domain",
-        "Domain: A to Z": "c.domain",
-        "Recently classified": "c.updated_at DESC, c.domain",
-    }.get(sort, "c.priority_score DESC, c.fit_score DESC, c.domain")
-    marks = ",".join("?" for _ in bucket_values)
-    params: list[object] = bucket_values + [
-        max(1, min(int(limit), 250)),
-        max(0, int(offset)),
-    ]
-    with connect_store(path) as conn:
-        conn.execute("ATTACH DATABASE ? AS corpus", (str(search_db),))
-        rows = conn.execute(
-            f"""
-            SELECT c.*
-            FROM classifications c
-            JOIN corpus.domains d ON d.domain=c.domain
-            WHERE d.last_crawled_at IS NOT NULL
-              AND c.routing_bucket IN ({marks})
-            ORDER BY {order}
-            LIMIT ? OFFSET ?
-            """,
-            params,
-        ).fetchall()
+        "Fit: high to low": "fit_score DESC, domain",
+        "Confidence: high to low": "confidence_score DESC, domain",
+        "Company: A to Z": "lower(company_name), domain",
+        "Domain: A to Z": "domain",
+        "Recently classified": "updated_at DESC, domain",
+    }.get(sort, "priority_score DESC, fit_score DESC, domain")
+    bounded_limit = max(1, min(int(limit), 250))
+    bounded_offset = max(0, int(offset))
+    if using_postgres():
+        domains = set(_crawled_corpus_domains(search_db))
+        if not domains:
+            return []
+        rows = []
+        with connect_store(path) as conn:
+            for start in range(0, len(bucket_values), 800):
+                bucket_batch = bucket_values[start : start + 800]
+                bucket_marks = ",".join("?" for _ in bucket_batch)
+                for domain_start in range(0, len(domains), 800):
+                    domain_batch = list(domains)[domain_start : domain_start + 800]
+                    domain_marks = ",".join("?" for _ in domain_batch)
+                    rows.extend(
+                        conn.execute(
+                            "SELECT * FROM classifications "
+                            f"WHERE domain IN ({domain_marks}) "
+                            f"AND routing_bucket IN ({bucket_marks})",
+                            domain_batch + bucket_batch,
+                        ).fetchall()
+                    )
+        rows.sort(key=lambda row: row["domain"])
+        # Sorting/paging across a chunked, batch-fetched result set happens in
+        # Python rather than SQL here -- the corpus is a separate SQLite file,
+        # so the domain filter can't be pushed into the same ORDER BY/LIMIT.
+        sort_key_map = {
+            "Fit: high to low": lambda r: -int(r["fit_score"] or 0),
+            "Confidence: high to low": lambda r: -int(r["confidence_score"] or 0),
+            "Company: A to Z": lambda r: str(r["company_name"] or "").lower(),
+            "Domain: A to Z": lambda r: str(r["domain"] or ""),
+            "Recently classified": lambda r: str(r["updated_at"] or ""),
+        }
+        if sort == "Recently classified":
+            rows.sort(key=sort_key_map[sort], reverse=True)
+        else:
+            rows.sort(key=sort_key_map.get(
+                sort,
+                lambda r: -int(r["priority_score"] or 0),
+            ))
+        rows = rows[bounded_offset : bounded_offset + bounded_limit]
+    else:
+        marks = ",".join("?" for _ in bucket_values)
+        params: list[object] = bucket_values + [bounded_limit, bounded_offset]
+        with connect_store(path) as conn:
+            conn.execute("ATTACH DATABASE ? AS corpus", (str(search_db),))
+            rows = conn.execute(
+                f"""
+                SELECT c.*
+                FROM classifications c
+                JOIN corpus.domains d ON d.domain=c.domain
+                WHERE d.last_crawled_at IS NOT NULL
+                  AND c.routing_bucket IN ({marks})
+                ORDER BY c.{order}
+                LIMIT ? OFFSET ?
+                """,
+                params,
+            ).fetchall()
     results: list[dict[str, object]] = []
     venture_fields = (
         "venture_quality_score",
@@ -739,7 +836,7 @@ def query_corpus_classifications(
 def frame_from_store(
     path: Path | str = CLASSIFICATION_DB,
 ) -> pd.DataFrame:
-    if not Path(path).exists():
+    if not using_postgres() and not Path(path).exists():
         return pd.DataFrame()
     with connect_store(path, read_only=True) as conn:
         rows = conn.execute(

@@ -23,6 +23,7 @@ from common import (
     ZONE_UNIVERSE_DB,
     stable_domain,
 )
+from db_backend import begin_immediate, using_postgres
 from training_truth import protected_training_domains
 
 
@@ -33,7 +34,7 @@ def automated_rejected_domains(
     path: Path | str = CLASSIFICATION_DB,
 ) -> set[str]:
     database = Path(path)
-    if not database.exists():
+    if not using_postgres() and not database.exists():
         return set()
     protected = protected_training_domains()
     with connect_store(database, read_only=True) as conn:
@@ -213,9 +214,9 @@ def purge_automated_rejections(
         return result
 
     classification_path = Path(classification_db)
-    if classification_path.exists():
+    if using_postgres() or classification_path.exists():
         with connect_store(classification_path) as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            begin_immediate(conn)
             result["classification_rows"] += _delete_where(
                 conn, "classifications", "domain", selected
             )
@@ -226,7 +227,9 @@ def purge_automated_rejections(
             # remove historical automated misuse of this table.
             _delete_where(conn, "manual_decisions", "domain", selected)
             conn.commit()
-            if vacuum:
+            # Postgres autovacuums on its own and can't run VACUUM inside a
+            # transaction block; this manual pass is SQLite-only maintenance.
+            if vacuum and not using_postgres():
                 conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                 conn.execute("VACUUM")
 

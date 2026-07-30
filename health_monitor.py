@@ -10,13 +10,14 @@ from pathlib import Path
 
 import pandas as pd
 
-from classification_store import CLASSIFICATION_DB
+from classification_store import CLASSIFICATION_DB, connect_store
 from common import (
     DATA,
     LOGS,
     QUEUE_DB,
     STREAM_STATUS,
 )
+from db_backend import using_postgres
 from manual_truth_backup import list_manual_snapshots
 from model_evaluation import performance_metrics
 from rejection_cleanup import AI_SEARCH_DB, ZONE_DB
@@ -58,13 +59,17 @@ def _database_counts() -> dict[str, int]:
         "zone_indexed": 0,
         "zone_orphans": 0,
     }
-    if CLASSIFICATION_DB.exists():
-        with sqlite3.connect(CLASSIFICATION_DB, timeout=30) as conn:
+    if using_postgres() or CLASSIFICATION_DB.exists():
+        with connect_store(CLASSIFICATION_DB, read_only=True) as conn:
             counts["classifications"] = int(
-                conn.execute("SELECT count(*) FROM classifications").fetchone()[0]
+                conn.execute(
+                    "SELECT count(*) AS total FROM classifications"
+                ).fetchone()["total"]
             )
             counts["manual_decisions"] = int(
-                conn.execute("SELECT count(*) FROM manual_decisions").fetchone()[0]
+                conn.execute(
+                    "SELECT count(*) AS total FROM manual_decisions"
+                ).fetchone()["total"]
             )
     if QUEUE_DB.exists():
         with sqlite3.connect(QUEUE_DB, timeout=30) as conn:
@@ -131,12 +136,34 @@ def health_report(*, include_integrity: bool = False) -> dict[str, object]:
     free_gb = shutil.disk_usage(DATA).free / (1024 ** 3)
     checks: list[dict[str, str]] = []
 
-    for name, path in (
-        ("Classification database", CLASSIFICATION_DB),
-        ("Pipeline queue", QUEUE_DB),
-        (".AI search database", AI_SEARCH_DB),
-        ("Zone database", ZONE_DB),
-    ):
+    if using_postgres():
+        try:
+            with connect_store(CLASSIFICATION_DB, read_only=True):
+                pass
+            checks.append({
+                "Check": "Classification database",
+                "Status": "Healthy",
+                "Detail": "Connected (Postgres)",
+            })
+        except Exception as exc:
+            checks.append({
+                "Check": "Classification database",
+                "Status": "Error",
+                "Detail": f"{type(exc).__name__}: {exc}",
+            })
+        remaining = (
+            ("Pipeline queue", QUEUE_DB),
+            (".AI search database", AI_SEARCH_DB),
+            ("Zone database", ZONE_DB),
+        )
+    else:
+        remaining = (
+            ("Classification database", CLASSIFICATION_DB),
+            ("Pipeline queue", QUEUE_DB),
+            (".AI search database", AI_SEARCH_DB),
+            ("Zone database", ZONE_DB),
+        )
+    for name, path in remaining:
         if not path.exists():
             checks.append({
                 "Check": name,

@@ -25,6 +25,7 @@ from common import (
     read_label_metadata,
     stable_domain,
 )
+from db_backend import begin_immediate, using_postgres
 
 
 GROUND_TRUTH_CSV = MANUAL / "human_ground_truth.csv"
@@ -69,7 +70,7 @@ def protected_training_domains() -> set[str]:
     overrides = _read_csv(OVERRIDES_CSV)
     if not overrides.empty and "domain" in overrides:
         protected.update(overrides["domain"].map(stable_domain))
-    if Path(CLASSIFICATION_DB).exists():
+    if using_postgres() or Path(CLASSIFICATION_DB).exists():
         with connect_store(CLASSIFICATION_DB, read_only=True) as conn:
             protected.update(
                 stable_domain(row["domain"])
@@ -194,9 +195,9 @@ def rebuild_human_ground_truth(
 
     database = Path(classification_db)
     manual_decisions = 0
-    if database.exists():
+    if using_postgres() or database.exists():
         with connect_store(database) as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            begin_immediate(conn)
             # This table is reserved for actions made by a person. Historical
             # jobs incorrectly wrote automated sale detections here.
             conn.execute(
