@@ -67,13 +67,15 @@ def performance_metrics(
             (MODEL_VERSION,),
         ).fetchall()
         classification_total = int(
-            conn.execute("SELECT count(*) FROM classifications").fetchone()[0]
+            conn.execute(
+                "SELECT count(*) AS total FROM classifications"
+            ).fetchone()["total"]
         )
         investable_total = int(
             conn.execute(
-                "SELECT count(*) FROM classifications "
+                "SELECT count(*) AS total FROM classifications "
                 "WHERE routing_bucket='priority'"
-            ).fetchone()[0]
+            ).fetchone()["total"]
         )
     decisions = [
         dict(row)

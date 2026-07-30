@@ -73,7 +73,8 @@ def connect_store(
 ) -> sqlite3.Connection | PostgresConnection:
     if using_postgres():
         conn = connect_postgres(read_only=read_only)
-        migrate(conn)
+        if not read_only:
+            migrate(conn)
         return conn
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
