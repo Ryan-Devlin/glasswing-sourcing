@@ -208,6 +208,12 @@ class RuleCalibrationTests(unittest.TestCase):
 
     def test_live_config_has_no_stale_quantum_filter(self):
         config_path = Path(__file__).resolve().parents[1] / "data" / "run_config.json"
+        if not config_path.exists():
+            # data/ is gitignored (crawl data/local run state, not source), so
+            # a fresh checkout with no local run yet has no config to check.
+            # This test's value is catching a stale filter in *your* actual
+            # saved config, not asserting anything about a clean checkout.
+            self.skipTest("no local run_config.json yet (fresh checkout)")
         config = json.loads(config_path.read_text())
         self.assertEqual(config["include_keywords"], [])
         self.assertEqual(config["exclude_keywords"], [])
