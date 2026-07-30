@@ -36,6 +36,7 @@ from common import (
     save_basket_entries,
     stable_domain,
 )
+from runtime_control import RUNTIME_MODE
 from zone_universe.config import (
     DATABASE,
     PID_FILE,
@@ -129,6 +130,11 @@ def launch_import(
     *,
     limit: int,
 ) -> int:
+    if RUNTIME_MODE != "local":
+        raise RuntimeError(
+            "Process controls are delegated to the cloud runtime. Use the "
+            "cloud platform's worker controls instead."
+        )
     log_path = PROJECT / "logs" / f"import-{tld}.log"
     pid_path = PROJECT / "logs" / f"import-{tld}.pid"
     if process_alive(pid_path):
@@ -1181,14 +1187,25 @@ with tabs[2]:
         disabled=worker_running,
         width="stretch",
     ):
-        st.success(worker_action("start_worker.sh"))
+        if RUNTIME_MODE != "local":
+            st.error(
+                "Process controls are delegated to the cloud runtime. Use "
+                "the cloud platform's worker controls instead."
+            )
+        else:
+            st.success(worker_action("start_worker.sh"))
         st.rerun()
     if stop_col.button(
         "Stop safely",
         disabled=not worker_running,
         width="stretch",
     ):
-        if process_alive(PID_FILE):
+        if RUNTIME_MODE != "local":
+            st.error(
+                "Process controls are delegated to the cloud runtime. Use "
+                "the cloud platform's worker controls instead."
+            )
+        elif process_alive(PID_FILE):
             st.info(worker_action("stop_worker.sh"))
         elif worker_pid is not None:
             os.kill(worker_pid, signal.SIGTERM)

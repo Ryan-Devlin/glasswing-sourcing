@@ -31,6 +31,7 @@ from filter import (
     score_text,
 )
 from glasswing_portfolio import GLASSWING_PORTFOLIO_DOMAINS
+from runtime_control import RUNTIME_MODE
 from training_data import (
     backfill_label_metadata, balanced_instruction_frame,
     build_active_review_queue, build_training_dataset, write_training_exports,
@@ -292,6 +293,12 @@ def read_stream_status() -> dict:
     return status
 
 def start_continuous_pipeline(config: dict) -> None:
+    if RUNTIME_MODE != "local":
+        st.error(
+            "Process controls are delegated to the cloud runtime. Use the "
+            "cloud platform's worker controls instead."
+        )
+        return
     status = read_stream_status()
     stale_pid = 0
     if STREAM_PID.exists():
@@ -358,6 +365,12 @@ def start_continuous_pipeline(config: dict) -> None:
     st.rerun()
 
 def stop_continuous_pipeline() -> None:
+    if RUNTIME_MODE != "local":
+        st.error(
+            "Process controls are delegated to the cloud runtime. Use the "
+            "cloud platform's worker controls instead."
+        )
+        return
     status = read_stream_status()
     if not status.get("running") and not STREAM_PID.exists():
         st.info("The continuous pipeline is already stopped.")
@@ -371,6 +384,12 @@ def stop_continuous_pipeline() -> None:
 
 def reset_current_run() -> None:
     """Stop active work and clear only unfinished current-run state."""
+    if RUNTIME_MODE != "local":
+        st.error(
+            "Process controls are delegated to the cloud runtime. Use the "
+            "cloud platform's worker controls instead."
+        )
+        return
     status = read_stream_status()
     pid = int(status.get("pid", 0) or 0)
 

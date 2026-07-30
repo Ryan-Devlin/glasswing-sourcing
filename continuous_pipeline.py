@@ -34,6 +34,7 @@ from collector import (
 )
 from common import (
     AI_SEARCH_DB,
+    DATA,
     FILTERED,
     LLM,
     LOGS,
@@ -540,7 +541,7 @@ def queue_counts(conn: sqlite3.Connection) -> dict[str, int]:
     return counts
 
 def write_batch_csv(domains: list[str]) -> Path:
-    tmp_dir = ROOT / "data" / "stream_batches"
+    tmp_dir = DATA / "stream_batches"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     path = tmp_dir / f"batch_{int(time.time() * 1000)}.csv"
     now = utc_now()
