@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: glasswing_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/glasswing_ci
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install root dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install ai-domain-search-engine
+        run: pip install -e "ai-domain-search-engine[test]"
+
+      - name: Install zone-universe
+        run: pip install -e "zone-universe[test]"
+
+      - name: Compile check
+        run: |
+          python -m py_compile \
+            main.py dashboard.py pages/ai_search.py pages/zone_universe.py \
+            pages/system_health.py continuous_pipeline.py filter.py collector.py \
+            common.py claude_classifier.py diligence_logic.py \
+            classification_store.py manual_truth_backup.py model_evaluation.py \
+            runtime_control.py worker_supervisor.py health_monitor.py \
+            training_data.py db_backend.py training_truth.py rejection_cleanup.py \
+            reclassify_corpus.py
+
+      - name: Run tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}/ai-domain-search-engine/src:${{ github.workspace }}/zone-universe/src:${{ github.workspace }}
+        run: python -m pytest tests ai-domain-search-engine/tests zone-universe/tests -q
