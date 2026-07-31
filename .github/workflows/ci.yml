@@ -36,7 +36,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install root dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements-dev.txt
 
       - name: Install ai-domain-search-engine
         run: pip install -e "ai-domain-search-engine[test]"
@@ -53,7 +53,7 @@ jobs:
             classification_store.py manual_truth_backup.py model_evaluation.py \
             runtime_control.py worker_supervisor.py health_monitor.py \
             training_data.py db_backend.py training_truth.py rejection_cleanup.py \
-            reclassify_corpus.py
+            reclassify_corpus.py object_storage.py
 
       - name: Run tests
         env:

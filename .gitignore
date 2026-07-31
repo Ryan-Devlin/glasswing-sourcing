@@ -8,6 +8,11 @@ __pycache__/
 **/.DS_Store
 .pytest_cache/
 **/.pytest_cache/
+*.egg-info/
+**/*.egg-info/
+
+# Local Cloudflare Wrangler CLI cache/session state, not project source.
+.wrangler/
 
 # Runtime logs and process/pid state -- not source.
 logs/

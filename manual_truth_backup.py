@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +22,13 @@ from common import (
     stable_domain,
 )
 from db_backend import begin_immediate, using_postgres
+from object_storage import (
+    exists,
+    list_keys,
+    read_bytes,
+    using_object_storage,
+    write_bytes,
+)
 
 
 SNAPSHOT_ROOT = Path(
@@ -31,6 +37,19 @@ SNAPSHOT_ROOT = Path(
         str(MANUAL / "snapshots"),
     )
 ).expanduser().resolve()
+# S3 keys always use '/' regardless of OS; this prefix is only consulted
+# when using_object_storage() is true, so it never touches SNAPSHOT_ROOT.
+OBJECT_STORAGE_SNAPSHOT_PREFIX = os.getenv(
+    "GLASSWING_MANUAL_SNAPSHOT_PREFIX", "manual-snapshots"
+)
+
+
+def _snapshot_root_key(snapshot_root: Path | str | None = None) -> str:
+    if snapshot_root is not None:
+        return str(snapshot_root)
+    if using_object_storage():
+        return OBJECT_STORAGE_SNAPSHOT_PREFIX
+    return str(SNAPSHOT_ROOT)
 HUMAN_SOURCES = {
     "human",
     "manual",
@@ -59,30 +78,6 @@ def _canonical_bytes(payload: dict[str, object]) -> bytes:
 
 def _sha256(payload: dict[str, object]) -> str:
     return hashlib.sha256(_canonical_bytes(payload)).hexdigest()
-
-
-def _atomic_json(path: Path, payload: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_name = ""
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as handle:
-            temporary_name = handle.name
-            json.dump(payload, handle, indent=2, ensure_ascii=False)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary_name, path)
-        temporary_name = ""
-    finally:
-        if temporary_name:
-            Path(temporary_name).unlink(missing_ok=True)
 
 
 def _read_csv(path: Path) -> list[dict[str, object]]:
@@ -156,28 +151,22 @@ def create_manual_snapshot(
     }
     payload["sha256"] = _sha256(payload)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
-    destination = Path(snapshot_root or SNAPSHOT_ROOT) / (
-        f"manual-truth-{stamp}-{uuid.uuid4().hex[:8]}.json"
+    filename = f"manual-truth-{stamp}-{uuid.uuid4().hex[:8]}.json"
+    destination_key = f"{_snapshot_root_key(snapshot_root)}/{filename}"
+    payload_bytes = (
+        json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+    ).encode("utf-8")
+    write_bytes(destination_key, payload_bytes)
+    write_bytes(
+        destination_key + ".sha256",
+        f"{payload['sha256']}  {filename}\n".encode("utf-8"),
     )
-    _atomic_json(destination, payload)
-    checksum_path = destination.with_suffix(destination.suffix + ".sha256")
-    temporary_checksum = checksum_path.with_name(
-        f".{checksum_path.name}.{uuid.uuid4().hex}.tmp"
-    )
-    try:
-        temporary_checksum.write_text(
-            f"{payload['sha256']}  {destination.name}\n",
-            encoding="utf-8",
-        )
-        os.replace(temporary_checksum, checksum_path)
-    finally:
-        temporary_checksum.unlink(missing_ok=True)
-    return destination
+    return Path(destination_key)
 
 
 def validate_manual_snapshot(path: Path | str) -> dict[str, object]:
-    snapshot = Path(path)
-    payload = json.loads(snapshot.read_text(encoding="utf-8"))
+    key = str(path)
+    payload = json.loads(read_bytes(key).decode("utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("Snapshot root must be a JSON object.")
     if int(payload.get("schema_version", 0)) != SCHEMA_VERSION:
@@ -186,9 +175,9 @@ def validate_manual_snapshot(path: Path | str) -> dict[str, object]:
     actual = _sha256(payload)
     if not expected or expected != actual:
         raise ValueError("Manual snapshot checksum does not match.")
-    sidecar = snapshot.with_suffix(snapshot.suffix + ".sha256")
-    if sidecar.exists():
-        sidecar_hash = sidecar.read_text(encoding="utf-8").split()[0]
+    sidecar_key = key + ".sha256"
+    if exists(sidecar_key):
+        sidecar_hash = read_bytes(sidecar_key).decode("utf-8").split()[0]
         if sidecar_hash != actual:
             raise ValueError("Manual snapshot sidecar checksum does not match.")
     return payload
@@ -197,11 +186,14 @@ def validate_manual_snapshot(path: Path | str) -> dict[str, object]:
 def list_manual_snapshots(
     snapshot_root: Path | str | None = None,
 ) -> list[dict[str, object]]:
-    root = Path(snapshot_root or SNAPSHOT_ROOT)
-    if not root.exists():
-        return []
+    prefix = _snapshot_root_key(snapshot_root)
+    keys = sorted(
+        list_keys(prefix, suffix=".json"),
+        reverse=True,
+    )
     rows: list[dict[str, object]] = []
-    for path in sorted(root.glob("manual-truth-*.json"), reverse=True):
+    for key in keys:
+        path = Path(key)
         try:
             payload = validate_manual_snapshot(path)
             rows.append({
@@ -212,7 +204,11 @@ def list_manual_snapshots(
                 "counts": payload.get("counts", {}),
                 "valid": True,
             })
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
+        except Exception as exc:
+            # One bad snapshot must not break the listing -- every failure
+            # mode (local I/O errors, object-storage client errors, bad
+            # JSON, checksum mismatch) surfaces as "invalid" for this row
+            # alone.
             rows.append({
                 "path": path,
                 "name": path.name,
