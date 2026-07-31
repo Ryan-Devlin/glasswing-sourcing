@@ -108,7 +108,7 @@ def _latest_evidence() -> pd.DataFrame:
             return pd.DataFrame(records)
     screened = _read_csv(FILTERED / "all_screened.csv")
     if screened.empty:
-        return screened
+        return pd.DataFrame(columns=["domain"])
     if "domain" not in screened:
         screened["domain"] = screened.get("registrable", "")
     screened["domain"] = screened["domain"].map(stable_domain)
@@ -229,35 +229,48 @@ def build_training_dataset(
             return "claude"
         return "weak_rule"
 
-    ready["label_source"] = ready.apply(provenance, axis=1)
-    ready["label_reason"] = ready["domain"].map(
-        lambda domain: clean(metadata_by_domain.get(domain, {}).get("reason", ""))
-    )
-    ready["trust_tier"] = ready["label_source"].map({
-        "human": "gold",
-        "manual": "gold",
-        "glasswing_dashboard": "gold",
-        "ai_search_page": "gold",
-        "zone_universe_page": "gold",
-        "glasswing_portfolio": "gold",
-    }).fillna("weak")
-    ready["rating"] = pd.to_numeric(ready["rating"], errors="coerce").fillna(0).clip(0, 100).astype(int)
-    ready["split"] = ready["domain"].map(_split)
-    ready["input_text"] = ready.apply(_input_text, axis=1)
-    label_counts = ready["label"].value_counts()
-    ready["sample_weight"] = ready["label"].map(
-        lambda label: round(
-            min(6.0, len(ready) / max(2 * int(label_counts.get(label, 1)), 1)),
-            3,
+    if ready.empty:
+        # pandas' `.apply(axis=1)` on a zero-row frame probes the callable
+        # against a dummy row to infer a return shape; every callable below
+        # indexes into row["..."], so the probe raises and apply falls back
+        # to returning a DataFrame instead of a Series, breaking the
+        # `ready["col"] = ready.apply(...)` assignments below. Skip straight
+        # to empty typed columns instead -- there is nothing to compute.
+        for column in (
+            "split", "label_source", "label_reason", "trust_tier",
+            "sample_weight", "input_text", "target_json",
+        ):
+            ready[column] = pd.Series(dtype=object)
+    else:
+        ready["label_source"] = ready.apply(provenance, axis=1)
+        ready["label_reason"] = ready["domain"].map(
+            lambda domain: clean(metadata_by_domain.get(domain, {}).get("reason", ""))
         )
-    )
-    ready["target_json"] = ready.apply(
-        lambda row: json.dumps(
-            {"label": row["label"], "rating": int(row["rating"])},
-            separators=(",", ":"),
-        ),
-        axis=1,
-    )
+        ready["trust_tier"] = ready["label_source"].map({
+            "human": "gold",
+            "manual": "gold",
+            "glasswing_dashboard": "gold",
+            "ai_search_page": "gold",
+            "zone_universe_page": "gold",
+            "glasswing_portfolio": "gold",
+        }).fillna("weak")
+        ready["rating"] = pd.to_numeric(ready["rating"], errors="coerce").fillna(0).clip(0, 100).astype(int)
+        ready["split"] = ready["domain"].map(_split)
+        ready["input_text"] = ready.apply(_input_text, axis=1)
+        label_counts = ready["label"].value_counts()
+        ready["sample_weight"] = ready["label"].map(
+            lambda label: round(
+                min(6.0, len(ready) / max(2 * int(label_counts.get(label, 1)), 1)),
+                3,
+            )
+        )
+        ready["target_json"] = ready.apply(
+            lambda row: json.dumps(
+                {"label": row["label"], "rating": int(row["rating"])},
+                separators=(",", ":"),
+            ),
+            axis=1,
+        )
     columns = [
         "domain", "domain_url", "split", "label", "rating", "label_source",
         "trust_tier", "label_reason",

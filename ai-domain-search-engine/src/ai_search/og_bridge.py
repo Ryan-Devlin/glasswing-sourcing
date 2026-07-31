@@ -147,36 +147,63 @@ def screenable_domains(
         conn.close()
 
 
+def _table_exists(conn: sqlite3.Connection, schema: str, table: str) -> bool:
+    prefix = f"{schema}." if schema != "main" else ""
+    return (
+        conn.execute(
+            f"SELECT 1 FROM {prefix}sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        ).fetchone()
+        is not None
+    )
+
+
 def pipeline_status_for_corpus(
     search_db: Path,
     queue_db: Path,
     *,
     crawled_only: bool = False,
 ) -> dict[str, int]:
+    # A brand-new deployment can query this before the pipeline queue (or even
+    # the search corpus) has ever been created -- both are ordinary
+    # `CREATE TABLE IF NOT EXISTS` databases owned elsewhere (continuous_pipeline.py,
+    # ai_search/database.py), so an absent table here means "nothing yet", not
+    # an error to surface to the dashboard.
     conn = sqlite3.connect(queue_db, timeout=30)
     conn.row_factory = sqlite3.Row
     try:
         conn.execute("ATTACH DATABASE ? AS search_corpus", (str(search_db),))
+        if not _table_exists(conn, "search_corpus", "domains"):
+            return {"in_screening_registry": 0, "not_queued": 0}
+
         crawl_filter = (
             "AND s.last_crawled_at IS NOT NULL" if crawled_only else ""
         )
-        rows = conn.execute(f"""
-            SELECT q.status, count(*) AS count
-            FROM domains q
-            JOIN search_corpus.domains s ON s.domain=q.domain
-            WHERE 1=1 {crawl_filter}
-            GROUP BY q.status
-        """).fetchall()
-        result = {str(row["status"]): int(row["count"]) for row in rows}
+        queue_ready = _table_exists(conn, "main", "domains")
+        result: dict[str, int] = {}
+        if queue_ready:
+            rows = conn.execute(f"""
+                SELECT q.status, count(*) AS count
+                FROM domains q
+                JOIN search_corpus.domains s ON s.domain=q.domain
+                WHERE 1=1 {crawl_filter}
+                GROUP BY q.status
+            """).fetchall()
+            result = {str(row["status"]): int(row["count"]) for row in rows}
         result["in_screening_registry"] = sum(result.values())
-        result["not_queued"] = int(conn.execute(f"""
-            SELECT count(*) FROM search_corpus.domains s
-            WHERE 1=1 {crawl_filter}
-            AND
-            NOT EXISTS (
-                SELECT 1 FROM domains q WHERE q.domain=s.domain
-            )
-        """).fetchone()[0])
+        if queue_ready:
+            result["not_queued"] = int(conn.execute(f"""
+                SELECT count(*) FROM search_corpus.domains s
+                WHERE 1=1 {crawl_filter}
+                AND
+                NOT EXISTS (
+                    SELECT 1 FROM domains q WHERE q.domain=s.domain
+                )
+            """).fetchone()[0])
+        else:
+            result["not_queued"] = int(conn.execute(f"""
+                SELECT count(*) FROM search_corpus.domains s WHERE 1=1 {crawl_filter}
+            """).fetchone()[0])
         return result
     finally:
         conn.close()
