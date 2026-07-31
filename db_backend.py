@@ -61,6 +61,19 @@ class PostgresConnection:
     def close(self) -> None:
         self._raw.close()
 
+    def copy_out(self, sql: str) -> bytes:
+        """Run a `COPY ... TO STDOUT` and return the raw bytes produced.
+
+        Used for logical backups: streaming a table out via COPY needs no
+        external `pg_dump` binary, so it works identically on a bare Railway
+        container, in CI, and on a developer's Mac.
+        """
+        chunks = bytearray()
+        with self._raw.cursor() as cursor, cursor.copy(sql) as copy:
+            for data in copy:
+                chunks += bytes(data)
+        return bytes(chunks)
+
     def __enter__(self) -> "PostgresConnection":
         return self
 

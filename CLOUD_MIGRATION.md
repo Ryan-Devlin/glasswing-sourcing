@@ -25,6 +25,14 @@ mode is never a one-way removal -- it keeps working with zero configuration.
   yet (blocked on a one-time "enable R2" step in the Cloudflare dashboard, not
   a code dependency). Local files under `GLASSWING_MANUAL_SNAPSHOT_ROOT` are
   the default until `S3_BUCKET` is set.
+- **On-demand Postgres backups** (`backup_database.py`): a logical backup
+  (one CSV per table + manifest + sha256 sidecar) via Postgres's native COPY
+  -- no `pg_dump` binary needed, so it runs identically on Railway, in CI, or
+  a developer's Mac. Written through the same local-file-or-S3 backend as
+  manual snapshots. Run manually (`python backup_database.py`) or wire to a
+  schedule later; Railway's own managed Postgres backups are a separate,
+  paid-plan feature this does not replace -- check Railway's dashboard for
+  that.
 - **CI on every push/PR** (`.github/workflows/ci.yml`): compile-check plus the
   full test suite, including an opt-in Postgres parity test that runs for
   real against an ephemeral `postgres:16` service container. Dependabot

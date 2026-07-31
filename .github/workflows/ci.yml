@@ -61,7 +61,8 @@ jobs:
             classification_store.py manual_truth_backup.py model_evaluation.py \
             runtime_control.py worker_supervisor.py health_monitor.py \
             training_data.py db_backend.py training_truth.py rejection_cleanup.py \
-            reclassify_corpus.py object_storage.py tests/test_page_smoke.py
+            reclassify_corpus.py object_storage.py tests/test_page_smoke.py \
+            backup_database.py tests/test_backup_database.py
 
       - name: Run tests
         env:
