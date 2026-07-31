@@ -44,6 +44,14 @@ jobs:
       - name: Install zone-universe
         run: pip install -e "zone-universe[test]"
 
+      - name: Dependency vulnerability scan
+        run: |
+          pip install pip-audit -q
+          pip-audit -r requirements.txt
+          pip-audit -r requirements-dev.txt
+          (cd ai-domain-search-engine && pip-audit -r requirements.txt)
+          (cd zone-universe && pip-audit -r requirements.txt)
+
       - name: Compile check
         run: |
           python -m py_compile \

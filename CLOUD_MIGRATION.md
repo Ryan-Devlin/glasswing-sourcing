@@ -1,38 +1,90 @@
-# Cloud migration boundary
+# Cloud migration status
 
-The application remains local-first, but new operational code is separated so
-the UI does not depend directly on local PID files or manual CSV rewrites.
+The application is local-first by default and cloud-portable by design: every
+cloud backend is selected purely by an environment variable's presence, never
+by a code branch that has to be flipped for a release. Local SQLite/local-file
+mode is never a one-way removal -- it keeps working with zero configuration.
 
-## Portable services
+## Live today
+
+- **Deployed on Railway** (`web` service, project `glasswing-sourcing`) with a
+  persistent volume for local-only data (pipeline queue, `.AI`/Zone Universe
+  SQLite databases and HTML archives). GitHub-connected auto-deploy on push
+  to `main`, with `railway up`/`railway redeploy` as a manual fallback.
+- **Classification store on PostgreSQL.** `classification_store.py`,
+  `training_truth.py`, `rejection_cleanup.py`, `model_evaluation.py`, and
+  `health_monitor.py` all run against either SQLite or Postgres through
+  `db_backend.py`, chosen by whether `DATABASE_URL` is set. Verified against a
+  live Postgres instance, not just local tests. Local SQLite remains the
+  default when `DATABASE_URL` is unset.
+- **Manual snapshots on S3-compatible object storage.** `manual_truth_backup.py`
+  writes/reads/lists/restores checksummed manual-decision snapshots through
+  `object_storage.py`, chosen by whether `S3_BUCKET` is set. Works with any
+  S3-compatible provider (`S3_ENDPOINT_URL`) -- Cloudflare R2 is the intended
+  provider, selected for its free egress, but the bucket has not been created
+  yet (blocked on a one-time "enable R2" step in the Cloudflare dashboard, not
+  a code dependency). Local files under `GLASSWING_MANUAL_SNAPSHOT_ROOT` are
+  the default until `S3_BUCKET` is set.
+- **CI on every push/PR** (`.github/workflows/ci.yml`): compile-check plus the
+  full test suite, including an opt-in Postgres parity test that runs for
+  real against an ephemeral `postgres:16` service container. Dependabot
+  (`.github/dependabot.yml`) watches all three pip manifests and GitHub
+  Actions weekly.
+- **`GLASSWING_RUNTIME_MODE=cloud`** disables local-process controls (starting
+  crawlers, killing workers) in the Streamlit UI, since Railway's own restart
+  policy owns worker lifecycle for whatever is deployed. Set on the `web`
+  service.
+
+See `.env.example` for every variable and its default (unset = local mode).
+
+## Not yet done
+
+- **Still one Railway service**, not the four-service split below. There is
+  no `pipeline-worker`/`ai-worker`/`zone-worker` split running today --
+  CertStream discovery and crawling are not currently running in the cloud.
+- **`.AI` search and Zone Universe still run on SQLite+FTS5**, unmigrated to
+  Postgres. Full-text search behavior doesn't move to Postgres for free, so
+  this needs its own design pass (`tsvector`/`pg_trgm` or similar), not a
+  drop-in swap.
+- **HTML archives are not on object storage.** They're stored as sharded,
+  append-only files addressed by byte offset + length -- incompatible with
+  S3's immutable-object model without redesigning the storage format
+  (one-object-per-page) and touching the schema and crawler code. Deliberately
+  scoped out as a separate decision rather than rushed.
+
+## Target service split (when the multi-worker split happens)
+
+Separate Railway services from the same repository:
+
+1. `web`: Streamlit dashboard only (live today).
+2. `pipeline-worker`: certificate/new-domain screening.
+3. `ai-worker`: `.AI` discovery and crawling.
+4. `zone-worker`: `.COM`/`.APP` queue crawling.
+5. managed PostgreSQL: classifications, decisions, queues, health heartbeats
+   (live today).
+6. S3-compatible object storage: HTML packs and manual snapshots (manual
+   snapshots live today; HTML packs not yet designed).
+
+## Portable service modules
 
 - `manual_truth_backup.py` owns checksummed human-only snapshots and restore.
 - `runtime_control.py` owns desired worker state and local process operations.
 - `health_monitor.py` owns read-only readiness checks.
 - `model_evaluation.py` owns frozen-version human-feedback metrics.
 - `training_data.py` owns the active-learning `Label Next` queue.
+- `db_backend.py` / `object_storage.py` own the SQLite-or-Postgres and
+  local-file-or-S3 selection, respectively.
 
-## Railway deployment shape
+## Remaining migration sequence
 
-Use separate Railway services from the same repository:
-
-1. `web`: Streamlit dashboard only.
-2. `pipeline-worker`: certificate/new-domain screening.
-3. `ai-worker`: `.AI` discovery and crawling.
-4. `zone-worker`: `.COM/.APP` queue crawling.
-5. managed PostgreSQL: classifications, decisions, queues, health heartbeats.
-6. S3-compatible object storage: HTML packs and manual snapshots.
-
-Set `GLASSWING_RUNTIME_MODE=cloud` for the web service. Railway restart policies
-replace `worker_supervisor.py`; the System Health UI remains the observability
-surface but does not attempt to spawn or signal sibling containers.
-
-## Migration sequence
-
-1. Put current data/log paths on a persistent Railway volume using the
-   variables in `.env.example`.
-2. Move HTML archives and manual snapshots to object storage.
-3. Replace the SQLite implementations behind the service modules with
-   PostgreSQL repositories.
-4. Run the web and three workers as separate services.
-5. Keep `human_ground_truth.csv` as an export, not the cloud source of truth.
-
+1. ~~Put current data/log paths on a persistent Railway volume.~~ Done.
+2. ~~Replace the SQLite classification store with a PostgreSQL-or-SQLite
+   dual backend.~~ Done.
+3. ~~Move manual snapshots to object storage (dual backend).~~ Done, pending
+   R2 bucket creation.
+4. Design and migrate HTML archives to object storage.
+5. Migrate `.AI`/Zone Universe search databases to Postgres (or another
+   full-text-capable cloud store).
+6. Run the web and three workers as separate services.
+7. Keep `human_ground_truth.csv` as an export, not the cloud source of truth
+   (already true today -- Postgres holds the live table).

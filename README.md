@@ -135,8 +135,12 @@ those snapshots, reports database/index integrity and model reversal metrics,
 and controls all local workers through a bounded-restart supervisor.
 
 The application is local-first but cloud-portable. Configure storage roots
-with `.env.example`; see `CLOUD_MIGRATION.md` for the Railway service split and
-PostgreSQL/object-storage migration sequence.
+with `.env.example`. It is deployed today on Railway with a PostgreSQL
+classification store and S3-compatible object storage for manual snapshots,
+both selected purely by environment variable presence -- local SQLite/local
+files remain the default with no configuration required. See
+`CLOUD_MIGRATION.md` for what's live, what's not yet migrated, and the target
+Railway service split.
 
 For a code-level map, see `CODE_MENTAL_MODEL.md`.
 
