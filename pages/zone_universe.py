@@ -56,8 +56,6 @@ st.markdown(
     <style>
     .block-container{max-width:1750px;padding:1rem 1.5rem 3rem}
     h1{font-size:1.9rem!important;margin-bottom:.1rem!important}
-    div[data-testid="stMetric"]{border:1px solid rgba(128,128,128,.18);
-    border-radius:10px;padding:.55rem .75rem}
     div[data-testid="stDataFrame"]{border:1px solid rgba(128,128,128,.18);
     border-radius:10px;overflow:hidden}
     </style>
