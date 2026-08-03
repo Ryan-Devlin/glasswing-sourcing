@@ -466,6 +466,32 @@ def count_classifications(
         )
 
 
+def search_classifications(
+    query: str,
+    *,
+    limit: int = 5,
+    path: Path | str = CLASSIFICATION_DB,
+) -> list[dict]:
+    """Simple substring match on domain/title -- not full-text search, just
+    enough to surface a tracked company by name from a single search box."""
+    query = query.strip()
+    if not query or (not using_postgres() and not Path(path).exists()):
+        return []
+    needle = f"%{query.lower()}%"
+    with connect_store(path, read_only=True) as conn:
+        rows = conn.execute(
+            """
+            SELECT domain, company_name, routing_bucket, final_url, updated_at
+            FROM classifications
+            WHERE lower(domain) LIKE ? OR lower(company_name) LIKE ?
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            (needle, needle, limit),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def bootstrap_from_csv(
     csv_path: Path = FILTERED / "all_screened.csv",
     path: Path | str = CLASSIFICATION_DB,

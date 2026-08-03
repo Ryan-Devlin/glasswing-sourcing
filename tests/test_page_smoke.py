@@ -77,6 +77,16 @@ class PageSmokeTests(unittest.TestCase):
             msg=f"{page_relpath} raised during render:\n{result.stdout}\n{result.stderr}",
         )
 
+    def test_overview_renders_without_exception(self):
+        # Loaded through main.py, not directly -- overview.py uses
+        # st.page_link(), which needs the page registry st.navigation()
+        # builds. AppTest.from_file() on a subpage skips that registry
+        # entirely (a harness limitation, not a real navigation issue: this
+        # is also the actual path a real visitor takes, since Overview is
+        # the default landing page).
+        with tempfile.TemporaryDirectory() as tmp_path:
+            self._assert_page_renders_cleanly("main.py", Path(tmp_path))
+
     def test_dashboard_renders_without_exception(self):
         with tempfile.TemporaryDirectory() as tmp_path:
             self._assert_page_renders_cleanly("dashboard.py", Path(tmp_path))
