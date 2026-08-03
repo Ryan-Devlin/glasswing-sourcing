@@ -27,6 +27,11 @@ def _live_postgres_url() -> str | None:
     return url
 
 
+def _clear_other_database_env(monkeypatch):
+    for var in ("PIPELINE_DATABASE_URL", "AI_SEARCH_DATABASE_URL", "ZONE_UNIVERSE_DATABASE_URL"):
+        monkeypatch.delenv(var, raising=False)
+
+
 @pytest.mark.skipif(
     _live_postgres_url() is None,
     reason="set TEST_DATABASE_URL to a reachable Postgres to run this",
@@ -34,6 +39,7 @@ def _live_postgres_url() -> str | None:
 def test_backup_contains_every_table_with_matching_checksum(tmp_path, monkeypatch):
     url = _live_postgres_url()
     monkeypatch.setenv("DATABASE_URL", url)
+    _clear_other_database_env(monkeypatch)
     monkeypatch.setenv("GLASSWING_DB_BACKUP_ROOT", str(tmp_path))
     test_domain = "pg-backup-test.ai"
 
@@ -54,7 +60,9 @@ def test_backup_contains_every_table_with_matching_checksum(tmp_path, monkeypatc
 
         import backup_database
 
-        key = backup_database.create_database_backup()
+        result = backup_database.create_database_backup()
+        assert set(result.keys()) == {"classification_store"}
+        key = result["classification_store"]
         payload = open(key, "rb").read()
 
         with open(f"{key}.sha256") as sidecar:
@@ -76,11 +84,36 @@ def test_backup_contains_every_table_with_matching_checksum(tmp_path, monkeypatc
             conn.commit()
 
 
+@pytest.mark.skipif(
+    _live_postgres_url() is None,
+    reason="set TEST_DATABASE_URL to a reachable Postgres to run this",
+)
+def test_backup_only_covers_subsystems_actually_on_postgres(tmp_path, monkeypatch):
+    url = _live_postgres_url()
+    monkeypatch.setenv("DATABASE_URL", url)
+    monkeypatch.setenv("PIPELINE_DATABASE_URL", url)
+    monkeypatch.delenv("AI_SEARCH_DATABASE_URL", raising=False)
+    monkeypatch.delenv("ZONE_UNIVERSE_DATABASE_URL", raising=False)
+    monkeypatch.setenv("GLASSWING_DB_BACKUP_ROOT", str(tmp_path))
+
+    # Ensure the pipeline schema/tables exist regardless of test execution
+    # order -- this test shouldn't depend on test_continuous_pipeline_postgres.py
+    # having already run first in the same suite.
+    import continuous_pipeline
+    continuous_pipeline.connect_db().close()
+
+    import backup_database
+
+    result = backup_database.create_database_backup()
+    assert set(result.keys()) == {"classification_store", "pipeline"}
+
+
 def test_create_database_backup_refuses_local_mode(monkeypatch, tmp_path):
     monkeypatch.delenv("DATABASE_URL", raising=False)
+    _clear_other_database_env(monkeypatch)
     monkeypatch.setenv("GLASSWING_DB_BACKUP_ROOT", str(tmp_path))
 
     import backup_database
 
-    with pytest.raises(RuntimeError, match="DATABASE_URL"):
+    with pytest.raises(RuntimeError, match="nothing to back up"):
         backup_database.create_database_backup()

@@ -33,10 +33,13 @@ mode is never a one-way removal -- it keeps working with zero configuration.
   (one CSV per table + manifest + sha256 sidecar) via Postgres's native COPY
   -- no `pg_dump` binary needed, so it runs identically on Railway, in CI, or
   a developer's Mac. Written through the same local-file-or-S3 backend as
-  manual snapshots. Run manually (`python backup_database.py`) or wire to a
-  schedule later; Railway's own managed Postgres backups are a separate,
-  paid-plan feature this does not replace -- check Railway's dashboard for
-  that.
+  manual snapshots. Covers **every** subsystem currently on Postgres, not
+  just the classification store -- it checks all four env-var gates and
+  backs up whichever are actually active, skipping the rest (nothing to
+  back up for a subsystem still on local SQLite). Run manually
+  (`python backup_database.py`) or wire to a schedule later; Railway's own
+  managed Postgres backups are a separate, paid-plan feature this does not
+  replace -- check Railway's dashboard for that.
 - **CI on every push/PR** (`.github/workflows/ci.yml`): compile-check plus the
   full test suite, including an opt-in Postgres parity test that runs for
   real against an ephemeral `postgres:16` service container. Dependabot
@@ -162,20 +165,29 @@ See `.env.example` for every variable and its default (unset = local mode).
   this could bite -- found specifically because a real cutover looked
   imminent, not through the general worker-path audit above.
 
+- **The real cutover is done.** `PIPELINE_DATABASE_URL`, `AI_SEARCH_DATABASE_URL`,
+  and `ZONE_UNIVERSE_DATABASE_URL` are set on the live `web` service (each a
+  live `${{Postgres.DATABASE_URL}}` reference), and the real local data for
+  all three was copied over and verified byte-for-byte against the original
+  SQLite counts. R2 is enabled and `S3_BUCKET`/`S3_ENDPOINT_URL`/
+  `S3_ACCESS_KEY_ID`/`S3_SECRET_ACCESS_KEY` are set too, so newly crawled
+  pages archive to R2 from here on (the existing local archive was not
+  bulk-migrated -- old and new pointers coexist fine, by design). Verified
+  live, not just "deployed successfully": confirmed all four subsystems
+  report `using_postgres() == True` inside the actual running web service,
+  toured every page/tab on the real production URL with zero errors, and
+  ran a real backup of all four Postgres subsystems that landed in R2.
+  Local SQLite files remain untouched as the fallback.
+
 ## Not yet done
 
 - **Still one Railway service**, not the four-service split below. There is
   no `pipeline-worker`/`ai-worker`/`zone-worker` split running today --
   CertStream discovery and crawling are not currently running in the cloud.
-- **None of these backends are actually turned on for real data.** Every
-  Postgres/S3 dual-backend built this session is built, tested, and
-  verified against the live database -- but every new env var
-  (`PIPELINE_DATABASE_URL`, `AI_SEARCH_DATABASE_URL`,
-  `ZONE_UNIVERSE_DATABASE_URL`, `S3_BUCKET` for HTML archives) is
-  deliberately unset in the live Railway deployment. Flipping any of them on
-  for the real, already-crawled corpus is a separate, deliberate decision --
-  not something to do opportunistically, especially since R2 itself isn't
-  enabled yet.
+  This is the one piece left, and it's a different kind of decision than
+  everything above: it means real, continuous crawling and Anthropic API
+  spend running unattended, not a storage/database setting. Needs the
+  user's explicit go-ahead, not something to start opportunistically.
 
 ## Target service split (when the multi-worker split happens)
 
