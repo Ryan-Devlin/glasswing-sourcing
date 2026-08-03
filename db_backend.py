@@ -103,6 +103,18 @@ def connect_postgres(
         os.environ[env_var],
         row_factory=dict_row,
         autocommit=False,
+        # Without these, a dropped connection (laptop sleep, wifi hiccup,
+        # a long-running script left unattended) hangs forever waiting on a
+        # socket read that will never complete -- there's no query running
+        # for Postgres to time out, so statement_timeout doesn't help. TCP
+        # keepalives make the OS notice a dead peer and raise an error
+        # instead of hanging silently (~30s idle, then a probe every 10s,
+        # give up after 3 failed probes -- so a real hang surfaces in well
+        # under a minute rather than never).
+        keepalives=1,
+        keepalives_idle=30,
+        keepalives_interval=10,
+        keepalives_count=3,
     )
     if read_only:
         with raw.cursor() as cursor:

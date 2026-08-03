@@ -34,6 +34,10 @@ TABLES_IN_FK_ORDER = (
 )
 SEQUENCES = ("domains", "pages", "crawl_attempts", "watch_queries")
 BATCH_SIZE = 2000
+# Smaller than BATCH_SIZE: each search_vector row does 5 to_tsvector() calls
+# (slower than a plain row copy), so commit more often -- less redone work,
+# more frequent progress output if this step is ever interrupted.
+SEARCH_VECTOR_BATCH_SIZE = 500
 
 
 def _sqlite_columns(conn: sqlite3.Connection, table: str) -> list[str]:
@@ -124,7 +128,7 @@ def migrate(*, execute: bool = False, progress: bool = False) -> dict[str, int]:
                 for page_id in page_ids:
                     index_page(pg_conn, page_id)
                     indexed += 1
-                    if indexed % BATCH_SIZE == 0:
+                    if indexed % SEARCH_VECTOR_BATCH_SIZE == 0:
                         pg_conn.commit()
                         if progress:
                             print(

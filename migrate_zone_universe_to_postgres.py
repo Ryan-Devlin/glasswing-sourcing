@@ -33,6 +33,10 @@ TABLES = (
     "crawl_retries", "domain_registration", "registration_queue", "html_blobs",
 )
 BATCH_SIZE = 2000
+# Smaller than BATCH_SIZE: each search_vector row does 5 to_tsvector() calls
+# (slower than a plain row copy), so commit more often -- less redone work,
+# more frequent progress output if this step is ever interrupted.
+SEARCH_VECTOR_BATCH_SIZE = 500
 
 
 def _sqlite_columns(conn: sqlite3.Connection, table: str) -> list[str]:
@@ -105,7 +109,7 @@ def _populate_search_vector(pg_conn, *, progress: bool) -> int:
             row["domain"], row["title"], row["meta_description"],
             row["headings"], row["cleaned_text"], row["id"],
         ))
-        if i % BATCH_SIZE == 0:
+        if i % SEARCH_VECTOR_BATCH_SIZE == 0:
             pg_conn.commit()
             if progress:
                 print(f"  search_vector: {i}/{len(rows)}", file=sys.stderr)
