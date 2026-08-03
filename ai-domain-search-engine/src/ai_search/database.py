@@ -92,11 +92,11 @@ CREATE TABLE IF NOT EXISTS pages (
     crawled_at TEXT NOT NULL,
     raw_html_hash TEXT NOT NULL DEFAULT '',
     html_archive_path TEXT NOT NULL DEFAULT '',
-    html_archive_offset INTEGER NOT NULL DEFAULT 0,
-    html_archive_length INTEGER NOT NULL DEFAULT 0,
+    html_archive_offset BIGINT NOT NULL DEFAULT 0,
+    html_archive_length BIGINT NOT NULL DEFAULT 0,
     html_archive_codec TEXT NOT NULL DEFAULT '',
-    raw_html_bytes INTEGER NOT NULL DEFAULT 0,
-    compressed_html_bytes INTEGER NOT NULL DEFAULT 0,
+    raw_html_bytes BIGINT NOT NULL DEFAULT 0,
+    compressed_html_bytes BIGINT NOT NULL DEFAULT 0,
     search_vector tsvector,
     UNIQUE(domain_id, final_url)
 );
@@ -143,10 +143,10 @@ CREATE TABLE IF NOT EXISTS query_discoveries (
 CREATE TABLE IF NOT EXISTS html_blobs (
     raw_html_hash TEXT PRIMARY KEY,
     archive_path TEXT NOT NULL,
-    archive_offset INTEGER NOT NULL DEFAULT 0,
-    archive_length INTEGER NOT NULL DEFAULT 0,
+    archive_offset BIGINT NOT NULL DEFAULT 0,
+    archive_length BIGINT NOT NULL DEFAULT 0,
     archive_codec TEXT NOT NULL DEFAULT '',
-    raw_bytes INTEGER NOT NULL DEFAULT 0,
+    raw_bytes BIGINT NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_domains_crawl
@@ -160,6 +160,23 @@ CREATE INDEX IF NOT EXISTS idx_pages_search_vector ON pages USING GIN(search_vec
 
 def migrate_postgres(conn: PostgresConnection) -> None:
     conn.executescript(_POSTGRES_SCHEMA)
+    conn.commit()
+    # These columns were originally created as plain INTEGER. zone_universe's
+    # real .com zone file overflowed the equivalent columns there (~4.8GB vs
+    # Postgres's ~2.1GB 32-bit int max) -- something SQLite's flexible typing
+    # never catches. These are the same shape of column (append-only archive
+    # byte offsets/lengths), so widen them here too before they hit the same
+    # wall as the archive grows. Widening is a safe, lossless conversion, so
+    # this always runs rather than only guarding for a missing column.
+    conn.executescript("""
+        ALTER TABLE pages ALTER COLUMN html_archive_offset TYPE BIGINT;
+        ALTER TABLE pages ALTER COLUMN html_archive_length TYPE BIGINT;
+        ALTER TABLE pages ALTER COLUMN raw_html_bytes TYPE BIGINT;
+        ALTER TABLE pages ALTER COLUMN compressed_html_bytes TYPE BIGINT;
+        ALTER TABLE html_blobs ALTER COLUMN archive_offset TYPE BIGINT;
+        ALTER TABLE html_blobs ALTER COLUMN archive_length TYPE BIGINT;
+        ALTER TABLE html_blobs ALTER COLUMN raw_bytes TYPE BIGINT;
+    """)
     conn.commit()
 
 

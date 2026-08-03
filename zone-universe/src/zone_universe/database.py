@@ -65,7 +65,7 @@ _POSTGRES_SCHEMA = """
 CREATE TABLE IF NOT EXISTS zones (
     tld TEXT PRIMARY KEY,
     zone_path TEXT NOT NULL DEFAULT '',
-    source_size INTEGER NOT NULL DEFAULT 0,
+    source_size BIGINT NOT NULL DEFAULT 0,
     source_modified_at TEXT NOT NULL DEFAULT '',
     source_fingerprint TEXT NOT NULL DEFAULT '',
     import_status TEXT NOT NULL DEFAULT 'not_imported',
@@ -88,8 +88,8 @@ CREATE TABLE IF NOT EXISTS shards (
     shard INTEGER NOT NULL,
     priority INTEGER NOT NULL DEFAULT 1,
     path TEXT NOT NULL,
-    byte_offset INTEGER NOT NULL DEFAULT 0,
-    total_bytes INTEGER NOT NULL DEFAULT 0,
+    byte_offset BIGINT NOT NULL DEFAULT 0,
+    total_bytes BIGINT NOT NULL DEFAULT 0,
     queued_domains INTEGER NOT NULL DEFAULT 0,
     attempted INTEGER NOT NULL DEFAULT 0,
     success INTEGER NOT NULL DEFAULT 0,
@@ -119,12 +119,12 @@ CREATE TABLE IF NOT EXISTS pages (
     raw_html_zlib BYTEA,
     raw_html_hash TEXT NOT NULL DEFAULT '',
     html_archive_path TEXT NOT NULL DEFAULT '',
-    html_archive_offset INTEGER NOT NULL DEFAULT 0,
-    html_archive_length INTEGER NOT NULL DEFAULT 0,
+    html_archive_offset BIGINT NOT NULL DEFAULT 0,
+    html_archive_length BIGINT NOT NULL DEFAULT 0,
     html_archive_codec TEXT NOT NULL DEFAULT '',
     document_count INTEGER NOT NULL DEFAULT 1,
-    raw_html_bytes INTEGER NOT NULL DEFAULT 0,
-    compressed_html_bytes INTEGER NOT NULL DEFAULT 0,
+    raw_html_bytes BIGINT NOT NULL DEFAULT 0,
+    compressed_html_bytes BIGINT NOT NULL DEFAULT 0,
     http_status INTEGER,
     word_count INTEGER NOT NULL DEFAULT 0,
     content_hash TEXT NOT NULL DEFAULT '',
@@ -196,10 +196,10 @@ CREATE INDEX IF NOT EXISTS idx_registration_queue_next
 CREATE TABLE IF NOT EXISTS html_blobs (
     raw_html_hash TEXT PRIMARY KEY,
     archive_path TEXT NOT NULL,
-    archive_offset INTEGER NOT NULL DEFAULT 0,
-    archive_length INTEGER NOT NULL DEFAULT 0,
+    archive_offset BIGINT NOT NULL DEFAULT 0,
+    archive_length BIGINT NOT NULL DEFAULT 0,
     archive_codec TEXT NOT NULL DEFAULT '',
-    raw_bytes INTEGER NOT NULL DEFAULT 0,
+    raw_bytes BIGINT NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
 );
 CREATE OR REPLACE VIEW domains AS
@@ -209,6 +209,24 @@ CREATE OR REPLACE VIEW domains AS
 
 def migrate_postgres(conn: PostgresConnection) -> None:
     conn.executescript(_POSTGRES_SCHEMA)
+    conn.commit()
+    # These columns were originally created as plain INTEGER; a real .com
+    # zone file's source_size (~4.8GB) overflows Postgres's 32-bit int range
+    # (max ~2.1GB), something SQLite's flexible typing never caught. Widening
+    # is a safe, lossless conversion (existing values fit fine into BIGINT),
+    # so this always runs rather than only guarding for a missing column.
+    conn.executescript("""
+        ALTER TABLE zones ALTER COLUMN source_size TYPE BIGINT;
+        ALTER TABLE shards ALTER COLUMN byte_offset TYPE BIGINT;
+        ALTER TABLE shards ALTER COLUMN total_bytes TYPE BIGINT;
+        ALTER TABLE pages ALTER COLUMN html_archive_offset TYPE BIGINT;
+        ALTER TABLE pages ALTER COLUMN html_archive_length TYPE BIGINT;
+        ALTER TABLE pages ALTER COLUMN raw_html_bytes TYPE BIGINT;
+        ALTER TABLE pages ALTER COLUMN compressed_html_bytes TYPE BIGINT;
+        ALTER TABLE html_blobs ALTER COLUMN archive_offset TYPE BIGINT;
+        ALTER TABLE html_blobs ALTER COLUMN archive_length TYPE BIGINT;
+        ALTER TABLE html_blobs ALTER COLUMN raw_bytes TYPE BIGINT;
+    """)
     conn.commit()
 
 
