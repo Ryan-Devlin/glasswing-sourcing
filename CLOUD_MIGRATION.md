@@ -24,11 +24,12 @@ mode is never a one-way removal -- it keeps working with zero configuration.
 - **Manual snapshots on S3-compatible object storage.** `manual_truth_backup.py`
   writes/reads/lists/restores checksummed manual-decision snapshots through
   `object_storage.py`, chosen by whether `S3_BUCKET` is set. Works with any
-  S3-compatible provider (`S3_ENDPOINT_URL`) -- Cloudflare R2 is the intended
-  provider, selected for its free egress, but the bucket has not been created
-  yet (blocked on a one-time "enable R2" step in the Cloudflare dashboard, not
-  a code dependency). Local files under `GLASSWING_MANUAL_SNAPSHOT_ROOT` are
-  the default until `S3_BUCKET` is set.
+  S3-compatible provider (`S3_ENDPOINT_URL`) -- Cloudflare R2 is the provider
+  in use, selected for its free egress. R2 is enabled and `S3_BUCKET`/
+  `S3_ENDPOINT_URL`/`S3_ACCESS_KEY_ID`/`S3_SECRET_ACCESS_KEY` are set on the
+  `web` service; verified with a real write/read round-trip. Local files
+  under `GLASSWING_MANUAL_SNAPSHOT_ROOT` remain the default when `S3_BUCKET`
+  is unset.
 - **On-demand Postgres backups** (`backup_database.py`): a logical backup
   (one CSV per table + manifest + sha256 sidecar) via Postgres's native COPY
   -- no `pg_dump` binary needed, so it runs identically on Railway, in CI, or
@@ -54,12 +55,14 @@ See `.env.example` for every variable and its default (unset = local mode).
 
 - **CertStream pipeline queue has a tested Postgres dual-backend**
   (`continuous_pipeline.py`), built and verified against the real live
-  database the same way the classification store was. Deliberately **not**
-  wired into any running process yet: `continuous_pipeline.py` isn't
-  imported by anything the deployed `web` service runs today (only by
-  tests, and by its own local-only `__main__` entrypoint, which cloud mode
-  already disables), so this is pure groundwork with zero live effect. The
-  one piece kept working differently on purpose: `claim_batch()`'s
+  database the same way the classification store was. `PIPELINE_DATABASE_URL`
+  is now set on the `web` service and the real queue data was migrated over,
+  so `health_monitor.py`'s pipeline counts (shown on Overview and System
+  Health) read live from Postgres. Still **not** actually running anywhere:
+  `continuous_pipeline.py`'s own screening loop (`__main__` entrypoint,
+  which cloud mode disables) isn't started on any service today -- that's
+  the multi-service split below, a separate decision. The one piece kept
+  working differently on purpose: `claim_batch()`'s
   domain-priority ordering used SQLite's `ATTACH DATABASE` to cheaply JOIN
   against the (still-local) ai_search/zone_universe corpora; Postgres has no
   ATTACH equivalent, so the Postgres path instead pulls a bounded candidate
@@ -68,18 +71,19 @@ See `.env.example` for every variable and its default (unset = local mode).
   realistic batch sizes, but not a byte-for-byte behavioral clone at extreme
   queue depth.
 
-- **HTML archives have a tested S3 dual-backend**, but the real archived
-  corpus (years of crawled pages) has **not been migrated into it** -- both
-  `html_archive.py` modules (ai_search, zone_universe) now write one S3
-  object per page when `S3_BUCKET` is set, reusing the exact same
+- **HTML archives have a tested S3 dual-backend, live for new pages.** Both
+  `html_archive.py` modules (ai_search, zone_universe) write one S3 object
+  per page now that `S3_BUCKET` is set, reusing the exact same
   `ArchivePointer` shape (path/offset/length/codec) the local sharded format
   already used, so no schema change was needed. `read_html()` tells old
   local pointers apart from new S3 ones by shape alone (local paths are
-  always absolute; S3 keys deliberately aren't), so old and new rows can
-  coexist in the same corpus indefinitely -- there's no forced cutover
-  moment. Bulk-migrating the real existing archive (real money, real
-  bandwidth, and R2 itself isn't enabled yet) is a separate, deliberate,
-  explicitly-confirmed action, not something to run opportunistically.
+  always absolute; S3 keys deliberately aren't), so old and new rows
+  coexist in the same corpus today -- there's no forced cutover moment. The
+  real *existing* archive (years of crawled pages, already local) has
+  **not been bulk-migrated into R2** -- that's real money and bandwidth,
+  a separate, deliberate, explicitly-confirmed action, not something to run
+  opportunistically. It isn't necessary for R2 to be "live": new crawls
+  already land there.
 - **`.AI` search (ai_search subproject) has a tested Postgres dual-backend**,
   gated on its own `AI_SEARCH_DATABASE_URL` (never the classification
   store's `DATABASE_URL`). Covers the full schema (domains/pages/
@@ -148,11 +152,11 @@ See `.env.example` for every variable and its default (unset = local mode).
   ai_search domains / 12,218 pages; 11,371 zone_universe pages) and reports
   the exact real row counts. The ai_search/zone_universe tools also
   recompute `search_vector` per page after copying, since a tsvector has no
-  direct FTS5 equivalent to copy across. **Actually running `--execute`
-  against the real corpora is deliberately not something this session did**
-  -- that write was blocked by Claude Code's own safety classifier when
-  attempted, correctly, since it's real production data. Running it for
-  real is a decision for you to make explicitly.
+  direct FTS5 equivalent to copy across. Running `--execute` against real
+  production data is a one-way, real-money action Claude Code's own safety
+  classifier correctly refuses to run unattended -- so you ran all three
+  yourself from your own terminal, and all three completed successfully
+  (see "The real cutover is done" below).
 
 - **`health_monitor.py` and `rejection_cleanup.py`'s System Health checks
   were hardcoded to raw SQLite** against the ai_search/zone_universe files,
@@ -163,7 +167,17 @@ See `.env.example` for every variable and its default (unset = local mode).
   instead of the real live data. Fixed and verified live end-to-end (seeded
   a real page in Postgres, ran the rebuild, confirmed correct counts) before
   this could bite -- found specifically because a real cutover looked
-  imminent, not through the general worker-path audit above.
+  imminent, not through the general worker-path audit above. The same
+  hardcoded-SQLite gap existed for the pipeline queue's counts too (missed in
+  the first pass since the pipeline queue wasn't cut over yet at the time) --
+  found after the real cutover and fixed the same way, gated on
+  `PIPELINE_DATABASE_URL`.
+- **System Health's "Cloud readiness" tab is now a live status check, not a
+  static aspirational table.** It shows each subsystem's actual current
+  backend (Postgres vs. local SQLite, S3 vs. local files) by checking
+  `using_postgres()`/`using_object_storage()` directly, plus an on-demand
+  "Back up Postgres now" button that calls `backup_database.py` from the UI
+  (previously terminal-only).
 
 - **The real cutover is done.** `PIPELINE_DATABASE_URL`, `AI_SEARCH_DATABASE_URL`,
   and `ZONE_UNIVERSE_DATABASE_URL` are set on the live `web` service (each a
@@ -193,13 +207,14 @@ See `.env.example` for every variable and its default (unset = local mode).
 
 This used to be hard-blocked: Railway doesn't share one volume across
 services, and the workers wrote local SQLite files the `web` service read
-directly. That's no longer true in principle -- every database involved
-(classifications, pipeline queue, ai_search, zone_universe) now has a tested
-Postgres dual-backend, so each worker service could point at the same
-shared Postgres instead of a shared volume. It's just not turned on: the
-live deployment still runs everything on local SQLite/local files today, so
-actually splitting into separate services is still a deliberate, unstarted
-step, not an automatic consequence of the backends existing.
+directly. That's no longer true, and not just in principle -- every database
+involved (classifications, pipeline queue, ai_search, zone_universe) is now
+actually on the same shared Postgres instance, each in its own schema, and
+the `web` service already reads all four through it. What's missing is the
+workers themselves: no `pipeline-worker`/`ai-worker`/`zone-worker` service
+exists yet, so nothing is claiming queue rows or crawling right now.
+Starting those is still a deliberate, unstarted step -- it's real,
+continuous crawling and Anthropic API spend, not a config change.
 
 Separate Railway services from the same repository:
 
@@ -207,11 +222,13 @@ Separate Railway services from the same repository:
 2. `pipeline-worker`: certificate/new-domain screening.
 3. `ai-worker`: `.AI` discovery and crawling.
 4. `zone-worker`: `.COM`/`.APP` queue crawling.
-5. managed PostgreSQL: classifications (live), pipeline queue, ai_search,
-   zone_universe (all three built + verified, not yet turned on for real
-   data), health heartbeats.
-6. S3-compatible object storage: HTML packs (built + verified, not yet
-   migrated for real data) and manual snapshots (live today, pending R2).
+5. managed PostgreSQL: classifications, pipeline queue, ai_search,
+   zone_universe -- all four live today, read and written through the same
+   Postgres instance; the workers that would add new rows to the pipeline
+   queue and crawl aren't running yet, so its counts only reflect the
+   one-time migration.
+6. S3-compatible object storage: HTML packs (live for new crawls; the
+   pre-existing archive was not bulk-migrated) and manual snapshots (live).
 
 ## Portable service modules
 
@@ -228,20 +245,19 @@ Separate Railway services from the same repository:
 1. ~~Put current data/log paths on a persistent Railway volume.~~ Done.
 2. ~~Replace the SQLite classification store with a PostgreSQL-or-SQLite
    dual backend.~~ Done.
-3. ~~Move manual snapshots to object storage (dual backend).~~ Done, pending
-   R2 bucket creation.
+3. ~~Move manual snapshots to object storage (dual backend).~~ Done, R2 live.
 4. ~~Design and build a dual object-storage backend for HTML archives.~~
-   Done. Bulk-migrating the real existing archive into it is separate and
-   still pending (needs R2 enabled, and its own explicit go-ahead given the
+   Done, live for new crawls. Bulk-migrating the real existing archive into
+   it is separate and still pending (its own explicit go-ahead given the
    cost/bandwidth involved).
 5. ~~Add a Postgres-or-SQLite dual backend for the pipeline queue.~~ Done,
-   verified live; not wired to anything running today.
-6. ~~Migrate `.AI` search (FTS5 -> tsvector/ts_rank_cd) to Postgres.~~ Done
-   for the dashboard-reachable code paths; the crawler worker's own paths
-   (`screenable_domains`, `crawler.py`, `maintenance.py`, `worker.py`) still
-   assume SQLite.
+   real data migrated and live on the `web` service; no worker is running
+   to add to it yet.
+6. ~~Migrate `.AI` search (FTS5 -> tsvector/ts_rank_cd) to Postgres.~~ Done,
+   real data migrated and live, including the crawler worker's own paths
+   (`screenable_domains`, `crawler.py`, `maintenance.py`, `worker.py`).
 7. ~~Migrate Zone Universe search (FTS5 -> tsvector/ts_rank_cd) to
-   Postgres.~~ Done, same scope/caveats as step 6.
+   Postgres.~~ Done, same scope as step 6, real data migrated and live.
 8. Run the web and three workers as separate services.
 9. Keep `human_ground_truth.csv` as an export, not the cloud source of truth
    (already true today -- Postgres holds the live table).

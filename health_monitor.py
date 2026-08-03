@@ -19,13 +19,17 @@ from common import (
     QUEUE_DB,
     STREAM_STATUS,
 )
-from db_backend import PostgresConnection, using_postgres
+from db_backend import PostgresConnection, connect_postgres, using_postgres
 from manual_truth_backup import list_manual_snapshots
 from model_evaluation import performance_metrics
 from rejection_cleanup import AI_SEARCH_DB, ZONE_DB
 from runtime_control import runtime_status
 from zone_universe.database import ZONE_UNIVERSE_DATABASE_ENV_VAR
 from zone_universe.database import connect as connect_zone_universe
+
+# Same dedicated env var continuous_pipeline.py gates on -- never the
+# classification store's DATABASE_URL (see continuous_pipeline.connect_db).
+PIPELINE_DATABASE_ENV_VAR = "PIPELINE_DATABASE_URL"
 
 
 def _json(path: Path) -> dict[str, object]:
@@ -75,7 +79,18 @@ def _database_counts() -> dict[str, int]:
                     "SELECT count(*) AS total FROM manual_decisions"
                 ).fetchone()["total"]
             )
-    if QUEUE_DB.exists():
+    if using_postgres(PIPELINE_DATABASE_ENV_VAR):
+        conn = connect_postgres(read_only=True, env_var=PIPELINE_DATABASE_ENV_VAR)
+        try:
+            conn.execute("SET search_path TO pipeline, public")
+            for row in conn.execute(
+                "SELECT status, count(*) AS total FROM domains GROUP BY status"
+            ).fetchall():
+                if row["status"] in {"pending", "processing"}:
+                    counts[f"pipeline_{row['status']}"] = int(row["total"])
+        finally:
+            conn.close()
+    elif QUEUE_DB.exists():
         with sqlite3.connect(QUEUE_DB, timeout=30) as conn:
             for status, total in conn.execute(
                 "SELECT status,count(*) FROM domains GROUP BY status"
