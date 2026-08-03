@@ -14,7 +14,10 @@ works correctly against real data before that step is ever considered.
 from __future__ import annotations
 
 import argparse
+import os
 import sqlite3
+import sys
+from urllib.parse import urlparse
 
 from common import QUEUE_DB
 from continuous_pipeline import PIPELINE_DATABASE_ENV_VAR, _connect_db_postgres
@@ -28,7 +31,7 @@ def _sqlite_columns(conn: sqlite3.Connection, table: str) -> list[str]:
     return [str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")]
 
 
-def migrate(*, execute: bool = False) -> dict[str, int]:
+def migrate(*, execute: bool = False, progress: bool = False) -> dict[str, int]:
     if not using_postgres(PIPELINE_DATABASE_ENV_VAR):
         raise RuntimeError(
             f"Set {PIPELINE_DATABASE_ENV_VAR} before running this "
@@ -52,6 +55,7 @@ def migrate(*, execute: bool = False) -> dict[str, int]:
                 column_list = ",".join(columns)
                 placeholders = ",".join("?" for _ in columns)
                 batch: list[tuple] = []
+                copied = 0
                 for row in rows:
                     batch.append(tuple(row[c] for c in columns))
                     if len(batch) >= BATCH_SIZE:
@@ -61,7 +65,10 @@ def migrate(*, execute: bool = False) -> dict[str, int]:
                             batch,
                         )
                         pg_conn.commit()
+                        copied += len(batch)
                         batch = []
+                        if progress:
+                            print(f"  {table}: {copied}/{len(rows)}", file=sys.stderr)
                 if batch:
                     pg_conn.executemany(
                         f"INSERT INTO {table}({column_list}) "
@@ -69,11 +76,25 @@ def migrate(*, execute: bool = False) -> dict[str, int]:
                         batch,
                     )
                     pg_conn.commit()
+                    copied += len(batch)
+                if progress:
+                    print(f"  {table}: {copied}/{len(rows)} (done)", file=sys.stderr)
         finally:
             pg_conn.close()
     finally:
         sqlite_conn.close()
     return counts
+
+
+def _confirm(env_var: str) -> None:
+    url = os.environ[env_var]
+    parsed = urlparse(url)
+    host = parsed.hostname or "unknown-host"
+    dbname = (parsed.path or "").lstrip("/") or "unknown-db"
+    print(f"About to WRITE real data into Postgres at {host}/{dbname}.")
+    if input("Type 'yes' to continue: ").strip().lower() != "yes":
+        print("Aborted -- nothing written.")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
@@ -83,8 +104,16 @@ if __name__ == "__main__":
         action="store_true",
         help="Actually copy rows into Postgres (default: dry run, count only)",
     )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip the interactive confirmation prompt (for automation)",
+    )
     args = parser.parse_args()
-    result = migrate(execute=args.execute)
+    if args.execute and not args.yes:
+        _confirm(PIPELINE_DATABASE_ENV_VAR)
+    result = migrate(execute=args.execute, progress=args.execute)
     mode = "copied" if args.execute else "would copy (dry run)"
+    print()
     for table, count in result.items():
         print(f"{table}: {mode} {count} rows")

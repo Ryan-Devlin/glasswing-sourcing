@@ -18,7 +18,10 @@ deliberate step this script does not take.
 from __future__ import annotations
 
 import argparse
+import os
 import sqlite3
+import sys
+from urllib.parse import urlparse
 
 from ai_search.database import AI_SEARCH_DATABASE_ENV_VAR, connect, index_page
 from common import AI_SEARCH_DB
@@ -37,7 +40,9 @@ def _sqlite_columns(conn: sqlite3.Connection, table: str) -> list[str]:
     return [str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")]
 
 
-def _copy_table(sqlite_conn, pg_conn, table: str, *, execute: bool) -> int:
+def _copy_table(
+    sqlite_conn, pg_conn, table: str, *, execute: bool, progress: bool
+) -> int:
     columns = _sqlite_columns(sqlite_conn, table)
     rows = sqlite_conn.execute(f"SELECT * FROM {table}").fetchall()
     if not execute or not rows:
@@ -45,6 +50,7 @@ def _copy_table(sqlite_conn, pg_conn, table: str, *, execute: bool) -> int:
     column_list = ",".join(columns)
     placeholders = ",".join("?" for _ in columns)
     batch: list[tuple] = []
+    copied = 0
     for row in rows:
         batch.append(tuple(row[c] for c in columns))
         if len(batch) >= BATCH_SIZE:
@@ -54,7 +60,10 @@ def _copy_table(sqlite_conn, pg_conn, table: str, *, execute: bool) -> int:
                 batch,
             )
             pg_conn.commit()
+            copied += len(batch)
             batch = []
+            if progress:
+                print(f"  {table}: {copied}/{len(rows)}", file=sys.stderr)
     if batch:
         pg_conn.executemany(
             f"INSERT INTO {table}({column_list}) VALUES ({placeholders}) "
@@ -62,10 +71,13 @@ def _copy_table(sqlite_conn, pg_conn, table: str, *, execute: bool) -> int:
             batch,
         )
         pg_conn.commit()
+        copied += len(batch)
+    if progress:
+        print(f"  {table}: {copied}/{len(rows)} (done)", file=sys.stderr)
     return len(rows)
 
 
-def migrate(*, execute: bool = False) -> dict[str, int]:
+def migrate(*, execute: bool = False, progress: bool = False) -> dict[str, int]:
     if not using_postgres(AI_SEARCH_DATABASE_ENV_VAR):
         raise RuntimeError(
             f"Set {AI_SEARCH_DATABASE_ENV_VAR} before running this "
@@ -82,7 +94,7 @@ def migrate(*, execute: bool = False) -> dict[str, int]:
         try:
             for table in TABLES_IN_FK_ORDER:
                 counts[table] = _copy_table(
-                    sqlite_conn, pg_conn, table, execute=execute
+                    sqlite_conn, pg_conn, table, execute=execute, progress=progress
                 )
             if execute:
                 for table in SEQUENCES:
@@ -94,19 +106,43 @@ def migrate(*, execute: bool = False) -> dict[str, int]:
                     """)
                 pg_conn.commit()
 
+                page_ids = [
+                    row["id"] for row in pg_conn.execute("SELECT id FROM pages").fetchall()
+                ]
                 indexed = 0
-                for row in pg_conn.execute("SELECT id FROM pages").fetchall():
-                    index_page(pg_conn, row["id"])
+                for page_id in page_ids:
+                    index_page(pg_conn, page_id)
                     indexed += 1
                     if indexed % BATCH_SIZE == 0:
                         pg_conn.commit()
+                        if progress:
+                            print(
+                                f"  search_vector: {indexed}/{len(page_ids)}",
+                                file=sys.stderr,
+                            )
                 pg_conn.commit()
+                if progress:
+                    print(
+                        f"  search_vector: {indexed}/{len(page_ids)} (done)",
+                        file=sys.stderr,
+                    )
                 counts["search_vector_populated"] = indexed
         finally:
             pg_conn.close()
     finally:
         sqlite_conn.close()
     return counts
+
+
+def _confirm(env_var: str) -> None:
+    url = os.environ[env_var]
+    parsed = urlparse(url)
+    host = parsed.hostname or "unknown-host"
+    dbname = (parsed.path or "").lstrip("/") or "unknown-db"
+    print(f"About to WRITE real data into Postgres at {host}/{dbname}.")
+    if input("Type 'yes' to continue: ").strip().lower() != "yes":
+        print("Aborted -- nothing written.")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
@@ -116,8 +152,16 @@ if __name__ == "__main__":
         action="store_true",
         help="Actually copy rows into Postgres (default: dry run, count only)",
     )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip the interactive confirmation prompt (for automation)",
+    )
     args = parser.parse_args()
-    result = migrate(execute=args.execute)
+    if args.execute and not args.yes:
+        _confirm(AI_SEARCH_DATABASE_ENV_VAR)
+    result = migrate(execute=args.execute, progress=args.execute)
     mode = "copied" if args.execute else "would copy (dry run)"
+    print()
     for table, count in result.items():
         print(f"{table}: {mode} {count} rows")

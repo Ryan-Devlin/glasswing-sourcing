@@ -33,12 +33,14 @@ zone_universe} and/or the S3 backend for HTML archives, for real data.
    ```
 3. **Run the real copy** (`--execute`). This only ever adds rows
    (`ON CONFLICT DO NOTHING`) -- it never deletes or modifies the local
-   SQLite file, so it's safe to re-run if interrupted:
+   SQLite file, so it's safe to re-run if interrupted. It will show you the
+   target host/database and ask you to type `yes` before writing anything
+   (pass `--yes` to skip that prompt for a scripted/automated run):
    ```
    PIPELINE_DATABASE_URL="$(cat /tmp/pg.txt)" python migrate_pipeline_to_postgres.py --execute
    ```
    `ai_search`/`zone_universe`'s versions take longer (search_vector is
-   recomputed per page after the copy).
+   recomputed per page after the copy) and print progress to stderr as they go.
 4. **Verify** row counts in Postgres match the dry-run counts, and spot-check
    a few real rows/searches before touching the live deployment at all.
 5. **Only once verified**, set the matching env var on the `web` service in

@@ -19,7 +19,10 @@ separate, deliberate step this script does not take.
 from __future__ import annotations
 
 import argparse
+import os
 import sqlite3
+import sys
+from urllib.parse import urlparse
 
 from common import ZONE_UNIVERSE_DB
 from db_backend import using_postgres
@@ -36,7 +39,9 @@ def _sqlite_columns(conn: sqlite3.Connection, table: str) -> list[str]:
     return [str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")]
 
 
-def _copy_table(sqlite_conn, pg_conn, table: str, *, execute: bool) -> int:
+def _copy_table(
+    sqlite_conn, pg_conn, table: str, *, execute: bool, progress: bool
+) -> int:
     columns = _sqlite_columns(sqlite_conn, table)
     rows = sqlite_conn.execute(f"SELECT * FROM {table}").fetchall()
     if not execute or not rows:
@@ -44,6 +49,7 @@ def _copy_table(sqlite_conn, pg_conn, table: str, *, execute: bool) -> int:
     column_list = ",".join(columns)
     placeholders = ",".join("?" for _ in columns)
     batch: list[tuple] = []
+    copied = 0
     for row in rows:
         batch.append(tuple(row[c] for c in columns))
         if len(batch) >= BATCH_SIZE:
@@ -53,7 +59,10 @@ def _copy_table(sqlite_conn, pg_conn, table: str, *, execute: bool) -> int:
                 batch,
             )
             pg_conn.commit()
+            copied += len(batch)
             batch = []
+            if progress:
+                print(f"  {table}: {copied}/{len(rows)}", file=sys.stderr)
     if batch:
         pg_conn.executemany(
             f"INSERT INTO {table}({column_list}) VALUES ({placeholders}) "
@@ -61,10 +70,13 @@ def _copy_table(sqlite_conn, pg_conn, table: str, *, execute: bool) -> int:
             batch,
         )
         pg_conn.commit()
+        copied += len(batch)
+    if progress:
+        print(f"  {table}: {copied}/{len(rows)} (done)", file=sys.stderr)
     return len(rows)
 
 
-def _populate_search_vector(pg_conn) -> int:
+def _populate_search_vector(pg_conn, *, progress: bool) -> int:
     rows = pg_conn.execute(
         "SELECT id, domain, title, meta_description, headings, cleaned_text "
         "FROM pages"
@@ -84,11 +96,15 @@ def _populate_search_vector(pg_conn) -> int:
         ))
         if i % BATCH_SIZE == 0:
             pg_conn.commit()
+            if progress:
+                print(f"  search_vector: {i}/{len(rows)}", file=sys.stderr)
     pg_conn.commit()
+    if progress:
+        print(f"  search_vector: {len(rows)}/{len(rows)} (done)", file=sys.stderr)
     return len(rows)
 
 
-def migrate(*, execute: bool = False) -> dict[str, int]:
+def migrate(*, execute: bool = False, progress: bool = False) -> dict[str, int]:
     if not using_postgres(ZONE_UNIVERSE_DATABASE_ENV_VAR):
         raise RuntimeError(
             f"Set {ZONE_UNIVERSE_DATABASE_ENV_VAR} before running this "
@@ -107,7 +123,7 @@ def migrate(*, execute: bool = False) -> dict[str, int]:
         try:
             for table in TABLES:
                 counts[table] = _copy_table(
-                    sqlite_conn, pg_conn, table, execute=execute
+                    sqlite_conn, pg_conn, table, execute=execute, progress=progress
                 )
             if execute:
                 pg_conn.execute("""
@@ -117,12 +133,25 @@ def migrate(*, execute: bool = False) -> dict[str, int]:
                     )
                 """)
                 pg_conn.commit()
-                counts["search_vector_populated"] = _populate_search_vector(pg_conn)
+                counts["search_vector_populated"] = _populate_search_vector(
+                    pg_conn, progress=progress
+                )
         finally:
             pg_conn.close()
     finally:
         sqlite_conn.close()
     return counts
+
+
+def _confirm(env_var: str) -> None:
+    url = os.environ[env_var]
+    parsed = urlparse(url)
+    host = parsed.hostname or "unknown-host"
+    dbname = (parsed.path or "").lstrip("/") or "unknown-db"
+    print(f"About to WRITE real data into Postgres at {host}/{dbname}.")
+    if input("Type 'yes' to continue: ").strip().lower() != "yes":
+        print("Aborted -- nothing written.")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
@@ -132,8 +161,16 @@ if __name__ == "__main__":
         action="store_true",
         help="Actually copy rows into Postgres (default: dry run, count only)",
     )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip the interactive confirmation prompt (for automation)",
+    )
     args = parser.parse_args()
-    result = migrate(execute=args.execute)
+    if args.execute and not args.yes:
+        _confirm(ZONE_UNIVERSE_DATABASE_ENV_VAR)
+    result = migrate(execute=args.execute, progress=args.execute)
     mode = "copied" if args.execute else "would copy (dry run)"
+    print()
     for table, count in result.items():
         print(f"{table}: {mode} {count} rows")
