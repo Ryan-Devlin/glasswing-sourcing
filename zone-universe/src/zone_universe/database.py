@@ -4,7 +4,11 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+from db_backend import PostgresConnection, connect_postgres, using_postgres
+
 from .config import DATABASE
+
+ZONE_UNIVERSE_DATABASE_ENV_VAR = "ZONE_UNIVERSE_DATABASE_URL"
 
 
 def utc_now() -> str:
@@ -15,7 +19,26 @@ def connect(
     path: Path | str = DATABASE,
     *,
     read_only: bool = False,
-) -> sqlite3.Connection:
+) -> sqlite3.Connection | PostgresConnection:
+    # Its own env var, not the classification store's DATABASE_URL (already
+    # live in production) or ai_search's AI_SEARCH_DATABASE_URL -- each
+    # Postgres-backed subsystem needs an unambiguous, dedicated signal so
+    # enabling one never silently enables another.
+    if using_postgres(ZONE_UNIVERSE_DATABASE_ENV_VAR):
+        conn = connect_postgres(
+            read_only=read_only, env_var=ZONE_UNIVERSE_DATABASE_ENV_VAR
+        )
+        # Own "zone_universe" schema, not "public" -- classification_store,
+        # continuous_pipeline, and ai_search all define same-named tables
+        # (domains/pages/...) and could easily end up pointed at the same
+        # physical Postgres instance (Railway only provides one today).
+        if not read_only:
+            conn.execute("CREATE SCHEMA IF NOT EXISTS zone_universe")
+            conn.commit()
+        conn.execute("SET search_path TO zone_universe, public")
+        if not read_only:
+            migrate_postgres(conn)
+        return conn
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     if read_only and path.exists():
@@ -36,6 +59,157 @@ def connect(
     conn.execute("PRAGMA busy_timeout=30000")
     migrate(conn)
     return conn
+
+
+_POSTGRES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS zones (
+    tld TEXT PRIMARY KEY,
+    zone_path TEXT NOT NULL DEFAULT '',
+    source_size INTEGER NOT NULL DEFAULT 0,
+    source_modified_at TEXT NOT NULL DEFAULT '',
+    source_fingerprint TEXT NOT NULL DEFAULT '',
+    import_status TEXT NOT NULL DEFAULT 'not_imported',
+    imported_at TEXT,
+    discovered_domains INTEGER NOT NULL DEFAULT 0,
+    shard_count INTEGER NOT NULL DEFAULT 0,
+    active_queue_version TEXT NOT NULL DEFAULT '',
+    import_error TEXT NOT NULL DEFAULT '',
+    rejected_gibberish INTEGER NOT NULL DEFAULT 0,
+    snapshot_path TEXT NOT NULL DEFAULT '',
+    added_domains INTEGER NOT NULL DEFAULT 0,
+    removed_domains INTEGER NOT NULL DEFAULT 0,
+    unchanged_domains INTEGER NOT NULL DEFAULT 0,
+    delta_added_path TEXT NOT NULL DEFAULT '',
+    delta_removed_path TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS shards (
+    tld TEXT NOT NULL,
+    queue_version TEXT NOT NULL,
+    shard INTEGER NOT NULL,
+    priority INTEGER NOT NULL DEFAULT 1,
+    path TEXT NOT NULL,
+    byte_offset INTEGER NOT NULL DEFAULT 0,
+    total_bytes INTEGER NOT NULL DEFAULT 0,
+    queued_domains INTEGER NOT NULL DEFAULT 0,
+    attempted INTEGER NOT NULL DEFAULT 0,
+    success INTEGER NOT NULL DEFAULT 0,
+    dns_error INTEGER NOT NULL DEFAULT 0,
+    timeout INTEGER NOT NULL DEFAULT 0,
+    blocked INTEGER NOT NULL DEFAULT 0,
+    http_error INTEGER NOT NULL DEFAULT 0,
+    empty INTEGER NOT NULL DEFAULT 0,
+    other_error INTEGER NOT NULL DEFAULT 0,
+    skipped_existing INTEGER NOT NULL DEFAULT 0,
+    skipped_low_priority INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(tld, queue_version, shard)
+);
+CREATE INDEX IF NOT EXISTS idx_shards_pending
+    ON shards(tld, queue_version, priority, byte_offset, total_bytes);
+CREATE TABLE IF NOT EXISTS pages (
+    id SERIAL PRIMARY KEY,
+    domain TEXT NOT NULL UNIQUE,
+    tld TEXT NOT NULL,
+    requested_url TEXT NOT NULL DEFAULT '',
+    final_url TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    meta_description TEXT NOT NULL DEFAULT '',
+    headings TEXT NOT NULL DEFAULT '',
+    cleaned_text TEXT NOT NULL DEFAULT '',
+    raw_html_zlib BYTEA,
+    raw_html_hash TEXT NOT NULL DEFAULT '',
+    html_archive_path TEXT NOT NULL DEFAULT '',
+    html_archive_offset INTEGER NOT NULL DEFAULT 0,
+    html_archive_length INTEGER NOT NULL DEFAULT 0,
+    html_archive_codec TEXT NOT NULL DEFAULT '',
+    document_count INTEGER NOT NULL DEFAULT 1,
+    raw_html_bytes INTEGER NOT NULL DEFAULT 0,
+    compressed_html_bytes INTEGER NOT NULL DEFAULT 0,
+    http_status INTEGER,
+    word_count INTEGER NOT NULL DEFAULT 0,
+    content_hash TEXT NOT NULL DEFAULT '',
+    language TEXT NOT NULL DEFAULT '',
+    is_parked INTEGER NOT NULL DEFAULT 0,
+    is_coming_soon INTEGER NOT NULL DEFAULT 0,
+    crawl_duration_ms INTEGER NOT NULL DEFAULT 0,
+    enrichment_reason TEXT NOT NULL DEFAULT '',
+    crawled_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    search_vector tsvector
+);
+CREATE INDEX IF NOT EXISTS idx_pages_tld_crawled ON pages(tld, crawled_at DESC);
+CREATE INDEX IF NOT EXISTS idx_pages_word_count ON pages(word_count DESC);
+CREATE INDEX IF NOT EXISTS idx_pages_raw_html_hash ON pages(raw_html_hash);
+CREATE INDEX IF NOT EXISTS idx_pages_search_vector ON pages USING GIN(search_vector);
+CREATE TABLE IF NOT EXISTS worker_state (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS event_log (
+    id SERIAL PRIMARY KEY,
+    event_type TEXT NOT NULL,
+    tld TEXT NOT NULL DEFAULT '',
+    message TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_event_log_created ON event_log(created_at DESC);
+CREATE TABLE IF NOT EXISTS crawl_retries (
+    domain TEXT PRIMARY KEY,
+    tld TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT NOT NULL,
+    last_status TEXT NOT NULL DEFAULT '',
+    last_error TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_crawl_retries_due
+    ON crawl_retries(tld, next_attempt_at, attempts);
+CREATE TABLE IF NOT EXISTS domain_registration (
+    domain TEXT PRIMARY KEY,
+    tld TEXT NOT NULL,
+    registration_at TEXT NOT NULL DEFAULT '',
+    expiration_at TEXT NOT NULL DEFAULT '',
+    changed_at TEXT NOT NULL DEFAULT '',
+    registrar TEXT NOT NULL DEFAULT '',
+    rdap_status TEXT NOT NULL DEFAULT '',
+    lookup_status TEXT NOT NULL DEFAULT '',
+    lookup_error TEXT NOT NULL DEFAULT '',
+    rdap_url TEXT NOT NULL DEFAULT '',
+    checked_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_domain_registration_registered
+    ON domain_registration(registration_at);
+CREATE TABLE IF NOT EXISTS registration_queue (
+    domain TEXT PRIMARY KEY,
+    tld TEXT NOT NULL,
+    priority INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT NOT NULL DEFAULT '',
+    last_error TEXT NOT NULL DEFAULT '',
+    queued_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_registration_queue_next
+    ON registration_queue(status, next_attempt_at, priority DESC, queued_at);
+CREATE TABLE IF NOT EXISTS html_blobs (
+    raw_html_hash TEXT PRIMARY KEY,
+    archive_path TEXT NOT NULL,
+    archive_offset INTEGER NOT NULL DEFAULT 0,
+    archive_length INTEGER NOT NULL DEFAULT 0,
+    archive_codec TEXT NOT NULL DEFAULT '',
+    raw_bytes INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+CREATE OR REPLACE VIEW domains AS
+    SELECT domain, crawled_at AS last_crawled_at FROM pages;
+"""
+
+
+def migrate_postgres(conn: PostgresConnection) -> None:
+    conn.executescript(_POSTGRES_SCHEMA)
+    conn.commit()
 
 
 def migrate(conn: sqlite3.Connection) -> None:
@@ -308,6 +482,12 @@ def log_event(
 
 
 def diagnostics(conn: sqlite3.Connection) -> dict[str, int]:
+    postgres = isinstance(conn, PostgresConnection)
+    searchable_pages_sql = (
+        "SELECT count(*) FROM pages WHERE search_vector IS NOT NULL"
+        if postgres
+        else "SELECT count(*) FROM page_search"
+    )
     values = {
         "zones": "SELECT count(*) FROM zones",
         "queued_domains": (
@@ -326,7 +506,7 @@ def diagnostics(conn: sqlite3.Connection) -> dict[str, int]:
             "AND z.active_queue_version=s.queue_version"
         ),
         "success": "SELECT count(*) FROM pages",
-        "searchable_pages": "SELECT count(*) FROM page_search",
+        "searchable_pages": searchable_pages_sql,
         "documents": (
             "SELECT coalesce(sum(document_count),0) FROM pages"
         ),
@@ -346,7 +526,7 @@ def diagnostics(conn: sqlite3.Connection) -> dict[str, int]:
             "SELECT DISTINCT html_archive_path,html_archive_offset,"
             "html_archive_length AS archive_length "
             "FROM pages WHERE html_archive_path<>''"
-            ")),0)"
+            ") AS t),0)"
         ),
         "gibberish_rejected": (
             "SELECT coalesce(sum(rejected_gibberish),0) FROM zones"
@@ -362,6 +542,6 @@ def diagnostics(conn: sqlite3.Connection) -> dict[str, int]:
         ),
     }
     return {
-        name: int(conn.execute(sql).fetchone()[0])
+        name: int(conn.execute(f"SELECT ({sql}) AS count").fetchone()["count"])
         for name, sql in values.items()
     }

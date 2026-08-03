@@ -23,6 +23,7 @@ for source in (ROOT, ZONE_SRC, AI_SRC):
 
 from ai_search.og_bridge import enqueue_for_screening
 from ai_search.og_bridge import pipeline_status_for_corpus
+from zone_universe.database import ZONE_UNIVERSE_DATABASE_ENV_VAR
 from classification_store import (
     corpus_bucket_counts,
     query_corpus_classifications,
@@ -755,6 +756,7 @@ with tabs[1]:
         DATABASE,
         QUEUE_DB,
         crawled_only=True,
+        search_db_env_var=ZONE_UNIVERSE_DATABASE_ENV_VAR,
     )
     raw_bucket_counts = corpus_bucket_counts(DATABASE)
     bucket_counts = {

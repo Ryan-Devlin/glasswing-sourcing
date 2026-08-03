@@ -107,18 +107,45 @@ See `.env.example` for every variable and its default (unset = local mode).
   worker's path, not the live dashboard's, and inert today the same way
   `continuous_pipeline.py` is.
 
+- **Zone Universe search (zone_universe subproject) has a tested Postgres
+  dual-backend too**, gated on its own `ZONE_UNIVERSE_DATABASE_URL`, own
+  `zone_universe` Postgres schema, mirroring ai_search's translation exactly:
+  weighted `search_vector` tsvector column, `compile_query_postgres()`,
+  `ts_rank_cd`, `ts_headline`. The write path (`crawler.save_success()`,
+  which both inserts the crawled page row and maintains the FTS index in one
+  function here, unlike ai_search's separate `index_page()`) now branches on
+  `isinstance(conn, PostgresConnection)` to populate `search_vector` instead
+  of the FTS5 `page_search` table. `pipeline_status_for_corpus`'s
+  cross-backend path now derives which Postgres schema to search from the
+  env var name itself (`AI_SEARCH_DATABASE_URL` -> `ai_search`,
+  `ZONE_UNIVERSE_DATABASE_URL` -> `zone_universe`) rather than a hardcoded
+  schema, since that function is shared by both subprojects' dashboard pages.
+  Verified against the real live database: all 13 opt-in Postgres tests
+  across all four schemas (`public`/classification_store, `pipeline`,
+  `ai_search`, `zone_universe`) pass together with zero residual test data.
+
 ## Not yet done
 
 - **Still one Railway service**, not the four-service split below. There is
   no `pipeline-worker`/`ai-worker`/`zone-worker` split running today --
   CertStream discovery and crawling are not currently running in the cloud.
-- **Zone Universe still runs entirely on SQLite+FTS5**, unmigrated. Same
-  shape of work as ai_search above (schema + tsvector search), not yet
-  started.
-- **ai_search's crawler-worker-only code paths** (see above) still assume
-  SQLite; only the parts reachable from the live dashboard were verified.
+- **Both subprojects' crawler-worker-only code paths** still assume SQLite
+  in places: ai_search's `screenable_domains()` (SQLite ATTACH) and a few
+  positional `fetchone()[0]` bugs in `crawler.py`/`maintenance.py`/
+  `worker.py` for both subprojects. Only the parts reachable from the live
+  dashboard were verified against Postgres -- none of this is on that path.
 
 ## Target service split (when the multi-worker split happens)
+
+This used to be hard-blocked: Railway doesn't share one volume across
+services, and the workers wrote local SQLite files the `web` service read
+directly. That's no longer true in principle -- every database involved
+(classifications, pipeline queue, ai_search, zone_universe) now has a tested
+Postgres dual-backend, so each worker service could point at the same
+shared Postgres instead of a shared volume. It's just not turned on: the
+live deployment still runs everything on local SQLite/local files today, so
+actually splitting into separate services is still a deliberate, unstarted
+step, not an automatic consequence of the backends existing.
 
 Separate Railway services from the same repository:
 
@@ -126,10 +153,11 @@ Separate Railway services from the same repository:
 2. `pipeline-worker`: certificate/new-domain screening.
 3. `ai-worker`: `.AI` discovery and crawling.
 4. `zone-worker`: `.COM`/`.APP` queue crawling.
-5. managed PostgreSQL: classifications, decisions, queues, health heartbeats
-   (live today).
-6. S3-compatible object storage: HTML packs and manual snapshots (manual
-   snapshots live today; HTML packs not yet designed).
+5. managed PostgreSQL: classifications (live), pipeline queue, ai_search,
+   zone_universe (all three built + verified, not yet turned on for real
+   data), health heartbeats.
+6. S3-compatible object storage: HTML packs (built + verified, not yet
+   migrated for real data) and manual snapshots (live today, pending R2).
 
 ## Portable service modules
 
@@ -158,8 +186,8 @@ Separate Railway services from the same repository:
    for the dashboard-reachable code paths; the crawler worker's own paths
    (`screenable_domains`, `crawler.py`, `maintenance.py`, `worker.py`) still
    assume SQLite.
-7. Migrate Zone Universe search (FTS5 -> tsvector/ts_rank_cd) to Postgres --
-   same shape of work as step 6, not yet started.
+7. ~~Migrate Zone Universe search (FTS5 -> tsvector/ts_rank_cd) to
+   Postgres.~~ Done, same scope/caveats as step 6.
 8. Run the web and three workers as separate services.
 9. Keep `human_ground_truth.csv` as an export, not the cloud source of truth
    (already true today -- Postgres holds the live table).

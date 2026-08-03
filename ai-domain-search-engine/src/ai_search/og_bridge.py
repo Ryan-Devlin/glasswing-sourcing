@@ -272,7 +272,13 @@ def _pipeline_status_cross_backend(
         search_conn: sqlite3.Connection | PostgresConnection = connect_postgres(
             read_only=True, env_var=search_db_env_var
         )
-        search_conn.execute("SET search_path TO ai_search, public")
+        # Each subsystem's schema name is its env var with the
+        # "_DATABASE_URL" suffix stripped and lowercased (AI_SEARCH_DATABASE_URL
+        # -> "ai_search", ZONE_UNIVERSE_DATABASE_URL -> "zone_universe") --
+        # this must stay in sync with each database.py's own CREATE SCHEMA,
+        # not be hardcoded to whichever subsystem was migrated first.
+        schema = search_db_env_var.removesuffix("_DATABASE_URL").lower()
+        search_conn.execute(f"SET search_path TO {schema}, public")
     else:
         search_conn = sqlite3.connect(search_db, timeout=30)
         search_conn.row_factory = sqlite3.Row

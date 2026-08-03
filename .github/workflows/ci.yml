@@ -75,7 +75,12 @@ jobs:
             ai-domain-search-engine/src/ai_search/search.py \
             ai-domain-search-engine/src/ai_search/og_bridge.py \
             ai-domain-search-engine/tests/test_ai_search_postgres.py \
-            ai-domain-search-engine/tests/test_og_bridge_pipeline_status_postgres.py
+            ai-domain-search-engine/tests/test_og_bridge_pipeline_status_postgres.py \
+            zone-universe/src/zone_universe/database.py \
+            zone-universe/src/zone_universe/search.py \
+            zone-universe/src/zone_universe/crawler.py \
+            zone-universe/tests/test_zone_universe_search_postgres.py \
+            pages/zone_universe.py
 
       - name: Run tests
         env:
