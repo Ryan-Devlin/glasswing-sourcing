@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+from db_backend import using_postgres
 from health_monitor import health_report
 from manual_truth_backup import (
     create_manual_snapshot,
@@ -11,6 +12,7 @@ from manual_truth_backup import (
     validate_manual_snapshot,
 )
 from model_evaluation import write_performance_metrics
+from object_storage import using_object_storage
 from rejection_cleanup import rebuild_full_text_indexes
 from runtime_control import (
     RUNTIME_MODE,
@@ -27,8 +29,6 @@ st.markdown(
     <style>
     .block-container{max-width:1750px;padding:1rem 1.5rem 3rem}
     h1{font-size:1.9rem!important;margin-bottom:.1rem!important}
-    div[data-testid="stMetric"]{border:1px solid rgba(128,128,128,.18);
-    border-radius:10px;padding:.55rem .75rem}
     </style>
     """,
     unsafe_allow_html=True,
@@ -301,36 +301,78 @@ with tabs[3]:
 with tabs[4]:
     st.subheader("Cloud migration boundary")
     st.caption(
-        "The UI now talks to explicit truth, runtime-control, health, and "
-        "evaluation modules. In the cloud, their local implementations can be "
-        "replaced independently without changing the product pages."
+        "Each subsystem is cut over independently by the presence of its own "
+        "database URL -- this reflects the actual backend in use right now, "
+        "not an aspirational plan."
     )
-    st.dataframe(
-        pd.DataFrame([
-            {
-                "Local component": "SQLite classifications and manual ledger",
-                "Cloud replacement": "Managed PostgreSQL",
-            },
-            {
-                "Local component": "Compressed HTML archives",
-                "Cloud replacement": "S3-compatible object storage",
-            },
-            {
-                "Local component": "Worker supervisor and PID files",
-                "Cloud replacement": "Railway worker services / restart policy",
-            },
-            {
-                "Local component": "Queue SQLite and zone shards",
-                "Cloud replacement": "PostgreSQL queue or managed message queue",
-            },
-            {
-                "Local component": "Checksummed manual snapshots",
-                "Cloud replacement": "Versioned private object-storage bucket",
-            },
-        ]),
-        hide_index=True,
-        width="stretch",
+    subsystems = [
+        ("Classifications and manual ledger", "DATABASE_URL", "classification_store"),
+        ("New-domain screening pipeline", "PIPELINE_DATABASE_URL", "pipeline"),
+        (".AI discovery search index", "AI_SEARCH_DATABASE_URL", "ai_search"),
+        (".COM/.APP zone universe", "ZONE_UNIVERSE_DATABASE_URL", "zone_universe"),
+    ]
+    on_postgres = 0
+    rows = []
+    for label, env_var, schema in subsystems:
+        cloud = using_postgres(env_var)
+        on_postgres += int(cloud)
+        rows.append({
+            "Subsystem": label,
+            "Backend": "PostgreSQL" if cloud else "Local SQLite",
+            "Schema / file": f"schema \"{schema}\"" if cloud else f"{schema}.db",
+        })
+    object_storage_on = using_object_storage()
+    rows.append({
+        "Subsystem": "HTML archives",
+        "Backend": "S3-compatible object storage" if object_storage_on else "Local files",
+        "Schema / file": "bucket (per-page objects)" if object_storage_on else "sharded .htmlpack files",
+    })
+
+    summary_cols = st.columns(3)
+    summary_cols[0].metric("Databases on Postgres", f"{on_postgres}/4")
+    summary_cols[1].metric(
+        "Archives on object storage",
+        "Yes" if object_storage_on else "No",
     )
+    summary_cols[2].metric(
+        "Worker supervision",
+        "Cloud-managed" if RUNTIME_MODE != "local" else "Local supervisor",
+    )
+
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+
+    if on_postgres == 4 and object_storage_on:
+        st.success(
+            "Every subsystem is live on managed Postgres and object storage. "
+            "Local SQLite/file mode remains the zero-config fallback."
+        )
+    elif on_postgres == 0 and not object_storage_on:
+        st.info("Running fully in local mode: SQLite + local files, no cloud env vars set.")
+    else:
+        st.warning("A mix of cloud and local backends is active -- see the table above.")
+
+    if on_postgres > 0:
+        st.markdown("#### Postgres backups")
+        st.caption(
+            "Backs up every subsystem currently on Postgres to a zip (one CSV "
+            "per table + a sha256 sidecar), written to object storage if "
+            "configured, otherwise to a local folder. On-demand only -- there "
+            "is no automatic schedule yet."
+        )
+        if st.button("Back up Postgres now"):
+            import backup_database
+            with st.spinner("Copying tables out of Postgres..."):
+                try:
+                    result = backup_database.create_database_backup()
+                except Exception as exc:
+                    st.error(f"Backup failed: {exc}")
+                else:
+                    st.success(
+                        "Backed up: " + ", ".join(
+                            f"{name} → {key}" for name, key in result.items()
+                        )
+                    )
+
     st.code(
         "\n".join([
             f"GLASSWING_RUNTIME_MODE={RUNTIME_MODE}",
