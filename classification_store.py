@@ -473,7 +473,12 @@ def search_classifications(
     path: Path | str = CLASSIFICATION_DB,
 ) -> list[dict]:
     """Simple substring match on domain/title -- not full-text search, just
-    enough to surface a tracked company by name from a single search box."""
+    enough to surface a tracked company by name from a single search box.
+
+    Excludes buckets that are never "a company we could invest in" (ghost,
+    hard-rejected, screened out) -- this is an investment-discovery search,
+    not an archival lookup across every domain ever seen. Ranked by score,
+    not recency, since finding the best matches fast is the point."""
     query = query.strip()
     if not query or (not using_postgres() and not Path(path).exists()):
         return []
@@ -481,10 +486,12 @@ def search_classifications(
     with connect_store(path, read_only=True) as conn:
         rows = conn.execute(
             """
-            SELECT domain, company_name, routing_bucket, final_url, updated_at
+            SELECT domain, company_name, routing_bucket, final_url,
+                   description, excerpt, fit_score, thesis_pillar, updated_at
             FROM classifications
-            WHERE lower(domain) LIKE ? OR lower(company_name) LIKE ?
-            ORDER BY updated_at DESC
+            WHERE (lower(domain) LIKE ? OR lower(company_name) LIKE ?)
+              AND routing_bucket NOT IN ('ghost', 'reject', 'screened_out')
+            ORDER BY fit_score DESC, updated_at DESC
             LIMIT ?
             """,
             (needle, needle, limit),

@@ -21,7 +21,6 @@ from ui_theme import render_card_grid
 from zone_universe.search import search_pages
 
 st.title("Glasswing Sourcing")
-st.caption("Search everything you've collected, and see what's running.")
 
 
 @st.cache_data(show_spinner=False, ttl=15)
@@ -87,6 +86,18 @@ def _clean_snippet(value: str, limit: int = 150) -> str:
     return text if len(text) <= limit else text[:limit].rsplit(" ", 1)[0] + "…"
 
 
+def _company_blurb(row: dict) -> str | None:
+    """What the company actually does, not its own domain repeated back."""
+    for field in ("description", "excerpt"):
+        text = (row.get(field) or "").strip()
+        if text:
+            return _clean_snippet(text, limit=160)
+    name = (row.get("company_name") or "").strip()
+    if name and name.lower() != row["domain"].lower():
+        return name
+    return None
+
+
 if active_query:
     company_rows = search_classifications(active_query, limit=5)
     st.subheader("Companies you're tracking")
@@ -95,14 +106,21 @@ if active_query:
             {
                 "title": row["domain"],
                 "link": row.get("final_url") or None,
-                "meta": row["company_name"] or "(no name on file)",
-                "tags": [row["routing_bucket"]],
-                "activity": [("Last updated", (row["updated_at"] or "")[:10])],
+                "meta": _company_blurb(row),
+                "tags": (
+                    [row["thesis_pillar"].replace("_", " ").title()]
+                    if row.get("thesis_pillar")
+                    else []
+                ),
+                "activity": [
+                    ("Score", str(row["fit_score"])),
+                    ("Last updated", (row["updated_at"] or "")[:10]),
+                ],
             }
             for row in company_rows
         ])
     else:
-        st.caption("No matches in your classification list.")
+        st.caption("No investable matches in your classification list.")
 
     ai_rows = search_companies(AI_SEARCH_DB, active_query, limit=5)
     st.subheader(".AI pages")
