@@ -25,6 +25,15 @@ _CSS = """
 footer, [data-testid="stAppDeployButton"] { display: none; }
 #MainMenu { visibility: hidden; }
 
+/* Streamlit's top nav (position="top") is a fixed-position overlay, not
+   flow content -- it's ~60px tall with a very high z-index. Too little
+   top padding here doesn't create a "gap", it renders page content
+   (including the logo) underneath that fixed bar, invisible despite
+   technically being in the DOM. Too much (Streamlit's own default)
+   leaves a large dead zone. This clears the fixed nav with a small
+   margin, no more. */
+div[data-testid="stMainBlockContainer"] { padding-top: 4.5rem !important; }
+
 /* The default top decoration bar is a loud gradient; a hairline in the
    theme's own border color reads as an intentional divider instead. */
 div[data-testid="stDecoration"] {

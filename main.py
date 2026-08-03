@@ -21,29 +21,24 @@ navigation = st.navigation(
     [
         st.Page(
             "pages/overview.py",
-            title="Overview",
-            icon="🏠",
+            title="Home",
             default=True,
         ),
         st.Page(
             "dashboard.py",
-            title="Glasswing Sourcing",
-            icon="🪽",
+            title="CertStream Scraper",
         ),
         st.Page(
             "pages/ai_search.py",
-            title=".AI Search",
-            icon="🔎",
+            title="Domain Crawler (.ai)",
         ),
         st.Page(
             "pages/zone_universe.py",
-            title="Zone Universe",
-            icon="🌐",
+            title="Domain Crawler (.com, .app)",
         ),
         st.Page(
             "pages/system_health.py",
             title="System Health",
-            icon="🩺",
         ),
     ],
     position="top",
