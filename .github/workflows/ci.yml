@@ -80,7 +80,12 @@ jobs:
             zone-universe/src/zone_universe/search.py \
             zone-universe/src/zone_universe/crawler.py \
             zone-universe/tests/test_zone_universe_search_postgres.py \
-            pages/zone_universe.py
+            pages/zone_universe.py \
+            ai-domain-search-engine/src/ai_search/crawler.py \
+            ai-domain-search-engine/src/ai_search/worker.py \
+            ai-domain-search-engine/src/ai_search/maintenance.py \
+            zone-universe/src/zone_universe/rdap.py \
+            ai-domain-search-engine/tests/test_screenable_domains_postgres.py
 
       - name: Run tests
         env:

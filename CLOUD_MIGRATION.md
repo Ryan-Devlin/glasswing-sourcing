@@ -101,11 +101,18 @@ See `.env.example` for every variable and its default (unset = local mode).
   classification store's own `DATABASE_URL` -- given its own
   `PIPELINE_DATABASE_URL` instead, so that variable can never be
   misread elsewhere as "the pipeline queue is on Postgres too."
-  Not yet done for ai_search: `screenable_domains()` (worker-only, still
-  SQLite-only ATTACH) and a handful of worker-side `.fetchone()[0]`-style
-  bugs in `crawler.py`/`maintenance.py`/`worker.py` -- all on the crawler
-  worker's path, not the live dashboard's, and inert today the same way
-  `continuous_pipeline.py` is.
+  `screenable_domains()` (worker-only -- finds already-crawled domains ready
+  to hand off to Python screening) also had a real bug: it opens its
+  connection through the same dual-backend `search_connection()` the search
+  page uses, so it would have tried a SQLite-only `ATTACH DATABASE` against
+  a `PostgresConnection` and crashed outright the first time the worker ran
+  with `AI_SEARCH_DATABASE_URL` set. Fixed with the same cross-backend
+  Python-side join used by `pipeline_status_for_corpus` (including handling
+  the pipeline queue itself being Postgres-backed via its own
+  `PIPELINE_DATABASE_URL`), verified live against a real stale-ghost-recovery
+  scenario. Also fixed the remaining worker-side `fetchone()[0]` positional
+  bugs in `crawler.py`/`maintenance.py`/`worker.py` (ai_search) and
+  `rdap.py` (zone_universe).
 
 - **Zone Universe search (zone_universe subproject) has a tested Postgres
   dual-backend too**, gated on its own `ZONE_UNIVERSE_DATABASE_URL`, own
@@ -129,11 +136,15 @@ See `.env.example` for every variable and its default (unset = local mode).
 - **Still one Railway service**, not the four-service split below. There is
   no `pipeline-worker`/`ai-worker`/`zone-worker` split running today --
   CertStream discovery and crawling are not currently running in the cloud.
-- **Both subprojects' crawler-worker-only code paths** still assume SQLite
-  in places: ai_search's `screenable_domains()` (SQLite ATTACH) and a few
-  positional `fetchone()[0]` bugs in `crawler.py`/`maintenance.py`/
-  `worker.py` for both subprojects. Only the parts reachable from the live
-  dashboard were verified against Postgres -- none of this is on that path.
+- **None of these backends are actually turned on for real data.** Every
+  Postgres/S3 dual-backend built this session is built, tested, and
+  verified against the live database -- but every new env var
+  (`PIPELINE_DATABASE_URL`, `AI_SEARCH_DATABASE_URL`,
+  `ZONE_UNIVERSE_DATABASE_URL`, `S3_BUCKET` for HTML archives) is
+  deliberately unset in the live Railway deployment. Flipping any of them on
+  for the real, already-crawled corpus is a separate, deliberate decision --
+  not something to do opportunistically, especially since R2 itself isn't
+  enabled yet.
 
 ## Target service split (when the multi-worker split happens)
 

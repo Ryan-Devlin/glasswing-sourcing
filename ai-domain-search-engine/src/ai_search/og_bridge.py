@@ -100,6 +100,19 @@ def screenable_domains(
     include_stale: bool = False,
 ) -> list[str]:
     conn = search_connection(search_db)
+    if isinstance(conn, PostgresConnection) and exclude_queue_db is not None:
+        # Postgres has no ATTACH; join against the (still-local) pipeline
+        # queue in Python instead, same approach as
+        # _pipeline_status_cross_backend. Worker-side maintenance scan, not
+        # a hot path, so pulling the full queue table once is fine.
+        try:
+            return _screenable_domains_cross_backend(
+                conn, exclude_queue_db,
+                limit=limit, minimum_words=minimum_words,
+                include_parked=include_parked, include_stale=include_stale,
+            )
+        finally:
+            conn.close()
     try:
         if exclude_queue_db is not None:
             conn.execute(
@@ -157,6 +170,83 @@ def screenable_domains(
         ]
     finally:
         conn.close()
+
+
+def _screenable_domains_cross_backend(
+    conn: PostgresConnection,
+    exclude_queue_db: Path,
+    *,
+    limit: int,
+    minimum_words: int,
+    include_parked: bool,
+    include_stale: bool,
+) -> list[str]:
+    where = [
+        "d.active=1",
+        "d.last_crawled_at IS NOT NULL",
+        "EXISTS (SELECT 1 FROM pages p WHERE p.domain_id=d.id AND p.word_count>=?)",
+    ]
+    params: list[object] = [minimum_words]
+    if not include_parked:
+        where.append("d.is_parked=0")
+    candidates = {
+        row["domain"]: row["last_crawled_at"]
+        for row in conn.execute(
+            f"SELECT d.domain, d.last_crawled_at FROM domains d "
+            f"WHERE {' AND '.join(where)}",
+            params,
+        ).fetchall()
+    }
+    if not candidates:
+        return []
+
+    if _using_postgres(_PIPELINE_DATABASE_ENV_VAR):
+        queue_conn: sqlite3.Connection | PostgresConnection = connect_postgres(
+            read_only=True, env_var=_PIPELINE_DATABASE_ENV_VAR
+        )
+        queue_conn.execute("SET search_path TO pipeline, public")
+    else:
+        queue_conn = sqlite3.connect(exclude_queue_db, timeout=30)
+        queue_conn.row_factory = sqlite3.Row
+    try:
+        queue_by_domain = {
+            row["domain"]: row
+            for row in queue_conn.execute(
+                "SELECT domain, status, classification, last_processed_at, "
+                "last_seen_run_id FROM domains"
+            ).fetchall()
+        }
+    finally:
+        queue_conn.close()
+
+    kept: list[tuple[str, str]] = []
+    for domain, last_crawled_at in candidates.items():
+        queue_row = queue_by_domain.get(domain)
+        if queue_row is None:
+            kept.append((domain, last_crawled_at or ""))
+            continue
+        if not include_stale:
+            continue
+        stale = (
+            queue_row["status"] == "complete"
+            and queue_row["classification"] in
+                ("ghost", "insufficient", "screened_out", "")
+            and (
+                queue_row["last_processed_at"] is None
+                or (last_crawled_at or "") > queue_row["last_processed_at"]
+                or (
+                    queue_row["classification"] == "ghost"
+                    and (queue_row["last_seen_run_id"] or "")
+                        != "ai_search_cache_reuse_v1"
+                )
+            )
+        )
+        if stale:
+            kept.append((domain, last_crawled_at or ""))
+
+    kept.sort(key=lambda pair: pair[1])
+    domains = [domain for domain, _ in kept]
+    return domains[:limit] if limit > 0 else domains
 
 
 def _table_exists(conn: sqlite3.Connection, schema: str, table: str) -> bool:

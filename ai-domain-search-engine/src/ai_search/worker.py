@@ -132,7 +132,7 @@ async def query_discovery_loop(database, settings, stop: asyncio.Event) -> None:
                         add_domain(conn, domain, f"web_search:{provider}")
                         domain_id = conn.execute(
                             "SELECT id FROM domains WHERE domain=?", (domain,)
-                        ).fetchone()[0]
+                        ).fetchone()["id"]
                         conn.execute("""
                             INSERT INTO query_discoveries(
                                 watch_id, domain_id, provider, result_url,

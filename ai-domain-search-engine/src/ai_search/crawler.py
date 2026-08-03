@@ -191,7 +191,7 @@ def _save_page(
     return conn.execute(
         "SELECT id FROM pages WHERE domain_id=? AND final_url=?",
         (domain_id, final_url),
-    ).fetchone()[0]
+    ).fetchone()["id"]
 
 
 async def crawl_domain(

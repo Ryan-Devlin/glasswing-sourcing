@@ -81,8 +81,8 @@ def compact_existing_pages(
 
     total = int(
         conn.execute(
-            "SELECT count(*) FROM pages WHERE length(raw_html)>0"
-        ).fetchone()[0]
+            "SELECT count(*) AS count FROM pages WHERE length(raw_html)>0"
+        ).fetchone()["count"]
     )
     archived = discarded_templates = deduplicated = processed = 0
     raw_bytes = compressed_bytes = 0

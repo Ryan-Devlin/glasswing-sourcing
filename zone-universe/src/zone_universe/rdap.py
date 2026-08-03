@@ -362,11 +362,11 @@ def automatic_lookups_today(
         return int(
             conn.execute(
                 """
-                SELECT count(*) FROM registration_queue
+                SELECT count(*) AS count FROM registration_queue
                 WHERE attempts>0 AND updated_at>=?
                 """,
                 (start,),
-            ).fetchone()[0]
+            ).fetchone()["count"]
         )
 
 
