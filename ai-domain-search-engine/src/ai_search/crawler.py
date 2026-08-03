@@ -131,10 +131,11 @@ def _save_page(
             )
             conn.execute(
                 """
-                INSERT OR IGNORE INTO html_blobs(
+                INSERT INTO html_blobs(
                     raw_html_hash,archive_path,archive_offset,
                     archive_length,archive_codec,raw_bytes,created_at
                 ) VALUES (?,?,?,?,?,?,?)
+                ON CONFLICT (raw_html_hash) DO NOTHING
                 """,
                 (
                     raw_hash,
