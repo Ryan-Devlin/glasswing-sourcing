@@ -348,11 +348,6 @@ def move_zone_domains(
 
 
 st.title(".COM + .APP Company Search")
-st.caption(
-    "Build a searchable database of companies from the complete approved "
-    ".com and .app domain lists. Domains are filtered, websites are crawled, "
-    "HTML is retained, and companies are automatically organized for review."
-)
 
 conn = connect(DATABASE)
 stats = {
@@ -930,10 +925,7 @@ with tabs[1]:
                     "Website",
                 ],
                 column_config={
-                    "Select": st.column_config.CheckboxColumn(
-                        "Move",
-                        help="Select companies to move to another bucket.",
-                    ),
+                    "Select": st.column_config.CheckboxColumn("Move"),
                     "Fit": st.column_config.ProgressColumn(
                         "Glasswing fit",
                         min_value=0,
@@ -1439,10 +1431,6 @@ export PYTHONPATH="$PWD/src:../ai-domain-search-engine/src"
 with tabs[3]:
     st.divider()
     st.subheader("Downloaded files and storage")
-    st.caption(
-        "This page shows what has been downloaded, what has finished importing, "
-        "and where the retained searchable HTML is stored."
-    )
     inventory = pd.DataFrame(zone_rows)
     if not inventory.empty:
         inventory["Domain ending"] = "." + inventory["tld"].astype(str)

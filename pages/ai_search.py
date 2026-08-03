@@ -217,11 +217,6 @@ def move_crawler_domains(
 
 
 st.title(".AI Company Search")
-st.caption(
-    "Search the locally indexed content of discovered .ai websites, review "
-    "many companies at once, and push decisions into the original Glasswing "
-    "screening and training lists."
-)
 
 if not SEARCH_DB.exists():
     st.error(f"Search database not found: {SEARCH_DB}")
@@ -262,11 +257,7 @@ enrichment_metrics[1].metric(
 )
 
 refresh_col, refresh_setting_col = st.columns([1, 4])
-refresh_col.button(
-    "Refresh data now",
-    width="stretch",
-    help="Reload crawler counts and bucket data when you choose.",
-)
+refresh_col.button("Refresh data now", width="stretch")
 auto_refresh_enabled = refresh_setting_col.toggle(
     "Auto-refresh every 5 minutes",
     value=False,
@@ -276,10 +267,6 @@ auto_refresh_enabled = refresh_setting_col.toggle(
         "current review position are not interrupted."
     ),
 )
-if not auto_refresh_enabled:
-    refresh_setting_col.caption(
-        "Automatic refresh is off—your selections and sorting will stay put."
-    )
 
 tabs = st.tabs([
     "Search results",
@@ -593,10 +580,7 @@ with tabs[1]:
                         "Website",
                     ],
                     column_config={
-                        "Select": st.column_config.CheckboxColumn(
-                            "Move",
-                            help="Select companies to move to another bucket.",
-                        ),
+                        "Select": st.column_config.CheckboxColumn("Move"),
                         "Fit": st.column_config.ProgressColumn(
                             "Fit",
                             min_value=0,
@@ -718,17 +702,10 @@ with tabs[1]:
 with tabs[2]:
     st.subheader("Automatic crawler → Python screening")
     current_pipeline = pipeline_status_for_corpus(SEARCH_DB, QUEUE_DB)
-    st.success(
-        "Automatic handoff is enabled. As each .ai website finishes crawling, "
-        "its stored HTML-derived content is reused by the Python screener. "
-        "Classifications and manual movements are written transactionally to "
-        "SQLite; the original master and crawler-only CSVs remain available "
-        "as compatibility exports."
-    )
     if current_pipeline.get("not_queued", 0) == 0:
         st.info(
-            "All 148,489 discovered domains are already in the original "
-            "screening registry. The pipeline is working through "
+            f"All {stats['domains']:,} discovered domains are already in the "
+            "original screening registry. The pipeline is working through "
             f"{current_pipeline.get('pending', 0):,} pending domains now."
         )
     else:

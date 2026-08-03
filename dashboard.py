@@ -1273,9 +1273,6 @@ st.markdown(
     """
     <div class="glasswing-header">
       <div class="glasswing-title">Glasswing Sourcing</div>
-      <div class="glasswing-subtitle">
-        Configurable startup-domain discovery with high-throughput screening
-      </div>
     </div>
     """,
     unsafe_allow_html=True,
@@ -1350,11 +1347,6 @@ with st.expander("Run Filters", expanded=not running):
         st.info(
             "Startup Broad is higher-volume but still targeted toward "
             "technology and startup-style domains."
-        )
-    else:
-        st.caption(
-            "Focused AI & Developer is the recommended balance of quality "
-            "and throughput."
         )
 
     profile = st.selectbox(
@@ -1547,10 +1539,6 @@ with st.expander("Run Filters", expanded=not running):
             min_value=1,
             max_value=500,
             value=default_batch,
-            help=(
-                "The number of queued domains claimed for each screening "
-                "cycle."
-            ),
             disabled=running,
         )
     with speed_mid:
@@ -1612,10 +1600,6 @@ with st.expander("Run Filters", expanded=not running):
             value=saved_claude_threshold,
             step=1,
             disabled=running or not auto_claude,
-            help=(
-                "Every company with an objective score greater than or equal "
-                "to this value is eligible for Claude."
-            ),
         )
         if auto_claude:
             st.caption(
@@ -1741,8 +1725,6 @@ with refresh_note_col:
             "Automatically refreshes every 30 seconds while the pipeline is "
             "running. Use Refresh now for an immediate update."
         )
-    else:
-        st.caption("Use Refresh now whenever you want to reload saved data.")
 
 if st.session_state.get("confirm_reset_run", False):
     st.warning(
@@ -3193,20 +3175,13 @@ with tabs[5]:
         )
 
 with tabs[6]:
-    st.caption(
-        "General Yes investments for Glasswing. Edit ratings directly, move "
-        "companies to No, or remove rows from the training set."
-    )
     render_basket_editor(
         basket="yes",
         path=YES_BASKET_DATA,
     )
 
 with tabs[7]:
-    st.caption(
-        "General No investments for Glasswing. Zero is a valid rating for an "
-        "obvious poor fit. Edit ratings or move companies to Yes in-place."
-    )
+    st.caption("Zero is a valid rating for an obvious poor fit.")
     render_basket_editor(
         basket="no",
         path=NO_BASKET_DATA,

@@ -41,10 +41,6 @@ def cached_health(include_integrity: bool = False):
 
 
 st.title("System Health")
-st.caption(
-    "One operational view for the dashboard, workers, queues, search indexes, "
-    "human ground truth, and frozen-model feedback."
-)
 
 header_left, header_middle, header_right = st.columns([1, 1, 4])
 run_integrity = header_left.button("Run full checks", type="primary")
@@ -300,11 +296,6 @@ with tabs[3]:
 
 with tabs[4]:
     st.subheader("Cloud migration boundary")
-    st.caption(
-        "Each subsystem is cut over independently by the presence of its own "
-        "database URL -- this reflects the actual backend in use right now, "
-        "not an aspirational plan."
-    )
     subsystems = [
         ("Classifications and manual ledger", "DATABASE_URL", "classification_store"),
         ("New-domain screening pipeline", "PIPELINE_DATABASE_URL", "pipeline"),
@@ -353,12 +344,7 @@ with tabs[4]:
 
     if on_postgres > 0:
         st.markdown("#### Postgres backups")
-        st.caption(
-            "Backs up every subsystem currently on Postgres to a zip (one CSV "
-            "per table + a sha256 sidecar), written to object storage if "
-            "configured, otherwise to a local folder. On-demand only -- there "
-            "is no automatic schedule yet."
-        )
+        st.caption("On-demand only -- there's no automatic schedule yet.")
         if st.button("Back up Postgres now"):
             import backup_database
             with st.spinner("Copying tables out of Postgres..."):
