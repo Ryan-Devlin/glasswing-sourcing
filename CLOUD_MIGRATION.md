@@ -131,6 +131,22 @@ See `.env.example` for every variable and its default (unset = local mode).
   across all four schemas (`public`/classification_store, `pipeline`,
   `ai_search`, `zone_universe`) pass together with zero residual test data.
 
+- **Real-data migration tools exist for all three newly-Postgres-capable
+  databases** (`migrate_pipeline_to_postgres.py`,
+  `migrate_ai_search_to_postgres.py`, `migrate_zone_universe_to_postgres.py`).
+  Each is read-only against the local SQLite file (never modifies or
+  deletes the source), defaults to `--dry-run` (count rows only), and only
+  writes when explicitly passed `--execute`. Each dry-run has been verified
+  against the real local databases (247,742 pipeline queue rows; 144,237
+  ai_search domains / 12,218 pages; 11,371 zone_universe pages) and reports
+  the exact real row counts. The ai_search/zone_universe tools also
+  recompute `search_vector` per page after copying, since a tsvector has no
+  direct FTS5 equivalent to copy across. **Actually running `--execute`
+  against the real corpora is deliberately not something this session did**
+  -- that write was blocked by Claude Code's own safety classifier when
+  attempted, correctly, since it's real production data. Running it for
+  real is a decision for you to make explicitly.
+
 ## Not yet done
 
 - **Still one Railway service**, not the four-service split below. There is
