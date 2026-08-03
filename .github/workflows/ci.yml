@@ -68,7 +68,9 @@ jobs:
             training_data.py db_backend.py training_truth.py rejection_cleanup.py \
             reclassify_corpus.py object_storage.py tests/test_page_smoke.py \
             backup_database.py tests/test_backup_database.py \
-            tests/test_continuous_pipeline_postgres.py
+            tests/test_continuous_pipeline_postgres.py \
+            ai-domain-search-engine/tests/test_ai_search_html_archive_object_storage.py \
+            zone-universe/tests/test_zone_universe_html_archive_object_storage.py
 
       - name: Run tests
         env:

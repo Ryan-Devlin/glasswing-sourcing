@@ -61,20 +61,34 @@ See `.env.example` for every variable and its default (unset = local mode).
   realistic batch sizes, but not a byte-for-byte behavioral clone at extreme
   queue depth.
 
+- **HTML archives have a tested S3 dual-backend**, but the real archived
+  corpus (years of crawled pages) has **not been migrated into it** -- both
+  `html_archive.py` modules (ai_search, zone_universe) now write one S3
+  object per page when `S3_BUCKET` is set, reusing the exact same
+  `ArchivePointer` shape (path/offset/length/codec) the local sharded format
+  already used, so no schema change was needed. `read_html()` tells old
+  local pointers apart from new S3 ones by shape alone (local paths are
+  always absolute; S3 keys deliberately aren't), so old and new rows can
+  coexist in the same corpus indefinitely -- there's no forced cutover
+  moment. Bulk-migrating the real existing archive (real money, real
+  bandwidth, and R2 itself isn't enabled yet) is a separate, deliberate,
+  explicitly-confirmed action, not something to run opportunistically.
+
 ## Not yet done
 
 - **Still one Railway service**, not the four-service split below. There is
   no `pipeline-worker`/`ai-worker`/`zone-worker` split running today --
   CertStream discovery and crawling are not currently running in the cloud.
 - **`.AI` search and Zone Universe still run on SQLite+FTS5**, unmigrated to
-  Postgres. Full-text search behavior doesn't move to Postgres for free, so
-  this needs its own design pass (`tsvector`/`pg_trgm` or similar), not a
-  drop-in swap.
-- **HTML archives are not on object storage.** They're stored as sharded,
-  append-only files addressed by byte offset + length -- incompatible with
-  S3's immutable-object model without redesigning the storage format
-  (one-object-per-page) and touching the schema and crawler code. Deliberately
-  scoped out as a separate decision rather than rushed.
+  Postgres. The schema/CRUD side is a mechanical translation (see the
+  pipeline queue above for the pattern), but `search.py` in both subprojects
+  builds SQLite FTS5-specific query syntax directly -- `MATCH`, `bm25()`
+  ranking, `snippet()` highlighting, `instr()` substring matching -- none of
+  which exist in Postgres. Postgres's equivalent (`tsvector`/`tsquery`,
+  `ts_rank`, `ts_headline`) is a different ranking algorithm, not a drop-in
+  swap, so getting this right means comparing real search-result quality
+  side by side, not just checking it runs without an exception. That's a
+  dedicated pass, not something to fold into unrelated infra work.
 
 ## Target service split (when the multi-worker split happens)
 
@@ -106,9 +120,13 @@ Separate Railway services from the same repository:
    dual backend.~~ Done.
 3. ~~Move manual snapshots to object storage (dual backend).~~ Done, pending
    R2 bucket creation.
-4. Design and migrate HTML archives to object storage.
-5. Migrate `.AI`/Zone Universe search databases to Postgres (or another
-   full-text-capable cloud store).
-6. Run the web and three workers as separate services.
-7. Keep `human_ground_truth.csv` as an export, not the cloud source of truth
+4. ~~Design and build a dual object-storage backend for HTML archives.~~
+   Done. Bulk-migrating the real existing archive into it is separate and
+   still pending (needs R2 enabled, and its own explicit go-ahead given the
+   cost/bandwidth involved).
+5. ~~Add a Postgres-or-SQLite dual backend for the pipeline queue.~~ Done,
+   verified live; not wired to anything running today.
+6. Migrate `.AI`/Zone Universe search (FTS5 -> tsvector/ts_rank) to Postgres.
+7. Run the web and three workers as separate services.
+8. Keep `human_ground_truth.csv` as an export, not the cloud source of truth
    (already true today -- Postgres holds the live table).
