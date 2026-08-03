@@ -73,22 +73,50 @@ See `.env.example` for every variable and its default (unset = local mode).
   moment. Bulk-migrating the real existing archive (real money, real
   bandwidth, and R2 itself isn't enabled yet) is a separate, deliberate,
   explicitly-confirmed action, not something to run opportunistically.
+- **`.AI` search (ai_search subproject) has a tested Postgres dual-backend**,
+  gated on its own `AI_SEARCH_DATABASE_URL` (never the classification
+  store's `DATABASE_URL`). Covers the full schema (domains/pages/
+  crawl_attempts/shortlists/watch_queries/query_discoveries/html_blobs) plus
+  FTS5 -> Postgres full-text search: a weighted `search_vector` tsvector
+  column (domain/title/description/headings/body, weighted A/B/C/D
+  approximating the original bm25 column weights) replaces the FTS5
+  `page_search` virtual table; `compile_query_postgres()` reproduces
+  `compile_query()`'s exact phrase/AND/NOT grammar (including "unquoted
+  multi-word input is one exact phrase") using parameterized
+  `phraseto_tsquery`/`plainto_tsquery` combined with tsquery's `&&`/`!!`
+  operators, rather than a hand-built query string; `ts_rank_cd` replaces
+  `bm25()` (note: opposite sort direction -- higher is more relevant);
+  `ts_headline` replaces `snippet()`. Verified against the real live
+  database: phrase-vs-word matching, negation, filters, and ranking order
+  all confirmed correct, not just "runs without an exception."
+  **Important fix found by that live verification:** every Postgres-backed
+  piece (classification store, pipeline queue, ai_search) now runs in its
+  own Postgres *schema* (`public`, `pipeline`, `ai_search` respectively, via
+  `CREATE SCHEMA IF NOT EXISTS` + `SET search_path`) -- Railway only
+  provides one Postgres instance today, so without this, same-named tables
+  (`domains`, `pages`, ...) across subsystems would collide the moment two
+  of them ever pointed at the same physical database, which is the actual
+  likely real-world setup. Also fixed in the same pass: `continuous_pipeline.py`
+  had been (harmlessly, since nothing live calls it) gated on the
+  classification store's own `DATABASE_URL` -- given its own
+  `PIPELINE_DATABASE_URL` instead, so that variable can never be
+  misread elsewhere as "the pipeline queue is on Postgres too."
+  Not yet done for ai_search: `screenable_domains()` (worker-only, still
+  SQLite-only ATTACH) and a handful of worker-side `.fetchone()[0]`-style
+  bugs in `crawler.py`/`maintenance.py`/`worker.py` -- all on the crawler
+  worker's path, not the live dashboard's, and inert today the same way
+  `continuous_pipeline.py` is.
 
 ## Not yet done
 
 - **Still one Railway service**, not the four-service split below. There is
   no `pipeline-worker`/`ai-worker`/`zone-worker` split running today --
   CertStream discovery and crawling are not currently running in the cloud.
-- **`.AI` search and Zone Universe still run on SQLite+FTS5**, unmigrated to
-  Postgres. The schema/CRUD side is a mechanical translation (see the
-  pipeline queue above for the pattern), but `search.py` in both subprojects
-  builds SQLite FTS5-specific query syntax directly -- `MATCH`, `bm25()`
-  ranking, `snippet()` highlighting, `instr()` substring matching -- none of
-  which exist in Postgres. Postgres's equivalent (`tsvector`/`tsquery`,
-  `ts_rank`, `ts_headline`) is a different ranking algorithm, not a drop-in
-  swap, so getting this right means comparing real search-result quality
-  side by side, not just checking it runs without an exception. That's a
-  dedicated pass, not something to fold into unrelated infra work.
+- **Zone Universe still runs entirely on SQLite+FTS5**, unmigrated. Same
+  shape of work as ai_search above (schema + tsvector search), not yet
+  started.
+- **ai_search's crawler-worker-only code paths** (see above) still assume
+  SQLite; only the parts reachable from the live dashboard were verified.
 
 ## Target service split (when the multi-worker split happens)
 
@@ -126,7 +154,12 @@ Separate Railway services from the same repository:
    cost/bandwidth involved).
 5. ~~Add a Postgres-or-SQLite dual backend for the pipeline queue.~~ Done,
    verified live; not wired to anything running today.
-6. Migrate `.AI`/Zone Universe search (FTS5 -> tsvector/ts_rank) to Postgres.
-7. Run the web and three workers as separate services.
-8. Keep `human_ground_truth.csv` as an export, not the cloud source of truth
+6. ~~Migrate `.AI` search (FTS5 -> tsvector/ts_rank_cd) to Postgres.~~ Done
+   for the dashboard-reachable code paths; the crawler worker's own paths
+   (`screenable_domains`, `crawler.py`, `maintenance.py`, `worker.py`) still
+   assume SQLite.
+7. Migrate Zone Universe search (FTS5 -> tsvector/ts_rank_cd) to Postgres --
+   same shape of work as step 6, not yet started.
+8. Run the web and three workers as separate services.
+9. Keep `human_ground_truth.csv` as an export, not the cloud source of truth
    (already true today -- Postgres holds the live table).

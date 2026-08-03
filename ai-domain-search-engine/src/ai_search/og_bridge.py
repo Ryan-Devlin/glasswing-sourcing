@@ -6,18 +6,25 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+from db_backend import PostgresConnection, connect_postgres
+from db_backend import using_postgres as _using_postgres
+
+from .database import AI_SEARCH_DATABASE_ENV_VAR
+from .database import connect as _ai_search_connect
 from .search import SearchOptions, search
+
+# continuous_pipeline.py's own env var -- deliberately imported by name only
+# (not the module itself, which pulls in asyncio/websockets and has
+# module-level side effects unrelated to this read-only status query).
+_PIPELINE_DATABASE_ENV_VAR = "PIPELINE_DATABASE_URL"
 
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def search_connection(path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(path, timeout=30)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA query_only=ON")
-    return conn
+def search_connection(path: Path) -> sqlite3.Connection | PostgresConnection:
+    return _ai_search_connect(path, read_only=True)
 
 
 def search_companies(
@@ -46,13 +53,18 @@ def search_companies(
 def search_stats(search_db: Path) -> dict[str, int]:
     conn = search_connection(search_db)
     try:
+        indexed_pages_sql = (
+            "SELECT count(*) FROM pages WHERE search_vector IS NOT NULL"
+            if isinstance(conn, PostgresConnection)
+            else "SELECT count(*) FROM page_search"
+        )
         queries = {
             "domains": "SELECT count(*) FROM domains",
             "crawled": (
                 "SELECT count(*) FROM domains "
                 "WHERE last_crawled_at IS NOT NULL"
             ),
-            "indexed_pages": "SELECT count(*) FROM page_search",
+            "indexed_pages": indexed_pages_sql,
             "parked": "SELECT count(*) FROM domains WHERE is_parked=1",
             "coming_soon": (
                 "SELECT count(*) FROM domains WHERE is_coming_soon=1"
@@ -61,17 +73,17 @@ def search_stats(search_db: Path) -> dict[str, int]:
                 "SELECT count(*) FROM ("
                 "SELECT domain_id FROM pages "
                 "GROUP BY domain_id HAVING count(*)=1"
-                ")"
+                ") AS t"
             ),
             "evidence_enriched": (
                 "SELECT count(*) FROM ("
                 "SELECT domain_id FROM pages "
                 "GROUP BY domain_id HAVING count(*)>1"
-                ")"
+                ") AS t"
             ),
         }
         return {
-            name: int(conn.execute(sql).fetchone()[0])
+            name: int(conn.execute(f"SELECT ({sql}) AS count").fetchone()["count"])
             for name, sql in queries.items()
         }
     finally:
@@ -158,17 +170,48 @@ def _table_exists(conn: sqlite3.Connection, schema: str, table: str) -> bool:
     )
 
 
+def _table_exists_on(conn: sqlite3.Connection | PostgresConnection, table: str) -> bool:
+    """Table-exists check against a single, already-connected backend
+    (no ATTACH involved) -- used by the cross-backend path below, where
+    search corpus and queue may be different backends entirely."""
+    if isinstance(conn, PostgresConnection):
+        return bool(
+            conn.execute(
+                "SELECT to_regclass(?) IS NOT NULL AS exists_", (table,)
+            ).fetchone()["exists_"]
+        )
+    return (
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone()
+        is not None
+    )
+
+
 def pipeline_status_for_corpus(
     search_db: Path,
     queue_db: Path,
     *,
     crawled_only: bool = False,
+    search_db_env_var: str = AI_SEARCH_DATABASE_ENV_VAR,
 ) -> dict[str, int]:
     # A brand-new deployment can query this before the pipeline queue (or even
     # the search corpus) has ever been created -- both are ordinary
     # `CREATE TABLE IF NOT EXISTS` databases owned elsewhere (continuous_pipeline.py,
     # ai_search/database.py), so an absent table here means "nothing yet", not
     # an error to surface to the dashboard.
+    search_is_postgres = _using_postgres(search_db_env_var)
+    queue_is_postgres = _using_postgres(_PIPELINE_DATABASE_ENV_VAR)
+
+    if search_is_postgres or queue_is_postgres:
+        return _pipeline_status_cross_backend(
+            search_db, queue_db,
+            search_is_postgres=search_is_postgres,
+            queue_is_postgres=queue_is_postgres,
+            crawled_only=crawled_only,
+            search_db_env_var=search_db_env_var,
+        )
+
     conn = sqlite3.connect(queue_db, timeout=30)
     conn.row_factory = sqlite3.Row
     try:
@@ -207,6 +250,72 @@ def pipeline_status_for_corpus(
         return result
     finally:
         conn.close()
+
+
+def _pipeline_status_cross_backend(
+    search_db: Path,
+    queue_db: Path,
+    *,
+    search_is_postgres: bool,
+    queue_is_postgres: bool,
+    crawled_only: bool,
+    search_db_env_var: str,
+) -> dict[str, int]:
+    """Same result shape as the ATTACH-based path above, for when the search
+    corpus and/or queue is Postgres-backed -- Postgres has no equivalent to
+    SQLite's cross-database ATTACH, so each side is opened independently and
+    the join happens in Python instead. This is a per-page-load status
+    display, not a hot path, so an unbounded scan of both tables is fine
+    (unlike continuous_pipeline.claim_batch, which bounds its candidate
+    window for exactly that reason)."""
+    if search_is_postgres:
+        search_conn: sqlite3.Connection | PostgresConnection = connect_postgres(
+            read_only=True, env_var=search_db_env_var
+        )
+        search_conn.execute("SET search_path TO ai_search, public")
+    else:
+        search_conn = sqlite3.connect(search_db, timeout=30)
+        search_conn.row_factory = sqlite3.Row
+
+    if queue_is_postgres:
+        queue_conn: sqlite3.Connection | PostgresConnection = connect_postgres(
+            read_only=True, env_var=_PIPELINE_DATABASE_ENV_VAR
+        )
+        queue_conn.execute("SET search_path TO pipeline, public")
+    else:
+        queue_conn = sqlite3.connect(queue_db, timeout=30)
+        queue_conn.row_factory = sqlite3.Row
+
+    try:
+        if not _table_exists_on(search_conn, "domains"):
+            return {"in_screening_registry": 0, "not_queued": 0}
+        crawl_filter = "AND last_crawled_at IS NOT NULL" if crawled_only else ""
+        corpus_domains = {
+            str(row["domain"])
+            for row in search_conn.execute(
+                f"SELECT domain FROM domains WHERE 1=1 {crawl_filter}"
+            ).fetchall()
+        }
+        if not _table_exists_on(queue_conn, "domains"):
+            return {"in_screening_registry": 0, "not_queued": len(corpus_domains)}
+        status_by_domain = {
+            str(row["domain"]): str(row["status"])
+            for row in queue_conn.execute("SELECT domain, status FROM domains").fetchall()
+        }
+        result: dict[str, int] = {}
+        not_queued = 0
+        for domain in corpus_domains:
+            status = status_by_domain.get(domain)
+            if status is None:
+                not_queued += 1
+            else:
+                result[status] = result.get(status, 0) + 1
+        result["in_screening_registry"] = sum(result.values())
+        result["not_queued"] = not_queued
+        return result
+    finally:
+        search_conn.close()
+        queue_conn.close()
 
 
 def all_discovered_domains(search_db: Path) -> list[str]:

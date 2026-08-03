@@ -70,7 +70,12 @@ jobs:
             backup_database.py tests/test_backup_database.py \
             tests/test_continuous_pipeline_postgres.py \
             ai-domain-search-engine/tests/test_ai_search_html_archive_object_storage.py \
-            zone-universe/tests/test_zone_universe_html_archive_object_storage.py
+            zone-universe/tests/test_zone_universe_html_archive_object_storage.py \
+            ai-domain-search-engine/src/ai_search/database.py \
+            ai-domain-search-engine/src/ai_search/search.py \
+            ai-domain-search-engine/src/ai_search/og_bridge.py \
+            ai-domain-search-engine/tests/test_ai_search_postgres.py \
+            ai-domain-search-engine/tests/test_og_bridge_pipeline_status_postgres.py
 
       - name: Run tests
         env:

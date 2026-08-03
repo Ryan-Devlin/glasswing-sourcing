@@ -19,8 +19,16 @@ import os
 from typing import Any, Iterable
 
 
-def using_postgres() -> bool:
-    return bool(os.getenv("DATABASE_URL", "").strip())
+def using_postgres(env_var: str = "DATABASE_URL") -> bool:
+    """Each logical database gets its own env-var gate.
+
+    ai_search and zone_universe deliberately do NOT share the classification
+    store's `DATABASE_URL` -- that variable is already set in production, so
+    reusing it here would silently switch their search corpora over to an
+    empty Postgres database on the next deploy. Pass e.g.
+    `AI_SEARCH_DATABASE_URL` for those instead.
+    """
+    return bool(os.getenv(env_var, "").strip())
 
 
 class PostgresConnection:
@@ -85,12 +93,14 @@ class PostgresConnection:
         self._raw.close()
 
 
-def connect_postgres(*, read_only: bool = False) -> PostgresConnection:
+def connect_postgres(
+    *, read_only: bool = False, env_var: str = "DATABASE_URL"
+) -> PostgresConnection:
     import psycopg
     from psycopg.rows import dict_row
 
     raw = psycopg.connect(
-        os.environ["DATABASE_URL"],
+        os.environ[env_var],
         row_factory=dict_row,
         autocommit=False,
     )

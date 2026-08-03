@@ -58,7 +58,7 @@ def _make_zone_universe_db(path, paged_domains):
 )
 def test_postgres_queue_matches_sqlite_behavior(monkeypatch, tmp_path):
     url = _live_postgres_url()
-    monkeypatch.setenv("DATABASE_URL", url)
+    monkeypatch.setenv(continuous_pipeline.PIPELINE_DATABASE_ENV_VAR, url)
     test_domains = ["pg-queue-a.ai", "pg-queue-b.ai", "pg-queue-c.ai"]
 
     with continuous_pipeline.connect_db() as conn:

@@ -231,8 +231,17 @@ _PIPELINE_POSTGRES_SCHEMA = """
 """
 
 
+PIPELINE_DATABASE_ENV_VAR = "PIPELINE_DATABASE_URL"
+
+
 def connect_db() -> sqlite3.Connection:
-    if using_postgres():
+    # Deliberately its own env var, not the classification store's
+    # DATABASE_URL (already set in production). That variable being set
+    # elsewhere must never be readable as "the pipeline queue is on
+    # Postgres too" -- other code (og_bridge.pipeline_status_for_corpus)
+    # inspects the queue db from outside this module and needs an
+    # unambiguous, dedicated signal, not an overloaded shared one.
+    if using_postgres(PIPELINE_DATABASE_ENV_VAR):
         return _connect_db_postgres()
     return _connect_db_sqlite()
 
@@ -243,7 +252,18 @@ def _connect_db_postgres() -> sqlite3.Connection:
     # no legacy-column migration or local-CSV history bootstrap to run --
     # both of those exist only to carry forward a pre-existing local
     # installation, which a cloud database never has.
-    conn = connect_postgres()
+    #
+    # Runs in its own "pipeline" schema, not the default "public" one --
+    # ai_search/zone_universe define their own same-named domains/pages
+    # tables, and classification_store already owns "public". Since Railway
+    # only provides one Postgres instance today, all of these could easily
+    # end up pointed at the same physical database; schemas keep that safe
+    # (caught by actually running this against the real database -- a first
+    # attempt without schema separation collided with ai_search's tables).
+    conn = connect_postgres(env_var=PIPELINE_DATABASE_ENV_VAR)
+    conn.execute("CREATE SCHEMA IF NOT EXISTS pipeline")
+    conn.commit()
+    conn.execute("SET search_path TO pipeline, public")
     conn.executescript(_PIPELINE_POSTGRES_SCHEMA)
     conn.commit()
     return conn
@@ -507,7 +527,7 @@ def _corpus_priority_for_domains(domains: list[str]) -> dict[str, int]:
 
 def claim_batch(conn: sqlite3.Connection, size: int) -> list[str]:
     now = utc_now()
-    if using_postgres():
+    if using_postgres(PIPELINE_DATABASE_ENV_VAR):
         # No ATTACH equivalent in Postgres, so pull a bounded candidate
         # window ordered the normal way, then re-rank it in Python using the
         # local corpora above. Bounding this window (rather than scanning
