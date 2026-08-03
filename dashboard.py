@@ -32,6 +32,7 @@ from filter import (
 )
 from glasswing_portfolio import GLASSWING_PORTFOLIO_DOMAINS
 from runtime_control import RUNTIME_MODE
+from ui_theme import render_card_grid
 from training_data import (
     backfill_label_metadata, balanced_instruction_frame,
     build_active_review_queue, build_training_dataset, write_training_exports,
@@ -72,11 +73,6 @@ st.markdown(
             margin: .4rem 0 0 0;
             opacity: .68;
             font-size: 1rem;
-        }
-        div[data-testid="stMetric"] {
-            border: 1px solid rgba(128,128,128,.18);
-            padding: .8rem 1rem;
-            border-radius: 12px;
         }
         div[data-testid="stDataFrame"] {
             border: 1px solid rgba(128,128,128,.16);
@@ -986,6 +982,95 @@ def safe_dataframe(frame: pd.DataFrame, **kwargs) -> None:
     except Exception as exc:
         st.error("This table could not render safely.")
         st.caption(f"Dashboard detail: {type(exc).__name__}")
+
+
+def dataframe_to_cards(table: pd.DataFrame) -> list[dict]:
+    """Turn one of this file's already-built display tables (Company/
+    Domain/Website plus whatever bucket-specific columns) into card dicts
+    for render_card_grid -- every non-identity column becomes an activity
+    row, so this adapts automatically to each bucket's own column set."""
+    title_col = "Domain" if "Domain" in table.columns else "Company"
+    meta_col = "Company" if "Company" in table.columns and title_col != "Company" else None
+    tag_cols = [c for c in ("Category",) if c in table.columns]
+    identity_cols = {title_col, meta_col, "Website", *tag_cols}
+
+    cards = []
+    for _, row in table.iterrows():
+        tags = [str(row[c]) for c in tag_cols if row.get(c)]
+        decision = row.get("Claude Decision")
+        if decision and decision != "Not reviewed":
+            tags.append(f"Claude: {decision}")
+
+        activity = []
+        for column in table.columns:
+            if column in identity_cols or column == "Claude Decision":
+                continue
+            value = row.get(column)
+            if value is None or value == "" or (isinstance(value, float) and pd.isna(value)):
+                continue
+            text = str(value)
+            if len(text) > 180:
+                text = text[:180].rsplit(" ", 1)[0] + "…"
+            activity.append((column, text))
+
+        website = row.get("Website")
+        cards.append({
+            "title": str(row.get(title_col, "")),
+            "link": str(website) if website else None,
+            "meta": str(row[meta_col]) if meta_col and row.get(meta_col) else None,
+            "tags": tags,
+            "activity": activity,
+        })
+    return cards
+
+
+def render_bucket_display(
+    table: pd.DataFrame,
+    empty_message: str,
+    key_prefix: str,
+    *,
+    column_config: dict | None = None,
+    page_size: int = 12,
+) -> None:
+    """Card grid (default) or the original dense table for one bucket's
+    already-built display table. Cards are paged so a bucket of any size
+    never dumps thousands of cards into the DOM at once."""
+    if table.empty:
+        st.info(empty_message)
+        return
+
+    view = st.radio(
+        "View",
+        ["Cards", "Table"],
+        horizontal=True,
+        key=f"{key_prefix}_view_mode",
+        label_visibility="collapsed",
+    )
+    if view == "Table":
+        safe_dataframe(
+            table,
+            width="stretch",
+            hide_index=True,
+            column_config=column_config or {},
+        )
+        return
+
+    page_key = f"{key_prefix}_card_page"
+    total = len(table)
+    total_pages = max(1, (total - 1) // page_size + 1)
+    page = min(int(st.session_state.get(page_key, 1)), total_pages)
+    start = (page - 1) * page_size
+
+    render_card_grid(dataframe_to_cards(table.iloc[start:start + page_size]))
+
+    nav_left, nav_mid, nav_right = st.columns([1, 2, 1])
+    if nav_left.button("← Previous", disabled=page <= 1, key=f"{key_prefix}_card_prev"):
+        st.session_state[page_key] = page - 1
+        st.rerun()
+    nav_mid.caption(f"Page {page} of {total_pages} · {total:,} companies")
+    if nav_right.button("Next →", disabled=page >= total_pages, key=f"{key_prefix}_card_next"):
+        st.session_state[page_key] = page + 1
+        st.rerun()
 
 def numeric_max(frame: pd.DataFrame, column: str) -> int:
     if frame.empty or column not in frame.columns:
@@ -2739,6 +2824,7 @@ def render_basket_editor(*, basket: str, path) -> None:
 def render_candidate_table(
     frame: pd.DataFrame,
     empty_message: str,
+    key_prefix: str,
     *,
     show_claude_status: bool = False,
 ) -> None:
@@ -2758,10 +2844,10 @@ def render_candidate_table(
             errors="ignore",
         )
 
-    safe_dataframe(
+    render_bucket_display(
         table,
-        width="stretch",
-        hide_index=True,
+        empty_message,
+        key_prefix,
         column_config={
             "Website": st.column_config.LinkColumn(
                 "Website",
@@ -2852,6 +2938,7 @@ with tabs[0]:
     render_candidate_table(
         investable_candidates,
         "No companies have cleared the current investable filters.",
+        "investable",
         show_claude_status=True,
     )
 
@@ -2865,6 +2952,7 @@ with tabs[1]:
     render_candidate_table(
         coming_soon,
         "No valid coming-soon companies have cleared the filters.",
+        "coming_soon",
     )
 
 with tabs[2]:
@@ -2882,6 +2970,7 @@ with tabs[2]:
     render_candidate_table(
         needs_review,
         "No companies currently need review.",
+        "needs_review",
         show_claude_status=True,
     )
 
@@ -2939,10 +3028,10 @@ with tabs[3]:
             "",
         )
         uncertain["Website"] = insufficient_evidence.get("final_url", "")
-        safe_dataframe(
+        render_bucket_display(
             uncertain.reset_index(drop=True),
-            width="stretch",
-            hide_index=True,
+            "No companies currently have insufficient evidence.",
+            "insufficient",
             column_config={
                 "Score": st.column_config.ProgressColumn(
                     "Score",
@@ -3001,10 +3090,10 @@ with tabs[4]:
             "",
         )
 
-        safe_dataframe(
+        render_bucket_display(
             denied.reset_index(drop=True),
-            width="stretch",
-            hide_index=True,
+            "No hard-denied companies.",
+            "hard_denied",
             column_config={
                 "Score": st.column_config.ProgressColumn(
                     "Score",
@@ -3071,10 +3160,10 @@ with tabs[5]:
         rejected["Claude Model"] = claude_rejected.get("llm_model", "")
         rejected["Website"] = claude_rejected.get("final_url", "")
 
-        safe_dataframe(
+        render_bucket_display(
             rejected.reset_index(drop=True),
-            width="stretch",
-            hide_index=True,
+            "Claude has no active rejected companies in this view.",
+            "claude_rejected",
             column_config={
                 "Website": st.column_config.LinkColumn(
                     "Website",
