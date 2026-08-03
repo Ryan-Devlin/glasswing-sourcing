@@ -31,6 +31,17 @@ def _sqlite_columns(conn: sqlite3.Connection, table: str) -> list[str]:
     return [str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")]
 
 
+def _sanitize(value):
+    # Real crawled text occasionally contains embedded NUL (0x00) bytes --
+    # SQLite's TEXT columns tolerate them, Postgres's do not ("PostgreSQL
+    # text fields cannot contain NUL (0x00) bytes"). Stripping them is
+    # lossless in any practical sense: a NUL byte is encoding noise, never
+    # meaningful content.
+    if isinstance(value, str) and "\x00" in value:
+        return value.replace("\x00", "")
+    return value
+
+
 def migrate(*, execute: bool = False, progress: bool = False) -> dict[str, int]:
     if not using_postgres(PIPELINE_DATABASE_ENV_VAR):
         raise RuntimeError(
@@ -57,7 +68,7 @@ def migrate(*, execute: bool = False, progress: bool = False) -> dict[str, int]:
                 batch: list[tuple] = []
                 copied = 0
                 for row in rows:
-                    batch.append(tuple(row[c] for c in columns))
+                    batch.append(tuple(_sanitize(row[c]) for c in columns))
                     if len(batch) >= BATCH_SIZE:
                         pg_conn.executemany(
                             f"INSERT INTO {table}({column_list}) "

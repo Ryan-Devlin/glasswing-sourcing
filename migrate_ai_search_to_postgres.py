@@ -40,6 +40,17 @@ def _sqlite_columns(conn: sqlite3.Connection, table: str) -> list[str]:
     return [str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")]
 
 
+def _sanitize(value):
+    # Real crawled HTML/text occasionally contains embedded NUL (0x00)
+    # bytes -- SQLite's TEXT columns tolerate them, Postgres's do not
+    # ("PostgreSQL text fields cannot contain NUL (0x00) bytes"). Stripping
+    # them is lossless in any practical sense: a NUL byte in page text is
+    # encoding noise, never meaningful content.
+    if isinstance(value, str) and "\x00" in value:
+        return value.replace("\x00", "")
+    return value
+
+
 def _copy_table(
     sqlite_conn, pg_conn, table: str, *, execute: bool, progress: bool
 ) -> int:
@@ -52,7 +63,7 @@ def _copy_table(
     batch: list[tuple] = []
     copied = 0
     for row in rows:
-        batch.append(tuple(row[c] for c in columns))
+        batch.append(tuple(_sanitize(row[c]) for c in columns))
         if len(batch) >= BATCH_SIZE:
             pg_conn.executemany(
                 f"INSERT INTO {table}({column_list}) VALUES ({placeholders}) "
