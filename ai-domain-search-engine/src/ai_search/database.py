@@ -35,7 +35,16 @@ def connect(
             conn.commit()
         conn.execute("SET search_path TO ai_search, public")
         if not read_only:
-            migrate_postgres(conn)
+            # worker.py runs crawl_loop/query_discovery_loop/etc as separate
+            # concurrent asyncio tasks, each independently calling connect()
+            # -- without serializing here, several race to run this same
+            # schema DDL at once and deadlock on conflicting locks. Confirmed
+            # live the first time a real cloud worker actually started.
+            conn.execute("SELECT pg_advisory_lock(hashtext(?))", ("ai_search_migration",))
+            try:
+                migrate_postgres(conn)
+            finally:
+                conn.execute("SELECT pg_advisory_unlock(hashtext(?))", ("ai_search_migration",))
         return conn
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

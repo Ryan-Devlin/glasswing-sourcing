@@ -264,8 +264,17 @@ def _connect_db_postgres() -> sqlite3.Connection:
     conn.execute("CREATE SCHEMA IF NOT EXISTS pipeline")
     conn.commit()
     conn.execute("SET search_path TO pipeline, public")
-    conn.executescript(_PIPELINE_POSTGRES_SCHEMA)
-    conn.commit()
+    # Defense in depth: ai_search's identical connect-then-migrate pattern
+    # deadlocked live the moment multiple concurrent tasks each called it at
+    # startup. This module mostly reuses one shared connection rather than
+    # opening one per task, so the same race is less likely here -- but the
+    # lock is free when uncontended, so there's no reason not to have it.
+    conn.execute("SELECT pg_advisory_lock(hashtext(?))", ("pipeline_migration",))
+    try:
+        conn.executescript(_PIPELINE_POSTGRES_SCHEMA)
+        conn.commit()
+    finally:
+        conn.execute("SELECT pg_advisory_unlock(hashtext(?))", ("pipeline_migration",))
     return conn
 
 

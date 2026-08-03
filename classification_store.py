@@ -74,7 +74,16 @@ def connect_store(
     if using_postgres():
         conn = connect_postgres(read_only=read_only)
         if not read_only:
-            migrate(conn)
+            # This connection string is now shared by the web service and
+            # the ai-worker/zone-worker cloud services too -- multiple
+            # services independently connecting at once would otherwise
+            # race to run this same schema DDL and deadlock on conflicting
+            # locks (confirmed live for ai_search's identical pattern).
+            conn.execute("SELECT pg_advisory_lock(hashtext(?))", ("classification_store_migration",))
+            try:
+                migrate(conn)
+            finally:
+                conn.execute("SELECT pg_advisory_unlock(hashtext(?))", ("classification_store_migration",))
         return conn
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
