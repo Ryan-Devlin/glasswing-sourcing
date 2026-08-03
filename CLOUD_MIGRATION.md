@@ -1,5 +1,9 @@
 # Cloud migration status
 
+See `CUTOVER_RUNBOOK.md` for the exact, concrete steps to actually turn any
+of this on for real data -- deliberately not automated, since it's real,
+mostly one-way action on real data and real money.
+
 The application is local-first by default and cloud-portable by design: every
 cloud backend is selected purely by an environment variable's presence, never
 by a code branch that has to be flipped for a release. Local SQLite/local-file
