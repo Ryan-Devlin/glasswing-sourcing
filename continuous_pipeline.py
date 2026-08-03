@@ -24,6 +24,7 @@ import websockets
 from dotenv import load_dotenv
 
 import filter as screening_filter
+from db_backend import connect_postgres, using_postgres
 
 from collector import (
     SUPPORTED_EXTENSIONS,
@@ -204,7 +205,51 @@ def bootstrap_registry_from_screened_history(
     return len(rows_by_domain)
 
 
+_PIPELINE_POSTGRES_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS domains (
+        domain TEXT PRIMARY KEY,
+        first_seen TEXT NOT NULL,
+        last_seen TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at TEXT,
+        last_processed_at TEXT,
+        classification TEXT,
+        last_error TEXT DEFAULT '',
+        seen_count INTEGER NOT NULL DEFAULT 1,
+        first_seen_run_id TEXT NOT NULL DEFAULT '',
+        last_seen_run_id TEXT NOT NULL DEFAULT ''
+    );
+    CREATE TABLE IF NOT EXISTS claude_calls (
+        called_at TEXT NOT NULL,
+        domain TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS registry_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
+"""
+
+
 def connect_db() -> sqlite3.Connection:
+    if using_postgres():
+        return _connect_db_postgres()
+    return _connect_db_sqlite()
+
+
+def _connect_db_postgres() -> sqlite3.Connection:
+    # A fresh Postgres-backed queue always gets the modern schema directly
+    # (this session's full column set), so unlike the SQLite path there is
+    # no legacy-column migration or local-CSV history bootstrap to run --
+    # both of those exist only to carry forward a pre-existing local
+    # installation, which a cloud database never has.
+    conn = connect_postgres()
+    conn.executescript(_PIPELINE_POSTGRES_SCHEMA)
+    conn.commit()
+    return conn
+
+
+def _connect_db_sqlite() -> sqlite3.Connection:
     QUEUE_DB.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(QUEUE_DB, timeout=30)
     conn.row_factory = sqlite3.Row
@@ -417,8 +462,86 @@ def enqueue(
     )
     return bool(result.get("queued", False))
 
+def _corpus_priority_for_domains(domains: list[str]) -> dict[str, int]:
+    """Priority tier (lower = crawled sooner) for candidate queue domains.
+
+    Postgres mode can't ATTACH the (still-local) ai_search/zone_universe
+    SQLite files the way the SQLite queue path below does, so this opens
+    them directly and looks up just the candidate domains instead of the
+    full corpus. Mirrors claim_batch's SQLite-mode tiers: zone_universe page
+    evidence (0) outranks ai_search crawl evidence (1) outranks neither (2).
+    """
+    if not domains:
+        return {}
+    placeholders = ",".join("?" for _ in domains)
+    priority: dict[str, int] = {}
+    if ZONE_UNIVERSE_DB.exists():
+        conn = sqlite3.connect(ZONE_UNIVERSE_DB, timeout=30)
+        try:
+            rows = conn.execute(
+                f"SELECT DISTINCT domain FROM pages WHERE domain IN ({placeholders})",
+                domains,
+            ).fetchall()
+            for row in rows:
+                priority[row[0]] = 0
+        except sqlite3.OperationalError:
+            pass
+        finally:
+            conn.close()
+    if AI_SEARCH_DB.exists():
+        conn = sqlite3.connect(AI_SEARCH_DB, timeout=30)
+        try:
+            rows = conn.execute(
+                f"SELECT domain FROM domains "
+                f"WHERE last_crawled_at IS NOT NULL AND domain IN ({placeholders})",
+                domains,
+            ).fetchall()
+            for row in rows:
+                priority.setdefault(row[0], 1)
+        except sqlite3.OperationalError:
+            pass
+        finally:
+            conn.close()
+    return priority
+
+
 def claim_batch(conn: sqlite3.Connection, size: int) -> list[str]:
     now = utc_now()
+    if using_postgres():
+        # No ATTACH equivalent in Postgres, so pull a bounded candidate
+        # window ordered the normal way, then re-rank it in Python using the
+        # local corpora above. Bounding this window (rather than scanning
+        # every pending row) keeps a single claim cheap regardless of how
+        # deep the real-time queue gets.
+        candidate_limit = min(max(size * 10, size), 2000)
+        rows = conn.execute(
+            """
+            SELECT domain, first_seen FROM domains
+            WHERE status='pending'
+              AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+            ORDER BY first_seen
+            LIMIT ?
+            """,
+            (now, candidate_limit),
+        ).fetchall()
+        priority = _corpus_priority_for_domains([row["domain"] for row in rows])
+        ordered = sorted(
+            rows, key=lambda row: (priority.get(row["domain"], 2), row["first_seen"])
+        )
+        domains = [row["domain"] for row in ordered[:size]]
+        if not domains:
+            return []
+        conn.executemany(
+            """
+            UPDATE domains
+            SET status='processing', attempts=attempts+1
+            WHERE domain=?
+            """,
+            [(domain,) for domain in domains],
+        )
+        conn.commit()
+        return domains
+
     attached = {
         str(row[1])
         for row in conn.execute("PRAGMA database_list").fetchall()
@@ -679,13 +802,13 @@ def claude_allowance(conn: sqlite3.Connection) -> int:
         now - timedelta(days=1)
     ).isoformat().replace("+00:00", "Z")
     hour_count = conn.execute(
-        "SELECT COUNT(*) FROM claude_calls WHERE called_at >= ?",
+        "SELECT COUNT(*) AS count FROM claude_calls WHERE called_at >= ?",
         (hour_cutoff,),
-    ).fetchone()[0]
+    ).fetchone()["count"]
     day_count = conn.execute(
-        "SELECT COUNT(*) FROM claude_calls WHERE called_at >= ?",
+        "SELECT COUNT(*) AS count FROM claude_calls WHERE called_at >= ?",
         (day_cutoff,),
-    ).fetchone()[0]
+    ).fetchone()["count"]
 
     hourly_limit = int(config.get("claude_hourly_limit", 3))
     daily_limit = int(config.get("claude_daily_limit", 12))

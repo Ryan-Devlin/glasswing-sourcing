@@ -45,6 +45,22 @@ mode is never a one-way removal -- it keeps working with zero configuration.
 
 See `.env.example` for every variable and its default (unset = local mode).
 
+- **CertStream pipeline queue has a tested Postgres dual-backend**
+  (`continuous_pipeline.py`), built and verified against the real live
+  database the same way the classification store was. Deliberately **not**
+  wired into any running process yet: `continuous_pipeline.py` isn't
+  imported by anything the deployed `web` service runs today (only by
+  tests, and by its own local-only `__main__` entrypoint, which cloud mode
+  already disables), so this is pure groundwork with zero live effect. The
+  one piece kept working differently on purpose: `claim_batch()`'s
+  domain-priority ordering used SQLite's `ATTACH DATABASE` to cheaply JOIN
+  against the (still-local) ai_search/zone_universe corpora; Postgres has no
+  ATTACH equivalent, so the Postgres path instead pulls a bounded candidate
+  window (`min(size * 10, 2000)` pending rows) and re-ranks it in Python
+  against those same local SQLite files looked up by domain -- correct at
+  realistic batch sizes, but not a byte-for-byte behavioral clone at extreme
+  queue depth.
+
 ## Not yet done
 
 - **Still one Railway service**, not the four-service split below. There is
