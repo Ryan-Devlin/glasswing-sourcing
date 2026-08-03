@@ -25,15 +25,26 @@ def using_object_storage() -> bool:
     return bool(os.getenv("S3_BUCKET", "").strip())
 
 
+def _clean_env(name: str) -> str | None:
+    # A trailing newline/space from copy-pasting a credential into a
+    # dashboard's variable field produces a technically-different string
+    # that still *looks* right at a glance -- but R2/S3 request signing is
+    # byte-exact, so it fails with an opaque "signature does not match"
+    # rather than an obviously-wrong-credential error. Stripped once here,
+    # for every credential this module reads.
+    value = os.getenv(name)
+    return value.strip() or None if value else None
+
+
 def _client():
     import boto3
 
     return boto3.client(
         "s3",
-        endpoint_url=os.getenv("S3_ENDPOINT_URL") or None,
-        aws_access_key_id=os.getenv("S3_ACCESS_KEY_ID") or None,
-        aws_secret_access_key=os.getenv("S3_SECRET_ACCESS_KEY") or None,
-        region_name=os.getenv("S3_REGION") or "auto",
+        endpoint_url=_clean_env("S3_ENDPOINT_URL"),
+        aws_access_key_id=_clean_env("S3_ACCESS_KEY_ID"),
+        aws_secret_access_key=_clean_env("S3_SECRET_ACCESS_KEY"),
+        region_name=_clean_env("S3_REGION") or "auto",
     )
 
 
