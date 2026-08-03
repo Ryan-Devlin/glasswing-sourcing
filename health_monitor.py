@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from ai_search.database import AI_SEARCH_DATABASE_ENV_VAR
+from ai_search.database import connect as connect_ai_search
 from classification_store import CLASSIFICATION_DB, connect_store
 from common import (
     DATA,
@@ -17,11 +19,13 @@ from common import (
     QUEUE_DB,
     STREAM_STATUS,
 )
-from db_backend import using_postgres
+from db_backend import PostgresConnection, using_postgres
 from manual_truth_backup import list_manual_snapshots
 from model_evaluation import performance_metrics
 from rejection_cleanup import AI_SEARCH_DB, ZONE_DB
 from runtime_control import runtime_status
+from zone_universe.database import ZONE_UNIVERSE_DATABASE_ENV_VAR
+from zone_universe.database import connect as connect_zone_universe
 
 
 def _json(path: Path) -> dict[str, object]:
@@ -78,37 +82,44 @@ def _database_counts() -> dict[str, int]:
             ):
                 if status in {"pending", "processing"}:
                     counts[f"pipeline_{status}"] = int(total)
-    for prefix, path, page_query in (
-        (
-            "ai",
-            AI_SEARCH_DB,
-            "SELECT count(*) FROM pages",
-        ),
-        (
-            "zone",
-            ZONE_DB,
-            "SELECT count(*) FROM pages",
-        ),
+    for prefix, path, env_var, connect_fn in (
+        ("ai", AI_SEARCH_DB, AI_SEARCH_DATABASE_ENV_VAR, connect_ai_search),
+        ("zone", ZONE_DB, ZONE_UNIVERSE_DATABASE_ENV_VAR, connect_zone_universe),
     ):
-        if not path.exists():
+        if not (using_postgres(env_var) or path.exists()):
             continue
-        with sqlite3.connect(path, timeout=30) as conn:
+        with connect_fn(path, read_only=True) as conn:
+            postgres = isinstance(conn, PostgresConnection)
             counts[f"{prefix}_pages"] = int(
-                conn.execute(page_query).fetchone()[0]
+                conn.execute("SELECT count(*) AS total FROM pages").fetchone()["total"]
             )
-            counts[f"{prefix}_indexed"] = int(
-                conn.execute("SELECT count(*) FROM page_search").fetchone()[0]
-            )
-            counts[f"{prefix}_orphans"] = int(
-                conn.execute(
-                    """
-                    SELECT count(*) FROM page_search f
-                    LEFT JOIN pages p
-                      ON p.id=cast(f.page_id AS INTEGER)
-                    WHERE p.id IS NULL
-                    """
-                ).fetchone()[0]
-            )
+            if postgres:
+                # search_vector lives directly on the pages row, so there's
+                # no separate index table that could go out of sync with it
+                # -- "orphans" (an FTS5 shadow-table concept) can't occur.
+                counts[f"{prefix}_indexed"] = int(
+                    conn.execute(
+                        "SELECT count(*) AS total FROM pages "
+                        "WHERE search_vector IS NOT NULL"
+                    ).fetchone()["total"]
+                )
+                counts[f"{prefix}_orphans"] = 0
+            else:
+                counts[f"{prefix}_indexed"] = int(
+                    conn.execute(
+                        "SELECT count(*) AS total FROM page_search"
+                    ).fetchone()["total"]
+                )
+                counts[f"{prefix}_orphans"] = int(
+                    conn.execute(
+                        """
+                        SELECT count(*) AS total FROM page_search f
+                        LEFT JOIN pages p
+                          ON p.id=cast(f.page_id AS INTEGER)
+                        WHERE p.id IS NULL
+                        """
+                    ).fetchone()["total"]
+                )
     return counts
 
 

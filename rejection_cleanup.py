@@ -15,6 +15,9 @@ import tempfile
 from pathlib import Path
 from typing import Iterable
 
+from ai_search.database import AI_SEARCH_DATABASE_ENV_VAR
+from ai_search.database import connect as connect_ai_search
+from ai_search.database import index_page as index_ai_search_page
 from classification_store import CLASSIFICATION_DB, connect_store
 from common import (
     AI_SEARCH_DB,
@@ -25,6 +28,8 @@ from common import (
 )
 from db_backend import begin_immediate, using_postgres
 from training_truth import protected_training_domains
+from zone_universe.database import ZONE_UNIVERSE_DATABASE_ENV_VAR
+from zone_universe.database import connect as connect_zone_universe
 
 
 ZONE_DB = ZONE_UNIVERSE_DB
@@ -50,57 +55,105 @@ def automated_rejected_domains(
     return {domain for domain in domains if domain and domain not in protected}
 
 
+def _rebuild_ai_search_index_postgres() -> int:
+    conn = connect_ai_search("")
+    try:
+        page_ids = [
+            row["id"] for row in conn.execute("SELECT id FROM pages").fetchall()
+        ]
+        for page_id in page_ids:
+            index_ai_search_page(conn, page_id)
+        conn.commit()
+        return len(page_ids)
+    finally:
+        conn.close()
+
+
+def _rebuild_zone_universe_index_postgres() -> int:
+    conn = connect_zone_universe("")
+    try:
+        rows = conn.execute(
+            "SELECT id, domain, title, meta_description, headings, cleaned_text "
+            "FROM pages"
+        ).fetchall()
+        for row in rows:
+            conn.execute("""
+                UPDATE pages SET search_vector =
+                    setweight(to_tsvector('english', coalesce(?, '')), 'A') ||
+                    setweight(to_tsvector('english', coalesce(?, '')), 'B') ||
+                    setweight(to_tsvector('english', coalesce(?, '')), 'C') ||
+                    setweight(to_tsvector('english', coalesce(?, '')), 'D') ||
+                    setweight(to_tsvector('english', coalesce(?, '')), 'D')
+                WHERE id = ?
+            """, (
+                row["domain"], row["title"], row["meta_description"],
+                row["headings"], row["cleaned_text"], row["id"],
+            ))
+        conn.commit()
+        return len(rows)
+    finally:
+        conn.close()
+
+
 def rebuild_full_text_indexes(
     *,
     ai_search_db: Path | str = AI_SEARCH_DB,
     zone_db: Path | str = ZONE_DB,
 ) -> dict[str, int]:
-    """Rebuild both FTS indexes from their canonical live page tables."""
+    """Rebuild both full-text indexes from their canonical live page tables."""
     result = {"ai_indexed_pages": 0, "zone_indexed_pages": 0}
-    ai_path = Path(ai_search_db)
-    if ai_path.exists():
-        with sqlite3.connect(ai_path, timeout=30) as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            conn.execute("DELETE FROM page_search")
-            conn.execute(
-                """
-                INSERT INTO page_search(
-                    page_id,domain,title,description,headings,body
+
+    if using_postgres(AI_SEARCH_DATABASE_ENV_VAR):
+        result["ai_indexed_pages"] = _rebuild_ai_search_index_postgres()
+    else:
+        ai_path = Path(ai_search_db)
+        if ai_path.exists():
+            with sqlite3.connect(ai_path, timeout=30) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute("DELETE FROM page_search")
+                conn.execute(
+                    """
+                    INSERT INTO page_search(
+                        page_id,domain,title,description,headings,body
+                    )
+                    SELECT p.id,d.domain,p.title,p.meta_description,
+                           p.headings,p.cleaned_text
+                    FROM pages p
+                    JOIN domains d ON d.id=p.domain_id
+                    """
                 )
-                SELECT p.id,d.domain,p.title,p.meta_description,
-                       p.headings,p.cleaned_text
-                FROM pages p
-                JOIN domains d ON d.id=p.domain_id
-                """
-            )
-            conn.execute(
-                "INSERT INTO page_search(page_search) VALUES ('optimize')"
-            )
-            conn.commit()
-            result["ai_indexed_pages"] = int(
-                conn.execute("SELECT count(*) FROM page_search").fetchone()[0]
-            )
-    zone_path = Path(zone_db)
-    if zone_path.exists():
-        with sqlite3.connect(zone_path, timeout=30) as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            conn.execute("DELETE FROM page_search")
-            conn.execute(
-                """
-                INSERT INTO page_search(
-                    page_id,domain,title,description,headings,body
+                conn.execute(
+                    "INSERT INTO page_search(page_search) VALUES ('optimize')"
                 )
-                SELECT id,domain,title,meta_description,headings,cleaned_text
-                FROM pages
-                """
-            )
-            conn.execute(
-                "INSERT INTO page_search(page_search) VALUES ('optimize')"
-            )
-            conn.commit()
-            result["zone_indexed_pages"] = int(
-                conn.execute("SELECT count(*) FROM page_search").fetchone()[0]
-            )
+                conn.commit()
+                result["ai_indexed_pages"] = int(
+                    conn.execute("SELECT count(*) FROM page_search").fetchone()[0]
+                )
+
+    if using_postgres(ZONE_UNIVERSE_DATABASE_ENV_VAR):
+        result["zone_indexed_pages"] = _rebuild_zone_universe_index_postgres()
+    else:
+        zone_path = Path(zone_db)
+        if zone_path.exists():
+            with sqlite3.connect(zone_path, timeout=30) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute("DELETE FROM page_search")
+                conn.execute(
+                    """
+                    INSERT INTO page_search(
+                        page_id,domain,title,description,headings,body
+                    )
+                    SELECT id,domain,title,meta_description,headings,cleaned_text
+                    FROM pages
+                    """
+                )
+                conn.execute(
+                    "INSERT INTO page_search(page_search) VALUES ('optimize')"
+                )
+                conn.commit()
+                result["zone_indexed_pages"] = int(
+                    conn.execute("SELECT count(*) FROM page_search").fetchone()[0]
+                )
     return result
 
 

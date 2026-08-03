@@ -151,6 +151,17 @@ See `.env.example` for every variable and its default (unset = local mode).
   attempted, correctly, since it's real production data. Running it for
   real is a decision for you to make explicitly.
 
+- **`health_monitor.py` and `rejection_cleanup.py`'s System Health checks
+  were hardcoded to raw SQLite** against the ai_search/zone_universe files,
+  bypassing the dual-backend entirely -- harmless while those variables stay
+  unset, but the moment either got cut over, System Health's page/index
+  counts would have kept silently reporting stale local numbers, and the
+  "rebuild search index" button would have rebuilt the abandoned local file
+  instead of the real live data. Fixed and verified live end-to-end (seeded
+  a real page in Postgres, ran the rebuild, confirmed correct counts) before
+  this could bite -- found specifically because a real cutover looked
+  imminent, not through the general worker-path audit above.
+
 ## Not yet done
 
 - **Still one Railway service**, not the four-service split below. There is
