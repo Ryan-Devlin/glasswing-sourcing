@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 import shutil
 import sqlite3
+import sys
+import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -30,6 +33,21 @@ from zone_universe.database import connect as connect_zone_universe
 # Same dedicated env var continuous_pipeline.py gates on -- never the
 # classification store's DATABASE_URL (see continuous_pipeline.connect_db).
 PIPELINE_DATABASE_ENV_VAR = "PIPELINE_DATABASE_URL"
+
+
+@contextmanager
+def _timed(label: str):
+    """Temporary diagnostic: health_report() is the one thing every page
+    load blocks on, and it opens 5+ separate Postgres connections in cloud
+    mode with no visibility into which one is actually slow. Logs to
+    stderr (captured by `railway logs`) rather than stdout, matching the
+    other workers' logging.basicConfig default stream."""
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        print(f"[health_monitor] {label}: {elapsed_ms:.0f}ms", file=sys.stderr, flush=True)
 
 
 def _json(path: Path) -> dict[str, object]:
@@ -68,7 +86,9 @@ def _database_counts() -> dict[str, int]:
         "zone_orphans": 0,
     }
     if using_postgres() or CLASSIFICATION_DB.exists():
-        with connect_store(CLASSIFICATION_DB, read_only=True) as conn:
+        with _timed("classification_store connect+count"), connect_store(
+            CLASSIFICATION_DB, read_only=True
+        ) as conn:
             counts["classifications"] = int(
                 conn.execute(
                     "SELECT count(*) AS total FROM classifications"
@@ -80,16 +100,17 @@ def _database_counts() -> dict[str, int]:
                 ).fetchone()["total"]
             )
     if using_postgres(PIPELINE_DATABASE_ENV_VAR):
-        conn = connect_postgres(read_only=True, env_var=PIPELINE_DATABASE_ENV_VAR)
-        try:
-            conn.execute("SET search_path TO pipeline, public")
-            for row in conn.execute(
-                "SELECT status, count(*) AS total FROM domains GROUP BY status"
-            ).fetchall():
-                if row["status"] in {"pending", "processing"}:
-                    counts[f"pipeline_{row['status']}"] = int(row["total"])
-        finally:
-            conn.close()
+        with _timed("pipeline connect+count"):
+            conn = connect_postgres(read_only=True, env_var=PIPELINE_DATABASE_ENV_VAR)
+            try:
+                conn.execute("SET search_path TO pipeline, public")
+                for row in conn.execute(
+                    "SELECT status, count(*) AS total FROM domains GROUP BY status"
+                ).fetchall():
+                    if row["status"] in {"pending", "processing"}:
+                        counts[f"pipeline_{row['status']}"] = int(row["total"])
+            finally:
+                conn.close()
     elif QUEUE_DB.exists():
         with sqlite3.connect(QUEUE_DB, timeout=30) as conn:
             for status, total in conn.execute(
@@ -103,7 +124,9 @@ def _database_counts() -> dict[str, int]:
     ):
         if not (using_postgres(env_var) or path.exists()):
             continue
-        with connect_fn(path, read_only=True) as conn:
+        with _timed(f"{prefix}_search connect+count"), connect_fn(
+            path, read_only=True
+        ) as conn:
             postgres = isinstance(conn, PostgresConnection)
             counts[f"{prefix}_pages"] = int(
                 conn.execute("SELECT count(*) AS total FROM pages").fetchone()["total"]
@@ -155,16 +178,21 @@ def _timestamp_age_seconds(value: object) -> float | None:
 
 
 def health_report(*, include_integrity: bool = False) -> dict[str, object]:
-    counts = _database_counts()
-    runtime = runtime_status()
-    snapshots = list_manual_snapshots()
+    with _timed("_database_counts total"):
+        counts = _database_counts()
+    with _timed("runtime_status"):
+        runtime = runtime_status()
+    with _timed("list_manual_snapshots"):
+        snapshots = list_manual_snapshots()
     stream = _json(STREAM_STATUS)
     free_gb = shutil.disk_usage(DATA).free / (1024 ** 3)
     checks: list[dict[str, str]] = []
 
     if using_postgres():
         try:
-            with connect_store(CLASSIFICATION_DB, read_only=True):
+            with _timed("classification_store ping"), connect_store(
+                CLASSIFICATION_DB, read_only=True
+            ):
                 pass
             checks.append({
                 "Check": "Classification database",
@@ -262,6 +290,8 @@ def health_report(*, include_integrity: bool = False) -> dict[str, object]:
     )
     overall = ("Healthy", "Warning", "Error")[worst]
     stream_age = _timestamp_age_seconds(stream.get("updated_at"))
+    with _timed("performance_metrics"):
+        performance = performance_metrics()
     return {
         "overall": overall,
         "checked_at": datetime.now(timezone.utc).isoformat(),
@@ -269,7 +299,7 @@ def health_report(*, include_integrity: bool = False) -> dict[str, object]:
         "counts": counts,
         "runtime": runtime,
         "manual_snapshots": snapshots,
-        "performance": performance_metrics(),
+        "performance": performance,
         "pipeline_status": stream,
         "pipeline_status_age_seconds": stream_age,
         "paths": {
