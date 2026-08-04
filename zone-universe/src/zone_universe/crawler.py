@@ -62,7 +62,8 @@ def claim_batch(
         WHERE s.tld=? AND s.byte_offset < s.total_bytes
         ORDER BY
           s.priority,
-          CAST(s.byte_offset AS REAL) / max(s.total_bytes, 1),
+          CAST(s.byte_offset AS REAL) /
+              CASE WHEN s.total_bytes = 0 THEN 1 ELSE s.total_bytes END,
           s.shard
         LIMIT 1
         """,
