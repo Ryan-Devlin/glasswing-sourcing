@@ -44,16 +44,34 @@ class PostgresConnection:
         # `?` character otherwise, so a blind replace is safe here.
         return sql.replace("?", "%s")
 
+    @staticmethod
+    def _clean_param(value: Any) -> Any:
+        """Remove NUL bytes that PostgreSQL cannot store in text fields.
+
+        Website text is untrusted input and malformed pages occasionally
+        contain literal ``0x00`` characters. SQLite accepts them, but psycopg
+        rejects the entire statement—and previously the crawler's whole
+        concurrent batch—with DataError. Bytes/blob values are deliberately
+        left untouched because NUL is valid binary data.
+        """
+        if isinstance(value, str) and "\x00" in value:
+            return value.replace("\x00", "")
+        return value
+
+    @classmethod
+    def _clean_params(cls, params: Iterable[Any]) -> tuple[Any, ...]:
+        return tuple(cls._clean_param(value) for value in params)
+
     def execute(self, sql: str, params: Iterable[Any] = ()):
         cursor = self._raw.cursor()
-        cursor.execute(self._translate(sql), tuple(params))
+        cursor.execute(self._translate(sql), self._clean_params(params))
         return cursor
 
     def executemany(self, sql: str, seq_of_params: Iterable[Iterable[Any]]) -> None:
         cursor = self._raw.cursor()
         cursor.executemany(
             self._translate(sql),
-            [tuple(params) for params in seq_of_params],
+            [self._clean_params(params) for params in seq_of_params],
         )
 
     def executescript(self, sql: str) -> None:
