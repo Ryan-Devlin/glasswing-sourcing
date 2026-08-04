@@ -439,48 +439,6 @@ def render_hideable_table(
     return edited.drop(columns=["Hide", "Mark Yes", "Mark No"])
 
 
-def render_hidden_domains_manager(*, key: str = "hidden_domains") -> None:
-    """Provide one reliable escape hatch for restoring hidden companies."""
-    from classification_store import list_hidden_domains, unhide_domains
-
-    hidden = list_hidden_domains(limit=5000)
-    if not hidden:
-        return
-    with st.expander(f"Hidden companies ({len(hidden):,})"):
-        st.caption(
-            "Hidden companies remain fully stored and classified. Select "
-            "Restore to make them visible in every company table again."
-        )
-        frame = pd.DataFrame(hidden)
-        editor = pd.DataFrame({
-            "Restore": False,
-            "Domain": frame["domain"],
-            "Hidden at": frame["hidden_at"].astype(str).str.slice(0, 19),
-        })
-        edited = st.data_editor(
-            editor,
-            hide_index=True,
-            width="stretch",
-            height=min(500, 45 + len(editor) * 35),
-            disabled=["Domain", "Hidden at"],
-            column_config={
-                "Restore": st.column_config.CheckboxColumn(
-                    "Restore",
-                    help="Show this company in review tables again.",
-                ),
-            },
-            key=f"{key}_editor",
-        )
-        selected = edited.loc[edited["Restore"], "Domain"].tolist()
-        if st.button(
-            f"Restore {len(selected):,} selected",
-            disabled=not selected,
-            key=f"{key}_restore",
-        ):
-            unhide_domains(selected)
-            st.rerun()
-
-
 def render_worker_controls(
     service: str,
     *,

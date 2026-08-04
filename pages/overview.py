@@ -18,12 +18,20 @@ from classification_store import (
     classification_bucket_counts,
     classification_source_label,
     query_classifications,
+    query_classifications_by_domains,
     search_classifications,
 )
-from common import AI_SEARCH_DB, ZONE_UNIVERSE_DB
+from common import (
+    AI_SEARCH_DB,
+    NO_BASKET_DATA,
+    YES_BASKET_DATA,
+    ZONE_UNIVERSE_DB,
+    read_basket_data,
+    stable_domain,
+)
 from health_monitor import health_report
 from runtime_control import SERVICES
-from ui_theme import render_hideable_table, render_hidden_domains_manager
+from ui_theme import render_hideable_table
 from zone_universe.search import search_pages
 
 st.title("Glasswing Sourcing")
@@ -64,7 +72,6 @@ with st.expander("Worker detail"):
             f"(desired: {'on' if row['desired'] else 'off'})"
         )
 st.page_link("pages/system_health.py", label="Full system health", icon="🩺")
-render_hidden_domains_manager(key="overview_hidden_domains")
 
 st.divider()
 
@@ -110,42 +117,62 @@ def cached_master_rows(
     )
 
 
+@st.cache_data(show_spinner=False, ttl=15, max_entries=48)
+def cached_domain_rows(domains: tuple[str, ...]) -> list[dict]:
+    return query_classifications_by_domains(domains)
+
+
 master_counts = cached_master_bucket_counts()
 bucket_totals = {
     label: sum(int(master_counts.get(bucket, 0)) for bucket in buckets)
     for label, buckets in MASTER_BUCKETS
 }
-master_metric_columns = st.columns(len(MASTER_BUCKETS))
-for column, (label, _) in zip(master_metric_columns, MASTER_BUCKETS):
-    column.metric(label, f"{bucket_totals[label]:,}")
+yes_basket = read_basket_data(YES_BASKET_DATA)
+no_basket = read_basket_data(NO_BASKET_DATA)
+view_totals = {
+    **bucket_totals,
+    "Yes": len(yes_basket),
+    "No": len(no_basket),
+}
+master_metric_columns = st.columns(len(view_totals))
+for column, (label, total) in zip(master_metric_columns, view_totals.items()):
+    column.metric(label, f"{total:,}")
 
-selected_bucket_name = st.radio(
-    "Master bucket",
-    [label for label, _ in MASTER_BUCKETS],
-    horizontal=True,
+selected_bucket_name = st.segmented_control(
+    "Company table",
+    list(view_totals),
+    default="Investable",
     label_visibility="collapsed",
-    key="overview_master_bucket",
+    width="stretch",
+    key="overview_master_view",
 )
-selected_buckets = dict(MASTER_BUCKETS)[selected_bucket_name]
+selected_bucket_name = selected_bucket_name or "Investable"
 master_sort_col, master_rows_col, master_status_col = st.columns([2.5, 1, 2])
-master_sort = master_sort_col.selectbox(
-    "Sort companies",
-    [
-        "Priority: high to low",
-        "Fit: high to low",
-        "Recently classified",
-        "Company: A to Z",
-        "Domain: A to Z",
-    ],
-    key=f"overview_master_sort_{selected_bucket_name}",
-)
+if selected_bucket_name in {"Yes", "No"}:
+    master_sort = master_sort_col.selectbox(
+        "Sort companies",
+        ["Rating: high to low", "Rating: low to high", "Domain: A to Z"],
+        key=f"overview_master_sort_{selected_bucket_name}",
+    )
+else:
+    master_sort = master_sort_col.selectbox(
+        "Sort companies",
+        [
+            "Priority: high to low",
+            "Fit: high to low",
+            "Recently classified",
+            "Company: A to Z",
+            "Domain: A to Z",
+        ],
+        key=f"overview_master_sort_{selected_bucket_name}",
+    )
 master_page_size = int(master_rows_col.selectbox(
     "Rows",
     [25, 50, 100, 200],
     index=2,
     key=f"overview_master_rows_{selected_bucket_name}",
 ))
-master_total = int(bucket_totals[selected_bucket_name])
+master_total = int(view_totals[selected_bucket_name])
 master_page_key = f"overview_master_page_{selected_bucket_name}"
 master_max_page = max(1, (master_total + master_page_size - 1) // master_page_size)
 master_page = min(
@@ -155,12 +182,51 @@ master_page = min(
 master_status_col.caption(
     f"{master_total:,} companies · page {master_page:,} of {master_max_page:,}"
 )
-master_rows = cached_master_rows(
-    tuple(selected_buckets),
-    master_page_size,
-    (master_page - 1) * master_page_size,
-    master_sort,
-)
+master_ratings: dict[str, int] = {}
+if selected_bucket_name in {"Yes", "No"}:
+    selected_basket = yes_basket if selected_bucket_name == "Yes" else no_basket
+    selected_basket = selected_basket.copy()
+    selected_basket["_domain"] = selected_basket["domain_url"].map(stable_domain)
+    selected_basket = selected_basket[selected_basket["_domain"] != ""]
+    if master_sort == "Rating: low to high":
+        selected_basket = selected_basket.sort_values(
+            ["rating", "_domain"], ascending=[True, True]
+        )
+    elif master_sort == "Domain: A to Z":
+        selected_basket = selected_basket.sort_values("_domain")
+    else:
+        selected_basket = selected_basket.sort_values(
+            ["rating", "_domain"], ascending=[False, True]
+        )
+    basket_page = selected_basket.iloc[
+        (master_page - 1) * master_page_size:master_page * master_page_size
+    ]
+    page_domains = tuple(basket_page["_domain"].tolist())
+    saved_rows = {
+        stable_domain(row["domain"]): row
+        for row in cached_domain_rows(page_domains)
+    }
+    master_rows = [
+        {
+            **saved_rows.get(domain, {}),
+            "domain": domain,
+            "final_url": saved_rows.get(domain, {}).get("final_url")
+            or f"https://{domain}",
+        }
+        for domain in page_domains
+    ]
+    master_ratings = {
+        row["_domain"]: int(row["rating"])
+        for row in basket_page.to_dict(orient="records")
+    }
+else:
+    selected_buckets = dict(MASTER_BUCKETS)[selected_bucket_name]
+    master_rows = cached_master_rows(
+        tuple(selected_buckets),
+        master_page_size,
+        (master_page - 1) * master_page_size,
+        master_sort,
+    )
 if master_rows:
     master_frame = pd.DataFrame({
         "_domain": [row["domain"] for row in master_rows],
@@ -185,13 +251,21 @@ if master_rows:
         ],
         "Updated": [str(row.get("updated_at", ""))[:10] for row in master_rows],
     })
+    visible_master_columns = [
+        "Company", "Domain", "Source", "Category", "Score",
+        "Description", "Reason", "Updated",
+    ]
+    if selected_bucket_name in {"Yes", "No"}:
+        master_frame.insert(
+            3,
+            "Training rating",
+            [master_ratings.get(domain, 0) for domain in master_frame["_domain"]],
+        )
+        visible_master_columns.insert(3, "Training rating")
     render_hideable_table(
         master_frame,
         domain_column="_domain",
-        visible_columns=[
-            "Company", "Domain", "Source", "Category", "Score",
-            "Description", "Reason", "Updated",
-        ],
+        visible_columns=visible_master_columns,
         key=f"overview_master_table_{selected_bucket_name}_{master_page}",
         height=min(760, 45 + len(master_frame) * 35),
         column_config={

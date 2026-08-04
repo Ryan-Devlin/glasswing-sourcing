@@ -641,6 +641,36 @@ def query_classifications(
     return [dict(row) for row in rows]
 
 
+def query_classifications_by_domains(
+    domains: Iterable[str],
+    *,
+    path: Path | str = CLASSIFICATION_DB,
+) -> list[dict[str, object]]:
+    """Fetch lightweight display records for an explicit domain page."""
+    normalized = list(dict.fromkeys(
+        stable_domain(domain)
+        for domain in domains
+        if stable_domain(domain)
+    ))
+    if not normalized or (
+        not using_classification_postgres() and not Path(path).exists()
+    ):
+        return []
+    rows = []
+    with connect_store(path, read_only=True) as conn:
+        for start in range(0, len(normalized), 800):
+            batch = normalized[start:start + 800]
+            marks = ",".join("?" for _ in batch)
+            rows.extend(conn.execute(
+                "SELECT domain,company_name,final_url,description,"
+                "routing_bucket,routing_reason,fit_score,priority_score,"
+                "thesis_pillar,content_source,updated_at "
+                f"FROM classifications WHERE domain IN ({marks})",
+                batch,
+            ).fetchall())
+    return [dict(row) for row in rows]
+
+
 def hide_domains(
     domains: Iterable[str],
     *,

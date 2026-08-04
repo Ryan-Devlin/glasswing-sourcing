@@ -14,6 +14,7 @@ from classification_store import (
     hide_domains,
     list_hidden_domains,
     query_classifications,
+    query_classifications_by_domains,
     record_manual_move,
     import_private_sqlite_into_shared,
     unhide_domains,
@@ -66,6 +67,11 @@ def test_master_bucket_queries_are_paged_and_source_labeled(tmp_path):
     assert classification_source_label(rows[0]["content_source"]) == "CertStream"
     assert classification_source_label("crawler_cache_stale") == ".AI crawler"
     assert classification_source_label("zone_universe_cache") == ".COM/.APP crawler"
+    domain_rows = query_classifications_by_domains(
+        ["https://zone.app", "missing.ai"],
+        path=database,
+    )
+    assert [row["domain"] for row in domain_rows] == ["zone.app"]
 
 
 def test_pipeline_database_url_is_cloud_fallback(monkeypatch):
