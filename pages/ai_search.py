@@ -53,6 +53,7 @@ from common import (
     save_basket_entries,
     stable_domain,
 )
+from ui_theme import render_hideable_table
 
 st.markdown("""
 <style>
@@ -356,15 +357,11 @@ with tabs[0]:
                 "Crawled": source["crawled_at"].str.slice(0, 10),
                 "Website": source["final_url"],
             })
-            edited = st.data_editor(
+            edited = render_hideable_table(
                 editor,
-                hide_index=True,
-                width="stretch",
+                domain_column="Domain",
+                editable_columns=["Apply", "Action"],
                 height=min(900, 40 + len(editor) * 35),
-                disabled=[
-                    "Domain", "Current List", "Title", "Description", "Match",
-                    "Words", "Crawled", "Website",
-                ],
                 column_config={
                     "Apply": st.column_config.CheckboxColumn(width="small"),
                     "Action": st.column_config.SelectboxColumn(
@@ -559,26 +556,11 @@ with tabs[1]:
                     "Reason": selected_bucket["routing_reason"],
                     "Website": selected_bucket["final_url"],
                 })
-                edited_bucket = st.data_editor(
+                edited_bucket = render_hideable_table(
                     bucket_table,
-                    hide_index=True,
-                    width="stretch",
+                    domain_column="Domain",
+                    editable_columns=["Select"],
                     height=min(760, 45 + len(bucket_table) * 35),
-                    disabled=[
-                        "Company",
-                        "Domain",
-                        "Availability",
-                        "Fit",
-                        "Venture",
-                        "Wedge",
-                        "Moat",
-                        "Founders",
-                        "Confidence",
-                        "Priority",
-                        "Description",
-                        "Reason",
-                        "Website",
-                    ],
                     column_config={
                         "Select": st.column_config.CheckboxColumn("Move"),
                         "Fit": st.column_config.ProgressColumn(

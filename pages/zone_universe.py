@@ -49,6 +49,7 @@ from zone_universe.database import connect, diagnostics, get_state
 from zone_universe.rdap import cached_registrations, lookup_and_save
 from zone_universe.search import raw_html, search_pages
 from zone_universe.zone_parser import discover_zonefiles
+from ui_theme import render_hideable_table
 
 
 st.markdown(
@@ -651,22 +652,11 @@ with tabs[0]:
                 "Words": source["word_count"],
                 "Website": source["final_url"],
             })
-            edited = st.data_editor(
+            edited = render_hideable_table(
                 table,
-                hide_index=True,
-                width="stretch",
+                domain_column="Domain",
+                editable_columns=["Select"],
                 height=min(760, 45 + len(table) * 35),
-                disabled=[
-                    "Domain",
-                    "TLD",
-                    "Title",
-                    "Description",
-                    "Registered",
-                    "Registrar",
-                    "Match",
-                    "Words",
-                    "Website",
-                ],
                 column_config={
                     "Select": st.column_config.CheckboxColumn("Select"),
                     "Website": st.column_config.LinkColumn(
@@ -910,28 +900,11 @@ with tabs[1]:
                 "Reason": selected_bucket["routing_reason"],
                 "Website": selected_bucket["final_url"],
             })
-            edited_bucket = st.data_editor(
+            edited_bucket = render_hideable_table(
                 bucket_table,
-                hide_index=True,
-                width="stretch",
+                domain_column="Domain",
+                editable_columns=["Select"],
                 height=min(760, 45 + len(bucket_table) * 35),
-                disabled=[
-                    "Company",
-                    "Domain",
-                    "Registered",
-                    "Registrar",
-                    "Availability",
-                    "Fit",
-                    "Venture",
-                    "Wedge",
-                    "Moat",
-                    "Founders",
-                    "Confidence",
-                    "Priority",
-                    "Description",
-                    "Reason",
-                    "Website",
-                ],
                 column_config={
                     "Select": st.column_config.CheckboxColumn("Move"),
                     "Fit": st.column_config.ProgressColumn(

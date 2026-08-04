@@ -13,6 +13,7 @@ import base64
 import html
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 
 ROOT = Path(__file__).resolve().parent
@@ -263,3 +264,143 @@ def render_card_grid(cards: list[dict]) -> None:
     parts.append("</div>")
 
     st.markdown("".join(parts), unsafe_allow_html=True)
+
+
+def render_hideable_table(
+    frame: pd.DataFrame,
+    *,
+    domain_column: str,
+    key: str,
+    column_config: dict | None = None,
+    visible_columns: list[str] | None = None,
+    editable_columns: list[str] | None = None,
+    height: int | None = None,
+    empty_message: str = "Everything here is hidden.",
+) -> pd.DataFrame:
+    """Render a table with a persistent per-row "Hide" checkbox.
+
+    Hiding is a pure view preference (classification_store.hide_domains) --
+    it never touches the underlying dataset a row came from (crawl results,
+    search corpus, classifications, ...); it only stops that domain from
+    showing up in *any* table using this helper, across the whole app,
+    until unchecked. Toggling "Show hidden" reveals previously-hidden rows
+    with the box pre-checked so unchecking it un-hides them.
+
+    Returns the edited visible rows without the internal Hide column. Other
+    explicitly editable columns (for example Select or Action) are preserved
+    so existing bulk actions can share this one editor.
+
+    domain_column must hold the bare domain (what hide_domains/stable_domain
+    key on) -- pass visible_columns if the display shouldn't include it
+    verbatim (e.g. a separate "Domain" link column already shows a full
+    URL derived from it).
+    """
+    from classification_store import hidden_domain_set, hide_domains, unhide_domains
+
+    if frame.empty:
+        st.dataframe(frame, hide_index=True, width="stretch")
+        return frame
+
+    domains = frame[domain_column].astype(str)
+    hidden_now = hidden_domain_set(domains.tolist())
+
+    show_hidden = False
+    if hidden_now:
+        show_hidden = st.checkbox(
+            f"Show {len(hidden_now)} hidden row(s)",
+            key=f"{key}_show_hidden",
+        )
+
+    working = frame.copy() if show_hidden else frame[~domains.isin(hidden_now)].copy()
+    if working.empty:
+        st.caption(empty_message)
+        return working
+
+    display = working.copy()
+    display.insert(
+        0,
+        "Hide",
+        display[domain_column].astype(str).isin(hidden_now),
+    )
+    editable = set(editable_columns or [])
+    editor_kwargs = {}
+    if height is not None:
+        editor_kwargs["height"] = height
+    edited = st.data_editor(
+        display,
+        hide_index=True,
+        width="stretch",
+        column_order=(
+            ["Hide", *visible_columns] if visible_columns is not None else None
+        ),
+        column_config={
+            "Hide": st.column_config.CheckboxColumn(
+                "Hide",
+                help="Hide this row from view -- doesn't delete or change "
+                "any underlying data.",
+            ),
+            **(column_config or {}),
+        },
+        disabled=[
+            column
+            for column in display.columns
+            if column != "Hide" and column not in editable
+        ],
+        key=key,
+        **editor_kwargs,
+    )
+    checked = set(edited.loc[edited["Hide"], domain_column].astype(str))
+    displayed_domains = set(working[domain_column].astype(str))
+    to_hide = checked - hidden_now
+    # Hidden rows are omitted in normal mode, so only interpret an unchecked
+    # box as "unhide" when that hidden row was actually displayed to the user.
+    to_unhide = (hidden_now & displayed_domains) - checked
+    if to_hide:
+        hide_domains(to_hide)
+    if to_unhide:
+        unhide_domains(to_unhide)
+    if to_hide or to_unhide:
+        st.rerun()
+    return edited.drop(columns=["Hide"])
+
+
+def render_hidden_domains_manager(*, key: str = "hidden_domains") -> None:
+    """Provide one reliable escape hatch for restoring hidden companies."""
+    from classification_store import list_hidden_domains, unhide_domains
+
+    hidden = list_hidden_domains(limit=5000)
+    if not hidden:
+        return
+    with st.expander(f"Hidden companies ({len(hidden):,})"):
+        st.caption(
+            "Hidden companies remain fully stored and classified. Select "
+            "Restore to make them visible in every company table again."
+        )
+        frame = pd.DataFrame(hidden)
+        editor = pd.DataFrame({
+            "Restore": False,
+            "Domain": frame["domain"],
+            "Hidden at": frame["hidden_at"].astype(str).str.slice(0, 19),
+        })
+        edited = st.data_editor(
+            editor,
+            hide_index=True,
+            width="stretch",
+            height=min(500, 45 + len(editor) * 35),
+            disabled=["Domain", "Hidden at"],
+            column_config={
+                "Restore": st.column_config.CheckboxColumn(
+                    "Restore",
+                    help="Show this company in review tables again.",
+                ),
+            },
+            key=f"{key}_editor",
+        )
+        selected = edited.loc[edited["Restore"], "Domain"].tolist()
+        if st.button(
+            f"Restore {len(selected):,} selected",
+            disabled=not selected,
+            key=f"{key}_restore",
+        ):
+            unhide_domains(selected)
+            st.rerun()

@@ -177,6 +177,11 @@ def migrate(conn: sqlite3.Connection | PostgresConnection) -> None:
             value TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS hidden_domains (
+            domain TEXT PRIMARY KEY,
+            hidden_at TEXT NOT NULL
+        );
         """
     )
     if postgres:
@@ -505,6 +510,130 @@ def search_classifications(
             """,
             (needle, needle, limit),
         ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def hide_domains(
+    domains: Iterable[str],
+    *,
+    path: Path | str = CLASSIFICATION_DB,
+) -> int:
+    """Mark domains as hidden from review tables -- a view preference only.
+
+    Never touches classifications/manual_decisions; the domain stays exactly
+    where it is in whatever dataset it came from (crawl results, search
+    corpus, ...). This is purely "I've looked at this, don't show it to me
+    again" bookkeeping, shared across every table in the app since it's
+    keyed on domain alone.
+    """
+    values = list(dict.fromkeys(
+        stable_domain(domain) for domain in domains if stable_domain(domain)
+    ))
+    if not values:
+        return 0
+    now = utc_now()
+    with connect_store(path) as conn:
+        conn.executemany(
+            """
+            INSERT INTO hidden_domains (domain, hidden_at) VALUES (?, ?)
+            ON CONFLICT(domain) DO UPDATE SET hidden_at = excluded.hidden_at
+            """,
+            [(domain, now) for domain in values],
+        )
+        conn.commit()
+    return len(values)
+
+
+def unhide_domains(
+    domains: Iterable[str],
+    *,
+    path: Path | str = CLASSIFICATION_DB,
+) -> int:
+    values = list(dict.fromkeys(
+        stable_domain(domain) for domain in domains if stable_domain(domain)
+    ))
+    if not values:
+        return 0
+    removed = 0
+    with connect_store(path) as conn:
+        for start in range(0, len(values), 700):
+            batch = values[start : start + 700]
+            marks = ",".join("?" for _ in batch)
+            cursor = conn.execute(
+                f"DELETE FROM hidden_domains WHERE domain IN ({marks})",
+                batch,
+            )
+            removed += max(0, int(cursor.rowcount))
+        conn.commit()
+    return removed
+
+
+def _missing_hidden_table(exc: Exception) -> bool:
+    """Only suppress the expected pre-migration missing-table read."""
+    current: BaseException | None = exc
+    while current is not None:
+        if getattr(current, "sqlstate", "") == "42P01":
+            return True
+        message = str(current).lower()
+        if "no such table: hidden_domains" in message:
+            return True
+        current = current.__cause__
+    return False
+
+
+def hidden_domain_set(
+    domains: Iterable[str],
+    *,
+    path: Path | str = CLASSIFICATION_DB,
+) -> set[str]:
+    """Which of the given domains are currently hidden."""
+    values = list(dict.fromkeys(
+        stable_domain(domain) for domain in domains if stable_domain(domain)
+    ))
+    if not values or (not using_postgres() and not Path(path).exists()):
+        return set()
+    try:
+        with connect_store(path, read_only=True) as conn:
+            rows = []
+            for start in range(0, len(values), 700):
+                batch = values[start : start + 700]
+                marks = ",".join("?" for _ in batch)
+                rows.extend(conn.execute(
+                    f"SELECT domain FROM hidden_domains WHERE domain IN ({marks})",
+                    batch,
+                ).fetchall())
+    except Exception as exc:
+        # Read-only connections never run migrate() (see connect_store), so
+        # a database predating this table -- real locally and in production,
+        # since neither backend migrates on a read path -- doesn't have it
+        # yet. No rows hidden is the correct answer either way; the table
+        # gets created for real the first time hide_domains() runs (it uses
+        # a writable connection).
+        if _missing_hidden_table(exc):
+            return set()
+        raise
+    return {str(row["domain"]) for row in rows}
+
+
+def list_hidden_domains(
+    *,
+    limit: int = 500,
+    path: Path | str = CLASSIFICATION_DB,
+) -> list[dict[str, str]]:
+    """Return recent hidden preferences for a global unhide control."""
+    if not using_postgres() and not Path(path).exists():
+        return []
+    try:
+        with connect_store(path, read_only=True) as conn:
+            rows = conn.execute(
+                "SELECT domain,hidden_at FROM hidden_domains "
+                "ORDER BY hidden_at DESC,domain LIMIT ?",
+                (max(1, min(int(limit), 5000)),),
+            ).fetchall()
+    except Exception as exc:
+        if _missing_hidden_table(exc):
+            return []
+        raise
     return [dict(row) for row in rows]
 
 

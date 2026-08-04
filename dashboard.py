@@ -37,7 +37,7 @@ from runtime_control import (
     request_services,
     runtime_status,
 )
-from ui_theme import render_card_grid
+from ui_theme import render_card_grid, render_hideable_table
 from training_data import (
     backfill_label_metadata, balanced_instruction_frame,
     build_active_review_queue, build_training_dataset, write_training_exports,
@@ -1068,16 +1068,16 @@ def render_bucket_display(
 
     view = st.radio(
         "View",
-        ["Cards", "Table"],
+        ["Table", "Cards"],
         horizontal=True,
         key=f"{key_prefix}_view_mode",
         label_visibility="collapsed",
     )
     if view == "Table":
-        safe_dataframe(
+        render_hideable_table(
             table,
-            width="stretch",
-            hide_index=True,
+            domain_column="Domain",
+            key=f"{key_prefix}_hideable_table",
             column_config=column_config or {},
         )
         return

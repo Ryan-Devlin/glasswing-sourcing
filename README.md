@@ -129,6 +129,11 @@ borderline companies, and disagreements between rule, learned, and optional
 Claude signals. This concentrates human review where it improves the model
 most.
 
+Company review and search tables include a persistent **Hide** checkbox. Hide
+is only a shared view preference: it never deletes a company, changes its
+classification, or creates training data. Use **Hidden companies** on the Home
+page—or reveal hidden rows in the current table—to restore a company.
+
 Every manual move creates a timestamped, checksummed, human-only snapshot under
 `data/manual/snapshots`. The **System Health** top tab validates and restores
 those snapshots, reports database/index integrity and model reversal metrics,

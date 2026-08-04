@@ -7,7 +7,11 @@ import pytest
 from classification_store import (
     classification_map,
     connect_store,
+    hidden_domain_set,
+    hide_domains,
+    list_hidden_domains,
     record_manual_move,
+    unhide_domains,
     upsert_classifications,
 )
 
@@ -78,6 +82,50 @@ def test_store_separates_fit_confidence_and_priority(tmp_path):
     assert missing["confidence_score"] == 0
 
 
+def test_hide_domains_is_a_view_preference_not_a_deletion(tmp_path):
+    database = tmp_path / "classifications.sqlite3"
+    frame = pd.DataFrame([
+        {"domain": "keep.ai", "routing_bucket": "priority"},
+        {"domain": "toggle.ai", "routing_bucket": "priority"},
+    ])
+    assert upsert_classifications(frame, database) == 2
+
+    assert hidden_domain_set(["keep.ai", "toggle.ai"], path=database) == set()
+
+    hide_domains(["toggle.ai"], path=database)
+    assert hidden_domain_set(["keep.ai", "toggle.ai"], path=database) == {
+        "toggle.ai"
+    }
+
+    # Still present in the real dataset -- hiding is bookkeeping, not deletion.
+    with connect_store(database, read_only=True) as conn:
+        row = conn.execute(
+            "SELECT * FROM classifications WHERE domain='toggle.ai'"
+        ).fetchone()
+    assert row is not None
+
+    unhide_domains(["toggle.ai"], path=database)
+    assert hidden_domain_set(["keep.ai", "toggle.ai"], path=database) == set()
+
+    # Hiding the same domain twice (re-checking the box after an unhide, or
+    # a duplicate call) must not error.
+    hide_domains(["toggle.ai"], path=database)
+    hide_domains(["toggle.ai"], path=database)
+    assert hidden_domain_set(["toggle.ai"], path=database) == {"toggle.ai"}
+    listed = list_hidden_domains(path=database)
+    assert [row["domain"] for row in listed] == ["toggle.ai"]
+
+
+def test_hidden_domain_queries_handle_more_than_sqlite_variable_limit(tmp_path):
+    database = tmp_path / "classifications.sqlite3"
+    domains = [f"company-{number}.ai" for number in range(1200)]
+
+    assert hide_domains(domains, path=database) == 1200
+    assert hidden_domain_set(domains, path=database) == set(domains)
+    assert unhide_domains(domains, path=database) == 1200
+    assert hidden_domain_set(domains, path=database) == set()
+
+
 def test_manual_move_is_transactional_and_audited(tmp_path):
     database = tmp_path / "classifications.sqlite3"
     upsert_classifications(
@@ -142,6 +190,7 @@ def test_postgres_backend_matches_sqlite_behavior(monkeypatch):
         conn.execute(f"DELETE FROM classifications WHERE domain IN ({marks})", test_domains)
         conn.execute(f"DELETE FROM manual_decisions WHERE domain IN ({marks})", test_domains)
         conn.execute(f"DELETE FROM movement_log WHERE domain IN ({marks})", test_domains)
+        conn.execute(f"DELETE FROM hidden_domains WHERE domain IN ({marks})", test_domains)
         conn.commit()
 
     try:
@@ -197,6 +246,12 @@ def test_postgres_backend_matches_sqlite_behavior(monkeypatch):
         assert decision["target_bucket"] == "priority"
         assert len(history) == 1
         assert history[0]["from_bucket"] == "review"
+
+        assert hide_domains(["pg-strong.ai"]) == 1
+        assert hidden_domain_set(test_domains) == {"pg-strong.ai"}
+        assert list_hidden_domains()[0]["domain"] == "pg-strong.ai"
+        assert unhide_domains(["pg-strong.ai"]) == 1
+        assert hidden_domain_set(test_domains) == set()
     finally:
         with connect_store() as conn:
             marks = ",".join("?" for _ in test_domains)
@@ -208,5 +263,8 @@ def test_postgres_backend_matches_sqlite_behavior(monkeypatch):
             )
             conn.execute(
                 f"DELETE FROM movement_log WHERE domain IN ({marks})", test_domains
+            )
+            conn.execute(
+                f"DELETE FROM hidden_domains WHERE domain IN ({marks})", test_domains
             )
             conn.commit()

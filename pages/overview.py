@@ -18,6 +18,7 @@ from classification_store import search_classifications
 from common import AI_SEARCH_DB, ZONE_UNIVERSE_DB
 from health_monitor import health_report
 from runtime_control import SERVICES
+from ui_theme import render_hideable_table, render_hidden_domains_manager
 from zone_universe.search import search_pages
 
 st.title("Glasswing Sourcing")
@@ -58,6 +59,7 @@ with st.expander("Worker detail"):
             f"(desired: {'on' if row['desired'] else 'off'})"
         )
 st.page_link("pages/system_health.py", label="Full system health", icon="🩺")
+render_hidden_domains_manager(key="overview_hidden_domains")
 
 st.divider()
 
@@ -95,12 +97,13 @@ def _company_blurb(row: dict) -> str | None:
 _LINK_COLUMN = st.column_config.LinkColumn("Domain", display_text=r"https?://(?:www\.)?([^/]+).*")
 
 
-def _results_table(rows: list[dict], columns: list[str]) -> None:
-    frame = pd.DataFrame(rows, columns=columns)
-    st.dataframe(
+def _results_table(rows: list[dict], columns: list[str], *, key: str) -> None:
+    frame = pd.DataFrame(rows, columns=["_domain", *columns])
+    render_hideable_table(
         frame,
-        hide_index=True,
-        width="stretch",
+        domain_column="_domain",
+        visible_columns=columns,
+        key=key,
         column_config={"Domain": _LINK_COLUMN},
     )
 
@@ -112,6 +115,7 @@ if active_query:
         _results_table(
             [
                 {
+                    "_domain": row["domain"],
                     "Domain": row.get("final_url") or f"https://{row['domain']}",
                     "Description": _company_blurb(row) or "",
                     "Thesis pillar": (
@@ -125,6 +129,7 @@ if active_query:
                 for row in company_rows
             ],
             columns=["Domain", "Description", "Thesis pillar", "Score", "Last updated"],
+            key="overview_companies_table",
         )
     else:
         st.caption("No investable matches in your classification list.")
@@ -135,6 +140,7 @@ if active_query:
         _results_table(
             [
                 {
+                    "_domain": row["domain"],
                     "Domain": row.get("final_url") or f"https://{row['domain']}",
                     "Title": row["title"] or "(no title)",
                     "Match": _clean_snippet(row["snippet"]),
@@ -143,6 +149,7 @@ if active_query:
                 for row in ai_rows
             ],
             columns=["Domain", "Title", "Match", "Crawled"],
+            key="overview_ai_table",
         )
         if st.button("Open full results in .AI Search"):
             st.session_state["ai_page_query"] = active_query
@@ -157,6 +164,7 @@ if active_query:
         _results_table(
             [
                 {
+                    "_domain": row["domain"],
                     "Domain": row.get("final_url") or f"https://{row['domain']}",
                     "TLD": row["tld"],
                     "Title": row["title"] or "(no title)",
@@ -166,6 +174,7 @@ if active_query:
                 for row in zone_rows
             ],
             columns=["Domain", "TLD", "Title", "Match", "Crawled"],
+            key="overview_zone_table",
         )
         if st.button("Open full results in Zone Universe"):
             st.session_state["zone_query"] = active_query
