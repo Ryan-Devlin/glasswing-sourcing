@@ -277,7 +277,7 @@ def render_hideable_table(
     height: int | None = None,
     empty_message: str = "Everything here is hidden.",
 ) -> pd.DataFrame:
-    """Render persistent Hide and exclusive Yes/No controls per row.
+    """Render persistent Hide and exclusive Mark Yes/Mark No controls.
 
     Hiding is a pure view preference (classification_store.hide_domains) --
     it never touches the underlying dataset a row came from (crawl results,
@@ -286,11 +286,12 @@ def render_hideable_table(
     until unchecked. Toggling "Show hidden" reveals previously-hidden rows
     with the box pre-checked so unchecking it un-hides them.
 
-    Yes/No are training labels only. They never reclassify or remove a company
-    from its current list. Clicking either checkbox saves immediately, moves
-    the domain out of the opposite basket, and keeps the row visible.
+    Mark Yes/Mark No are training labels only. They never reclassify or remove
+    a company from its current list. Clicking either checkbox saves
+    immediately, moves the domain out of the opposite basket, and keeps the
+    row visible.
 
-    Returns the edited visible rows without the internal Hide/Yes/No columns.
+    Returns the edited visible rows without the internal action columns.
     Other explicitly editable columns (for example Select) are preserved.
 
     domain_column must hold the bare domain (what hide_domains/stable_domain
@@ -345,12 +346,12 @@ def render_hideable_table(
     )
     display.insert(
         1,
-        "Yes",
+        "Mark Yes",
         display[domain_column].astype(str).map(stable_domain).isin(yes_now),
     )
     display.insert(
         2,
-        "No",
+        "Mark No",
         display[domain_column].astype(str).map(stable_domain).isin(no_now),
     )
     editable = set(editable_columns or [])
@@ -362,7 +363,7 @@ def render_hideable_table(
         hide_index=True,
         width="stretch",
         column_order=(
-            ["Hide", "Yes", "No", *visible_columns]
+            ["Hide", "Mark Yes", "Mark No", *visible_columns]
             if visible_columns is not None
             else None
         ),
@@ -372,12 +373,12 @@ def render_hideable_table(
                 help="Hide this row from view -- doesn't delete or change "
                 "any underlying data.",
             ),
-            "Yes": st.column_config.CheckboxColumn(
-                "Yes",
+            "Mark Yes": st.column_config.CheckboxColumn(
+                "Mark Yes",
                 help="Add to the Yes training basket without moving this row.",
             ),
-            "No": st.column_config.CheckboxColumn(
-                "No",
+            "Mark No": st.column_config.CheckboxColumn(
+                "Mark No",
                 help="Add to the No training basket without moving this row.",
             ),
             **(column_config or {}),
@@ -385,15 +386,16 @@ def render_hideable_table(
         disabled=[
             column
             for column in display.columns
-            if column not in {"Hide", "Yes", "No"} and column not in editable
+            if column not in {"Hide", "Mark Yes", "Mark No"}
+            and column not in editable
         ],
         key=key,
         **editor_kwargs,
     )
     normalized_edited = edited[domain_column].astype(str).map(stable_domain)
     checked = set(normalized_edited[edited["Hide"]])
-    checked_yes = set(normalized_edited[edited["Yes"]])
-    checked_no = set(normalized_edited[edited["No"]])
+    checked_yes = set(normalized_edited[edited["Mark Yes"]])
+    checked_no = set(normalized_edited[edited["Mark No"]])
     displayed_domains = set(
         working[domain_column].astype(str).map(stable_domain)
     )
@@ -434,7 +436,7 @@ def render_hideable_table(
         remove_basket_entry(domain)
     if to_hide or to_unhide or to_yes or to_no or to_clear:
         st.rerun()
-    return edited.drop(columns=["Hide", "Yes", "No"])
+    return edited.drop(columns=["Hide", "Mark Yes", "Mark No"])
 
 
 def render_hidden_domains_manager(*, key: str = "hidden_domains") -> None:

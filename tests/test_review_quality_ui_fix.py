@@ -58,8 +58,8 @@ class ReviewQualityUiFixTests(unittest.TestCase):
         self.assertNotIn('"Move selected"', self.dashboard)
         self.assertNotIn('"Move selected"', self.ai_search)
         self.assertNotIn('"Move selected"', self.zone_universe)
-        self.assertIn('"Yes": st.column_config.CheckboxColumn(', self.ui_theme)
-        self.assertIn('"No": st.column_config.CheckboxColumn(', self.ui_theme)
+        self.assertIn('"Mark Yes": st.column_config.CheckboxColumn(', self.ui_theme)
+        self.assertIn('"Mark No": st.column_config.CheckboxColumn(', self.ui_theme)
         self.assertIn('reason="inline_yes_checkbox"', self.ui_theme)
         self.assertIn('reason="inline_no_checkbox"', self.ui_theme)
         self.assertNotIn('cols = st.columns(5)', self.dashboard)
@@ -117,7 +117,7 @@ class ReviewQualityUiFixTests(unittest.TestCase):
         self.assertNotIn("save_bulk_hard_denials", self.dashboard)
         self.assertNotIn("allow_move_all_to_hard_denied", self.dashboard)
         self.assertIn(
-            "Yes/No are training labels only. They never reclassify",
+            "Mark Yes/Mark No are training labels only. They never reclassify",
             self.ui_theme,
         )
 

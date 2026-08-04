@@ -1,4 +1,4 @@
-"""Exercise the real Streamlit widget-state cycle for Hide and Yes/No."""
+"""Exercise the real Streamlit widget-state cycle for row actions."""
 
 import os
 import subprocess
@@ -51,9 +51,9 @@ app.run()
 assert not app.exception
 assert hidden_domain_set(["probe.ai"]) == set()
 
-# Yes/No are mutually exclusive training labels and never hide the row.
+# Mark Yes/Mark No are mutually exclusive labels and never hide the row.
 app.session_state["probe_editor"] = {
-    "edited_rows": {0: {"Yes": True}},
+    "edited_rows": {0: {"Mark Yes": True}},
     "added_rows": [],
     "deleted_rows": [],
 }
@@ -68,7 +68,7 @@ assert hidden_domain_set(["probe.ai"]) == set()
 
 # Selecting No replaces Yes. The row remains in the original table.
 app.session_state["probe_editor"] = {
-    "edited_rows": {0: {"No": True}},
+    "edited_rows": {0: {"Mark No": True}},
     "added_rows": [],
     "deleted_rows": [],
 }

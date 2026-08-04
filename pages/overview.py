@@ -14,7 +14,12 @@ for source in (ROOT, AI_SRC, ZONE_SRC):
         sys.path.insert(0, str(source))
 
 from ai_search.og_bridge import search_companies
-from classification_store import search_classifications
+from classification_store import (
+    classification_bucket_counts,
+    classification_source_label,
+    query_classifications,
+    search_classifications,
+)
 from common import AI_SEARCH_DB, ZONE_UNIVERSE_DB
 from health_monitor import health_report
 from runtime_control import SERVICES
@@ -63,6 +68,163 @@ render_hidden_domains_manager(key="overview_hidden_domains")
 
 st.divider()
 
+_LINK_COLUMN = st.column_config.LinkColumn(
+    "Domain",
+    display_text=r"https?://(?:www\.)?([^/]+).*",
+)
+
+st.subheader("Master company review")
+st.caption(
+    "Every classified company across CertStream, the .AI crawler, and the "
+    ".COM/.APP crawler. Hide only changes what you see; Mark Yes and Mark No "
+    "save training labels without moving or deleting the company."
+)
+
+MASTER_BUCKETS = [
+    ("Investable", ("priority",)),
+    ("Coming Soon", ("coming_soon",)),
+    ("Needs Review", ("review",)),
+    ("Potential Comp", ("comp",)),
+    ("Insufficient Evidence", ("insufficient", "ghost", "screened_out")),
+    ("Hard Denied", ("reject",)),
+]
+
+
+@st.cache_data(show_spinner=False, ttl=15)
+def cached_master_bucket_counts() -> dict[str, int]:
+    return classification_bucket_counts()
+
+
+@st.cache_data(show_spinner=False, ttl=15, max_entries=48)
+def cached_master_rows(
+    buckets: tuple[str, ...],
+    limit: int,
+    offset: int,
+    sort: str,
+) -> list[dict]:
+    return query_classifications(
+        buckets,
+        limit=limit,
+        offset=offset,
+        sort=sort,
+    )
+
+
+master_counts = cached_master_bucket_counts()
+bucket_totals = {
+    label: sum(int(master_counts.get(bucket, 0)) for bucket in buckets)
+    for label, buckets in MASTER_BUCKETS
+}
+master_metric_columns = st.columns(len(MASTER_BUCKETS))
+for column, (label, _) in zip(master_metric_columns, MASTER_BUCKETS):
+    column.metric(label, f"{bucket_totals[label]:,}")
+
+selected_bucket_name = st.radio(
+    "Master bucket",
+    [label for label, _ in MASTER_BUCKETS],
+    horizontal=True,
+    label_visibility="collapsed",
+    key="overview_master_bucket",
+)
+selected_buckets = dict(MASTER_BUCKETS)[selected_bucket_name]
+master_sort_col, master_rows_col, master_status_col = st.columns([2.5, 1, 2])
+master_sort = master_sort_col.selectbox(
+    "Sort companies",
+    [
+        "Priority: high to low",
+        "Fit: high to low",
+        "Recently classified",
+        "Company: A to Z",
+        "Domain: A to Z",
+    ],
+    key=f"overview_master_sort_{selected_bucket_name}",
+)
+master_page_size = int(master_rows_col.selectbox(
+    "Rows",
+    [25, 50, 100, 200],
+    index=2,
+    key=f"overview_master_rows_{selected_bucket_name}",
+))
+master_total = int(bucket_totals[selected_bucket_name])
+master_page_key = f"overview_master_page_{selected_bucket_name}"
+master_max_page = max(1, (master_total + master_page_size - 1) // master_page_size)
+master_page = min(
+    int(st.session_state.get(master_page_key, 1)),
+    master_max_page,
+)
+master_status_col.caption(
+    f"{master_total:,} companies · page {master_page:,} of {master_max_page:,}"
+)
+master_rows = cached_master_rows(
+    tuple(selected_buckets),
+    master_page_size,
+    (master_page - 1) * master_page_size,
+    master_sort,
+)
+if master_rows:
+    master_frame = pd.DataFrame({
+        "_domain": [row["domain"] for row in master_rows],
+        "Company": [row.get("company_name", "") for row in master_rows],
+        "Domain": [
+            row.get("final_url") or f"https://{row['domain']}"
+            for row in master_rows
+        ],
+        "Source": [
+            classification_source_label(row.get("content_source", ""))
+            for row in master_rows
+        ],
+        "Category": [
+            str(row.get("thesis_pillar", "")).replace("_", " ").title()
+            for row in master_rows
+        ],
+        "Score": [int(row.get("fit_score", 0) or 0) for row in master_rows],
+        "Description": [row.get("description", "") for row in master_rows],
+        "Reason": [
+            str(row.get("routing_reason", "")).replace("_", " ").title()
+            for row in master_rows
+        ],
+        "Updated": [str(row.get("updated_at", ""))[:10] for row in master_rows],
+    })
+    render_hideable_table(
+        master_frame,
+        domain_column="_domain",
+        visible_columns=[
+            "Company", "Domain", "Source", "Category", "Score",
+            "Description", "Reason", "Updated",
+        ],
+        key=f"overview_master_table_{selected_bucket_name}_{master_page}",
+        height=min(760, 45 + len(master_frame) * 35),
+        column_config={
+            "Domain": _LINK_COLUMN,
+            "Score": st.column_config.ProgressColumn(
+                "Score",
+                min_value=0,
+                max_value=100,
+                format="%d",
+            ),
+        },
+    )
+else:
+    st.info(f"No companies currently appear in {selected_bucket_name}.")
+
+master_previous, master_next, _ = st.columns([1, 1, 6])
+if master_previous.button(
+    "← Previous",
+    disabled=master_page <= 1,
+    key=f"overview_master_previous_{selected_bucket_name}",
+):
+    st.session_state[master_page_key] = master_page - 1
+    st.rerun()
+if master_next.button(
+    "Next →",
+    disabled=master_page >= master_max_page,
+    key=f"overview_master_next_{selected_bucket_name}",
+):
+    st.session_state[master_page_key] = master_page + 1
+    st.rerun()
+
+st.divider()
+
 with st.form("overview_search"):
     query_input = st.text_input(
         "Search companies and crawled pages",
@@ -94,9 +256,6 @@ def _company_blurb(row: dict) -> str | None:
     return None
 
 
-_LINK_COLUMN = st.column_config.LinkColumn("Domain", display_text=r"https?://(?:www\.)?([^/]+).*")
-
-
 def _results_table(rows: list[dict], columns: list[str], *, key: str) -> None:
     frame = pd.DataFrame(rows, columns=["_domain", *columns])
     render_hideable_table(
@@ -117,6 +276,9 @@ if active_query:
                 {
                     "_domain": row["domain"],
                     "Domain": row.get("final_url") or f"https://{row['domain']}",
+                    "Source": classification_source_label(
+                        row.get("content_source", "")
+                    ),
                     "Description": _company_blurb(row) or "",
                     "Thesis pillar": (
                         row["thesis_pillar"].replace("_", " ").title()
@@ -128,7 +290,14 @@ if active_query:
                 }
                 for row in company_rows
             ],
-            columns=["Domain", "Description", "Thesis pillar", "Score", "Last updated"],
+            columns=[
+                "Domain",
+                "Source",
+                "Description",
+                "Thesis pillar",
+                "Score",
+                "Last updated",
+            ],
             key="overview_companies_table",
         )
     else:

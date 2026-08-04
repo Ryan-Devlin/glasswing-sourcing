@@ -546,7 +546,8 @@ def search_classifications(
         rows = conn.execute(
             """
             SELECT domain, company_name, routing_bucket, final_url,
-                   description, excerpt, fit_score, thesis_pillar, updated_at
+                   description, excerpt, fit_score, thesis_pillar,
+                   content_source, updated_at
             FROM classifications
             WHERE (lower(domain) LIKE ? OR lower(company_name) LIKE ?)
               AND routing_bucket NOT IN ('ghost', 'reject', 'screened_out')
@@ -554,6 +555,88 @@ def search_classifications(
             LIMIT ?
             """,
             (needle, needle, limit),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def classification_source_label(content_source: object) -> str:
+    """Human label for the pipeline that originally supplied website copy."""
+    source = clean(content_source).lower()
+    if source.startswith("zone_universe"):
+        return ".COM/.APP crawler"
+    if source.startswith("crawler_cache"):
+        return ".AI crawler"
+    if source in {"network_fetch", "certstream", "certstream_fetch"}:
+        return "CertStream"
+    if source.startswith("classification_cache"):
+        return "Saved classification"
+    return "Unknown"
+
+
+def classification_bucket_counts(
+    *,
+    run_id: str = "",
+    path: Path | str = CLASSIFICATION_DB,
+) -> dict[str, int]:
+    """Count canonical classifications, optionally for one CertStream run."""
+    if not using_classification_postgres() and not Path(path).exists():
+        return {}
+    where = ""
+    params: list[object] = []
+    if clean(run_id):
+        where = "WHERE record_json LIKE ?"
+        params.append(f'%"run_id"%{clean(run_id)}%')
+    with connect_store(path, read_only=True) as conn:
+        rows = conn.execute(
+            "SELECT routing_bucket, count(*) AS total "
+            f"FROM classifications {where} GROUP BY routing_bucket",
+            params,
+        ).fetchall()
+    return {
+        str(row["routing_bucket"]): int(row["total"])
+        for row in rows
+    }
+
+
+def query_classifications(
+    buckets: Iterable[str],
+    *,
+    limit: int = 100,
+    offset: int = 0,
+    sort: str = "Priority: high to low",
+    run_id: str = "",
+    path: Path | str = CLASSIFICATION_DB,
+) -> list[dict[str, object]]:
+    """Page through the master classification table without loading its HTML."""
+    bucket_values = list(dict.fromkeys(str(value) for value in buckets))
+    if not bucket_values or (
+        not using_classification_postgres() and not Path(path).exists()
+    ):
+        return []
+    order = {
+        "Fit: high to low": "fit_score DESC, priority_score DESC, domain",
+        "Recently classified": "updated_at DESC, domain",
+        "Company: A to Z": "lower(company_name), domain",
+        "Domain: A to Z": "domain",
+    }.get(sort, "priority_score DESC, fit_score DESC, domain")
+    bounded_limit = max(1, min(int(limit), 250))
+    bounded_offset = max(0, int(offset))
+    marks = ",".join("?" for _ in bucket_values)
+    clauses = [f"routing_bucket IN ({marks})"]
+    params: list[object] = list(bucket_values)
+    if clean(run_id):
+        clauses.append("record_json LIKE ?")
+        params.append(f'%"run_id"%{clean(run_id)}%')
+    params.extend([bounded_limit, bounded_offset])
+    with connect_store(path, read_only=True) as conn:
+        rows = conn.execute(
+            "SELECT domain,company_name,final_url,description,"
+            "routing_bucket,routing_reason,fit_score,priority_score,"
+            "thesis_pillar,content_source,updated_at "
+            "FROM classifications WHERE "
+            + " AND ".join(clauses)
+            + f" ORDER BY {order} LIMIT ? OFFSET ?",
+            params,
         ).fetchall()
     return [dict(row) for row in rows]
 

@@ -23,8 +23,8 @@ def test_hidden_rows_are_not_accidentally_unhidden_when_omitted():
     editor_value = pd.DataFrame([
         {
             "Hide": False,
-            "Yes": False,
-            "No": False,
+            "Mark Yes": False,
+            "Mark No": False,
             "Domain": "visible.ai",
             "Select": False,
         },
@@ -51,8 +51,8 @@ def test_hidden_rows_are_not_accidentally_unhidden_when_omitted():
 
 def test_unchecking_a_displayed_hidden_row_persists_unhide():
     editor_value = pd.DataFrame([
-        {"Hide": False, "Yes": False, "No": False, "Domain": "visible.ai", "Select": False},
-        {"Hide": False, "Yes": False, "No": False, "Domain": "hidden.ai", "Select": False},
+        {"Hide": False, "Mark Yes": False, "Mark No": False, "Domain": "visible.ai", "Select": False},
+        {"Hide": False, "Mark Yes": False, "Mark No": False, "Domain": "hidden.ai", "Select": False},
     ])
     with (
         patch("classification_store.hidden_domain_set", return_value={"hidden.ai"}),
@@ -75,8 +75,8 @@ def test_unchecking_a_displayed_hidden_row_persists_unhide():
 
 def test_checking_a_visible_row_persists_hide():
     editor_value = pd.DataFrame([
-        {"Hide": True, "Yes": False, "No": False, "Domain": "visible.ai", "Select": False},
-        {"Hide": False, "Yes": False, "No": False, "Domain": "hidden.ai", "Select": False},
+        {"Hide": True, "Mark Yes": False, "Mark No": False, "Domain": "visible.ai", "Select": False},
+        {"Hide": False, "Mark Yes": False, "Mark No": False, "Domain": "hidden.ai", "Select": False},
     ])
     with (
         patch("classification_store.hidden_domain_set", return_value=set()),
@@ -98,8 +98,8 @@ def test_checking_a_visible_row_persists_hide():
 
 def test_checking_yes_labels_domain_without_removing_row():
     editor_value = pd.DataFrame([
-        {"Hide": False, "Yes": True, "No": False, "Domain": "visible.ai", "Select": False},
-        {"Hide": False, "Yes": False, "No": False, "Domain": "hidden.ai", "Select": False},
+        {"Hide": False, "Mark Yes": True, "Mark No": False, "Domain": "visible.ai", "Select": False},
+        {"Hide": False, "Mark Yes": False, "Mark No": False, "Domain": "hidden.ai", "Select": False},
     ])
     with (
         patch("classification_store.hidden_domain_set", return_value=set()),
@@ -127,8 +127,8 @@ def test_checking_yes_labels_domain_without_removing_row():
 
 def test_checking_no_replaces_existing_yes_without_removing_row():
     editor_value = pd.DataFrame([
-        {"Hide": False, "Yes": True, "No": True, "Domain": "visible.ai", "Select": False},
-        {"Hide": False, "Yes": False, "No": False, "Domain": "hidden.ai", "Select": False},
+        {"Hide": False, "Mark Yes": True, "Mark No": True, "Domain": "visible.ai", "Select": False},
+        {"Hide": False, "Mark Yes": False, "Mark No": False, "Domain": "hidden.ai", "Select": False},
     ])
     with (
         patch("classification_store.hidden_domain_set", return_value=set()),
@@ -157,8 +157,8 @@ def test_checking_no_replaces_existing_yes_without_removing_row():
 
 def test_unchecking_current_label_removes_it_without_hiding_row():
     editor_value = pd.DataFrame([
-        {"Hide": False, "Yes": False, "No": False, "Domain": "visible.ai", "Select": False},
-        {"Hide": False, "Yes": False, "No": False, "Domain": "hidden.ai", "Select": False},
+        {"Hide": False, "Mark Yes": False, "Mark No": False, "Domain": "visible.ai", "Select": False},
+        {"Hide": False, "Mark Yes": False, "Mark No": False, "Domain": "hidden.ai", "Select": False},
     ])
     with (
         patch("classification_store.hidden_domain_set", return_value=set()),

@@ -6,16 +6,66 @@ import pytest
 
 import classification_store
 from classification_store import (
+    classification_bucket_counts,
     classification_map,
+    classification_source_label,
     connect_store,
     hidden_domain_set,
     hide_domains,
     list_hidden_domains,
+    query_classifications,
     record_manual_move,
     import_private_sqlite_into_shared,
     unhide_domains,
     upsert_classifications,
 )
+
+
+def test_master_bucket_queries_are_paged_and_source_labeled(tmp_path):
+    database = tmp_path / "classifications.sqlite3"
+    frame = pd.DataFrame([
+        {
+            "domain": "cert.ai",
+            "run_id": "run-one",
+            "page_title": "Cert Company",
+            "content_source": "network_fetch",
+            "routing_bucket": "priority",
+            "diligence_rank_score": 88,
+        },
+        {
+            "domain": "crawler.ai",
+            "run_id": "run-one",
+            "content_source": "crawler_cache",
+            "routing_bucket": "review",
+        },
+        {
+            "domain": "zone.app",
+            "run_id": "run-two",
+            "content_source": "zone_universe_cache",
+            "routing_bucket": "reject",
+        },
+    ])
+    assert upsert_classifications(frame, database) == 3
+
+    assert classification_bucket_counts(path=database) == {
+        "priority": 1,
+        "reject": 1,
+        "review": 1,
+    }
+    assert classification_bucket_counts(
+        run_id="run-one",
+        path=database,
+    ) == {"priority": 1, "review": 1}
+    rows = query_classifications(
+        ["priority", "review"],
+        limit=1,
+        path=database,
+    )
+    assert len(rows) == 1
+    assert rows[0]["domain"] == "cert.ai"
+    assert classification_source_label(rows[0]["content_source"]) == "CertStream"
+    assert classification_source_label("crawler_cache_stale") == ".AI crawler"
+    assert classification_source_label("zone_universe_cache") == ".COM/.APP crawler"
 
 
 def test_pipeline_database_url_is_cloud_fallback(monkeypatch):
