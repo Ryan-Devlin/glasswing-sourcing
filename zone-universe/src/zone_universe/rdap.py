@@ -235,8 +235,7 @@ def queue_registrations(
                 "SELECT status FROM registration_queue WHERE domain=?",
                 (domain,),
             ).fetchone()
-            before = conn.total_changes
-            conn.execute(
+            cursor = conn.execute(
                 """
                 INSERT INTO registration_queue(
                     domain,tld,priority,status,attempts,next_attempt_at,
@@ -259,7 +258,11 @@ def queue_registrations(
                     now,
                 ),
             )
-            queued += int(existing is None and conn.total_changes > before)
+            # cursor.rowcount (not conn.total_changes, a SQLite-only
+            # cumulative counter that doesn't exist on PostgresConnection)
+            # -- portable across both backends since both return a cursor
+            # exposing rowcount from conn.execute().
+            queued += int(existing is None and cursor.rowcount > 0)
     return queued
 
 
