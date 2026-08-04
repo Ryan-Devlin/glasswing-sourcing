@@ -49,7 +49,7 @@ from zone_universe.database import connect, diagnostics, get_state
 from zone_universe.rdap import cached_registrations, lookup_and_save
 from zone_universe.search import raw_html, search_pages
 from zone_universe.zone_parser import discover_zonefiles
-from ui_theme import render_hideable_table
+from ui_theme import render_hideable_table, render_worker_controls
 
 
 st.markdown(
@@ -1153,47 +1153,38 @@ with tabs[2]:
         "Start resumes from saved checkpoints. Stop finishes the current safe "
         "operation before exiting, so no completed work is discarded."
     )
-    start_col, stop_col, state_col = st.columns([1, 1, 4])
-    if start_col.button(
-        "Start / resume",
-        type="primary",
-        disabled=(RUNTIME_MODE != "local") or bool(worker_running),
-        width="stretch",
-    ):
-        if RUNTIME_MODE != "local":
-            st.error(
-                "Process controls are delegated to the cloud runtime. Use "
-                "the cloud platform's worker controls instead."
-            )
-        else:
-            st.success(worker_action("start_worker.sh"))
-        st.rerun()
-    if stop_col.button(
-        "Stop safely",
-        disabled=(RUNTIME_MODE != "local") or not worker_running,
-        width="stretch",
-    ):
-        if RUNTIME_MODE != "local":
-            st.error(
-                "Process controls are delegated to the cloud runtime. Use "
-                "the cloud platform's worker controls instead."
-            )
-        elif process_alive(PID_FILE):
-            st.info(worker_action("stop_worker.sh"))
-        elif worker_pid is not None:
-            os.kill(worker_pid, signal.SIGTERM)
-            st.info(
-                "Stop requested. The active domain-list import will finish "
-                "its atomic save before the process exits."
-            )
-        st.rerun()
     if RUNTIME_MODE != "local":
-        state_col.info(
-            f"**{stage_title}**\n\n"
-            "Cloud-managed (Railway) -- liveness isn't visible from here; "
-            "the stage above reflects the worker's own last report."
+        render_worker_controls(
+            "zone_crawler",
+            label=".COM/.APP crawler",
+            actual_status=active_stage or "unknown",
+            key="zone_crawler",
+            show_heading=False,
         )
     else:
+        start_col, stop_col, state_col = st.columns([1, 1, 4])
+        if start_col.button(
+            "Start / resume",
+            type="primary",
+            disabled=bool(worker_running),
+            width="stretch",
+        ):
+            st.success(worker_action("start_worker.sh"))
+            st.rerun()
+        if stop_col.button(
+            "Stop safely",
+            disabled=not worker_running,
+            width="stretch",
+        ):
+            if process_alive(PID_FILE):
+                st.info(worker_action("stop_worker.sh"))
+            elif worker_pid is not None:
+                os.kill(worker_pid, signal.SIGTERM)
+                st.info(
+                    "Stop requested. The active domain-list import will "
+                    "finish its atomic save before the process exits."
+                )
+            st.rerun()
         state_col.info(
             f"**{stage_title}**\n\n"
             + (

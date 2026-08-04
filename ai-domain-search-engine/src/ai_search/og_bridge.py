@@ -11,6 +11,7 @@ from db_backend import using_postgres as _using_postgres
 
 from .database import AI_SEARCH_DATABASE_ENV_VAR
 from .database import connect as _ai_search_connect
+from .database import worker_state as _worker_state
 from .search import SearchOptions, search
 
 # continuous_pipeline.py's own env var -- deliberately imported by name only
@@ -86,6 +87,14 @@ def search_stats(search_db: Path) -> dict[str, int]:
             name: int(conn.execute(f"SELECT ({sql}) AS count").fetchone()["count"])
             for name, sql in queries.items()
         }
+    finally:
+        conn.close()
+
+
+def crawler_state(search_db: Path) -> dict[str, str]:
+    conn = search_connection(search_db)
+    try:
+        return _worker_state(conn)
     finally:
         conn.close()
 

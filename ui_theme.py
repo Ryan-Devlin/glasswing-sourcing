@@ -404,3 +404,87 @@ def render_hidden_domains_manager(*, key: str = "hidden_domains") -> None:
         ):
             unhide_domains(selected)
             st.rerun()
+
+
+def render_worker_controls(
+    service: str,
+    *,
+    label: str,
+    actual_status: str,
+    key: str,
+    show_heading: bool = True,
+) -> None:
+    """Render safe shared start/pause controls on a crawler's own page."""
+    from runtime_control import (
+        RUNTIME_MODE,
+        control_backend_available,
+        ensure_supervisor,
+        request_services,
+        runtime_status,
+    )
+
+    if show_heading:
+        st.markdown("#### Crawler control")
+    message_key = f"{key}_worker_control_message"
+    message = st.session_state.pop(message_key, "")
+    if message:
+        st.success(message)
+    if not control_backend_available():
+        st.error(
+            "Crawler controls are unavailable because the shared runtime "
+            "control database is not configured."
+        )
+        return
+    try:
+        desired = bool(
+            runtime_status()["services"][service]["desired"]
+        )
+    except Exception as exc:
+        st.error(
+            "Could not read crawler control state: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return
+
+    start_col, pause_col, state_col = st.columns([1, 1, 4])
+    if start_col.button(
+        "Start / resume",
+        type="primary",
+        disabled=desired,
+        width="stretch",
+        key=f"{key}_start",
+    ):
+        request_services(
+            {service: True},
+            requested_by=f"{key}_page_start",
+        )
+        if RUNTIME_MODE == "local":
+            ensure_supervisor()
+        st.session_state[message_key] = (
+            f"{label} resume requested. Saved checkpoints are preserved."
+        )
+        st.rerun()
+    if pause_col.button(
+        "Pause safely",
+        disabled=not desired,
+        width="stretch",
+        key=f"{key}_pause",
+    ):
+        request_services(
+            {service: False},
+            requested_by=f"{key}_page_pause",
+        )
+        if RUNTIME_MODE == "local":
+            ensure_supervisor()
+        st.session_state[message_key] = (
+            f"{label} pause requested. The active safe operation may finish "
+            "before processing becomes idle."
+        )
+        st.rerun()
+
+    requested_label = "Running" if desired else "Paused"
+    actual_label = (actual_status or "unknown").replace("_", " ").title()
+    state_col.info(
+        f"**Requested: {requested_label}**  \n"
+        f"Worker reports: {actual_label}"
+    )

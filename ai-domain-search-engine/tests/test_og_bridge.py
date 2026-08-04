@@ -1,7 +1,11 @@
 import sqlite3
 
-from ai_search.database import add_domain, connect, utc_now
-from ai_search.og_bridge import enqueue_for_screening, screenable_domains
+from ai_search.database import add_domain, connect, set_worker_state, utc_now
+from ai_search.og_bridge import (
+    crawler_state,
+    enqueue_for_screening,
+    screenable_domains,
+)
 
 
 def create_queue(path):
@@ -26,6 +30,19 @@ def create_queue(path):
     )
     conn.commit()
     return conn
+
+
+def test_crawler_state_exposes_worker_report(tmp_path):
+    search_db = tmp_path / "search.sqlite3"
+    conn = connect(search_db)
+    set_worker_state(conn, "worker_status", "running")
+    set_worker_state(conn, "crawler_status", "paused")
+    conn.close()
+
+    assert crawler_state(search_db) == {
+        "worker_status": "running",
+        "crawler_status": "paused",
+    }
 
 
 def test_successful_new_crawl_requeues_stale_ghost(tmp_path):

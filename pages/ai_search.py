@@ -26,6 +26,7 @@ if str(SEARCH_SRC) not in sys.path:
     sys.path.insert(0, str(SEARCH_SRC))
 
 from ai_search.og_bridge import (
+    crawler_state,
     enqueue_for_screening,
     pipeline_status_for_corpus,
     search_companies,
@@ -53,7 +54,7 @@ from common import (
     save_basket_entries,
     stable_domain,
 )
-from ui_theme import render_hideable_table
+from ui_theme import render_hideable_table, render_worker_controls
 
 st.markdown("""
 <style>
@@ -255,6 +256,23 @@ enrichment_metrics[1].metric(
         "Sites with additional Product, Technology, Security, Research, "
         "About, or Team pages retained."
     ),
+)
+
+ai_worker_state = crawler_state(SEARCH_DB)
+render_worker_controls(
+    "ai_crawler",
+    label=".AI crawler",
+    actual_status=str(
+        ai_worker_state.get(
+            "crawler_status",
+            ai_worker_state.get("worker_status", "unknown"),
+        )
+    ),
+    key="ai_crawler",
+)
+st.caption(
+    "Pause stops new crawl batches after the current safe operation. "
+    "Resume continues from the saved queue and checkpoints."
 )
 
 refresh_col, refresh_setting_col = st.columns([1, 4])
