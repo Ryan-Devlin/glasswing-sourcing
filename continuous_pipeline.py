@@ -1566,15 +1566,15 @@ async def async_main() -> None:
     )
     args = parser.parse_args()
 
-    if STREAM_PID.exists():
-        try:
-            existing = int(STREAM_PID.read_text(encoding="utf-8").strip())
-            os.kill(existing, 0)
-            raise SystemExit("Continuous pipeline is already running.")
-        except ProcessLookupError:
-            STREAM_PID.unlink(missing_ok=True)
-        except ValueError:
-            STREAM_PID.unlink(missing_ok=True)
+    # A PID recorded here can outlive the process that wrote it: now that
+    # this container's storage is a persistent volume (it used to be wiped
+    # every restart), the file survives a restart, and the OS can reuse the
+    # same PID number for the new legitimate process -- making
+    # os.kill(existing, 0) succeed spuriously and refuse to start. The
+    # fcntl instance lock below is the real single-instance guarantee (the
+    # kernel releases it the instant a process exits, unlike this file), so
+    # this file alone is never grounds to refuse to start.
+    STREAM_PID.unlink(missing_ok=True)
 
     STREAM_STOP.unlink(missing_ok=True)
     STREAM_PID.write_text(str(os.getpid()), encoding="utf-8")

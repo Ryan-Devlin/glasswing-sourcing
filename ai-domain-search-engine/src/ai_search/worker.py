@@ -38,9 +38,16 @@ def claim_worker_pid() -> None:
             existing = int(PID_FILE.read_text(encoding="utf-8").strip())
             if existing != os.getpid():
                 os.kill(existing, 0)
-                raise RuntimeError(
-                    f"Discovery/crawl worker already running (PID {existing})."
-                )
+                if RUNTIME_MODE == "local":
+                    raise RuntimeError(
+                        f"Discovery/crawl worker already running (PID {existing})."
+                    )
+                # Cloud: this file now lives on a persistent volume and
+                # survives a container restart, so the OS can reuse the
+                # same PID number for the new, legitimate process -- a
+                # live PID at this number alone isn't proof of a real
+                # duplicate (Railway runs a single replica of this
+                # service anyway).
         except (ProcessLookupError, ValueError):
             PID_FILE.unlink(missing_ok=True)
     PID_FILE.write_text(str(os.getpid()), encoding="utf-8")
