@@ -16,7 +16,7 @@ from ai_search.og_bridge import search_companies
 from classification_store import search_classifications
 from common import AI_SEARCH_DB, ZONE_UNIVERSE_DB
 from health_monitor import health_report
-from runtime_control import SERVICES
+from runtime_control import RUNTIME_MODE, SERVICES
 from ui_theme import render_card_grid
 from zone_universe.search import search_pages
 
@@ -40,10 +40,16 @@ status_cols = st.columns(4)
     "Error": status_cols[0].error,
 }[overall](f"System: **{overall}**")
 
-running_count = sum(
-    1 for service in SERVICES if runtime["services"][service]["running"]
-)
-status_cols[1].metric("Workers running", f"{running_count}/{len(SERVICES)}")
+if RUNTIME_MODE == "local":
+    running_count = sum(
+        1 for service in SERVICES if runtime["services"][service]["running"]
+    )
+    status_cols[1].metric("Workers running", f"{running_count}/{len(SERVICES)}")
+else:
+    # Local PID files don't apply once each worker is its own Railway
+    # service -- there's no local process on this container to check, so
+    # "running" is unknown here rather than false. See runtime_status().
+    status_cols[1].metric("Workers", "Cloud-managed")
 status_cols[2].metric("Companies tracked", f"{int(counts['classifications']):,}")
 status_cols[3].metric(
     "Pages indexed",
@@ -58,9 +64,12 @@ service_labels = {
 with st.expander("Worker detail"):
     for service in SERVICES:
         row = runtime["services"][service]
+        if row["running"] is None:
+            status = "Cloud-managed (Railway)"
+        else:
+            status = "Running" if row["running"] else "Stopped"
         st.write(
-            f"**{service_labels[service]}** -- "
-            f"{'Running' if row['running'] else 'Stopped'} "
+            f"**{service_labels[service]}** -- {status} "
             f"(desired: {'on' if row['desired'] else 'off'})"
         )
 st.page_link("pages/system_health.py", label="Full system health", icon="🩺")

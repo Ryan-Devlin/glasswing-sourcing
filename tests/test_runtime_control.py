@@ -177,6 +177,30 @@ def test_runtime_status_does_not_trust_stale_supervisor_state(
     assert status["supervisor"]["running"] is False
 
 
+def test_runtime_status_reports_unknown_not_stopped_in_cloud_mode(
+    tmp_path, monkeypatch
+):
+    """A local PID file means nothing once each worker is its own Railway
+    service -- cloud mode must not report a live remote worker as
+    "Stopped" just because there's no local process for it."""
+    monkeypatch.setattr(runtime_control, "RUNTIME_MODE", "cloud")
+    monkeypatch.setattr(
+        runtime_control,
+        "CONTROL_PATH",
+        tmp_path / "runtime_control.json",
+    )
+    monkeypatch.setattr(
+        runtime_control, "service_pid", lambda _service: 999999
+    )
+    monkeypatch.setattr(runtime_control, "process_alive", lambda _pid: True)
+
+    status = runtime_control.runtime_status()
+
+    for service in runtime_control.SERVICES:
+        assert status["services"][service]["running"] is None
+        assert status["services"][service]["pid"] is None
+
+
 def test_find_supervisor_pids_filters_out_dead_pids(monkeypatch):
     monkeypatch.setattr(runtime_control, "_pgrep", lambda pattern: [999999999])
     assert runtime_control.find_supervisor_pids() == []

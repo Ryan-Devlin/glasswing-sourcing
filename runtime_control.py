@@ -413,11 +413,24 @@ def runtime_status() -> dict[str, object]:
             "untracked_pids": untracked_pids,
         },
         "services": {
-            service: {
-                "desired": bool(control["desired"][service]),
-                "pid": service_pid(service),
-                "running": process_alive(service_pid(service)),
-            }
+            service: (
+                {
+                    "desired": bool(control["desired"][service]),
+                    "pid": service_pid(service),
+                    "running": process_alive(service_pid(service)),
+                }
+                if RUNTIME_MODE == "local"
+                # A local PID file means nothing once each worker runs as its
+                # own separate Railway service -- there's no local process to
+                # check on the `web` container, so "running" would always
+                # read back False and falsely claim a live cloud worker is
+                # stopped. Report it as unknown instead of guessing.
+                else {
+                    "desired": bool(control["desired"][service]),
+                    "pid": None,
+                    "running": None,
+                }
+            )
             for service in SERVICES
         },
     }
