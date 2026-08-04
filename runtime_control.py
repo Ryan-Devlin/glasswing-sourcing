@@ -8,6 +8,7 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,6 +44,8 @@ AI_PID = AI_PROJECT / "logs" / "worker.pid"
 ZONE_PID = ZONE_PROJECT / "logs" / "worker.pid"
 
 SERVICES = ("pipeline", "ai_crawler", "zone_crawler")
+_RUNTIME_SCHEMA_LOCK = threading.Lock()
+_runtime_schema_initialized_for = ""
 
 
 def process_alive(pid: int) -> bool:
@@ -102,36 +105,63 @@ def service_pid(service: str) -> int:
 
 
 def _connect_runtime_control():
+    global _runtime_schema_initialized_for
     # A fresh Postgres control store gets the modern schema directly -- there
     # is no pre-existing local installation to carry forward, unlike the
     # SQLite/JSON path. Own "runtime" schema so it can't collide with
     # classification_store/pipeline/ai_search/zone_universe, which all
     # likely share the same physical Postgres instance on Railway today.
+    database_key = os.getenv(RUNTIME_CONTROL_DATABASE_ENV_VAR, "").strip()
     conn = connect_postgres(env_var=RUNTIME_CONTROL_DATABASE_ENV_VAR)
-    conn.execute("CREATE SCHEMA IF NOT EXISTS runtime")
-    conn.commit()
-    conn.execute("SET search_path TO runtime, public")
+    if _runtime_schema_initialized_for == database_key:
+        conn.execute("SET search_path TO runtime, public")
+        return conn
     # Defense in depth, same as every other Postgres-backed subsystem here
     # (see continuous_pipeline._connect_db_postgres): the lock is free when
     # uncontended, so there's no reason to skip it even though this store is
     # currently only touched by one caller (System Health) at a time.
-    conn.execute("SELECT pg_advisory_lock(hashtext(?))", ("runtime_control_migration",))
-    try:
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS worker_control (
-                service TEXT PRIMARY KEY,
-                desired BOOLEAN NOT NULL DEFAULT FALSE,
-                updated_at TEXT NOT NULL DEFAULT '',
-                requested_by TEXT NOT NULL DEFAULT ''
+    with _RUNTIME_SCHEMA_LOCK:
+        if _runtime_schema_initialized_for != database_key:
+            conn.execute("CREATE SCHEMA IF NOT EXISTS runtime")
+            conn.commit()
+            conn.execute("SET search_path TO runtime, public")
+            conn.execute(
+                "SELECT pg_advisory_lock(hashtext(?))",
+                ("runtime_control_migration",),
             )
-            """
-        )
-        conn.commit()
-    finally:
-        conn.execute(
-            "SELECT pg_advisory_unlock(hashtext(?))", ("runtime_control_migration",)
-        )
+            try:
+                conn.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS worker_control (
+                        service TEXT PRIMARY KEY,
+                        desired BOOLEAN NOT NULL DEFAULT FALSE,
+                        updated_at TEXT NOT NULL DEFAULT '',
+                        requested_by TEXT NOT NULL DEFAULT ''
+                    );
+
+                    CREATE TABLE IF NOT EXISTS pipeline_status (
+                        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                        payload TEXT NOT NULL DEFAULT '{}',
+                        updated_at TEXT NOT NULL DEFAULT ''
+                    );
+
+                    CREATE TABLE IF NOT EXISTS pipeline_config (
+                        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                        payload TEXT NOT NULL DEFAULT '{}',
+                        updated_at TEXT NOT NULL DEFAULT '',
+                        requested_by TEXT NOT NULL DEFAULT ''
+                    )
+                    """
+                )
+                conn.commit()
+                _runtime_schema_initialized_for = database_key
+            finally:
+                conn.execute(
+                    "SELECT pg_advisory_unlock(hashtext(?))",
+                    ("runtime_control_migration",),
+                )
+        else:
+            conn.execute("SET search_path TO runtime, public")
     return conn
 
 
@@ -142,6 +172,107 @@ def control_backend_available() -> bool:
     can only if a shared store every service can reach is configured --
     the old local-file store doesn't cross a Railway service boundary."""
     return RUNTIME_MODE == "local" or using_postgres(RUNTIME_CONTROL_DATABASE_ENV_VAR)
+
+
+def shared_pipeline_backend_available() -> bool:
+    """Whether the web and pipeline services can exchange live state."""
+    return using_postgres(RUNTIME_CONTROL_DATABASE_ENV_VAR)
+
+
+def _read_shared_pipeline_payload(table: str) -> dict[str, object]:
+    if table not in {"pipeline_status", "pipeline_config"}:
+        raise ValueError(f"Unknown shared pipeline table: {table}")
+    if not shared_pipeline_backend_available():
+        return {}
+    conn = _connect_runtime_control()
+    try:
+        row = conn.execute(
+            f"SELECT payload, updated_at FROM {table} WHERE singleton = 1"
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return {}
+    try:
+        payload = json.loads(str(row["payload"] or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    if table == "pipeline_status":
+        payload["shared_status_updated_at"] = str(row["updated_at"] or "")
+    return payload
+
+
+def read_pipeline_status() -> dict[str, object]:
+    """Read the pipeline worker's latest status from the shared cloud store."""
+    return _read_shared_pipeline_payload("pipeline_status")
+
+
+def read_pipeline_config() -> dict[str, object]:
+    """Read the dashboard's latest pipeline settings from the shared store."""
+    return _read_shared_pipeline_payload("pipeline_config")
+
+
+def _publish_shared_pipeline_payload(
+    table: str,
+    payload: dict[str, object],
+    *,
+    requested_by: str = "",
+) -> None:
+    if table not in {"pipeline_status", "pipeline_config"}:
+        raise ValueError(f"Unknown shared pipeline table: {table}")
+    if not shared_pipeline_backend_available():
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    serialized = json.dumps(payload, separators=(",", ":"), default=str)
+    conn = _connect_runtime_control()
+    try:
+        if table == "pipeline_config":
+            conn.execute(
+                """
+                INSERT INTO pipeline_config
+                    (singleton, payload, updated_at, requested_by)
+                VALUES (1, ?, ?, ?)
+                ON CONFLICT (singleton) DO UPDATE SET
+                    payload = EXCLUDED.payload,
+                    updated_at = EXCLUDED.updated_at,
+                    requested_by = EXCLUDED.requested_by
+                """,
+                (serialized, now, requested_by),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO pipeline_status (singleton, payload, updated_at)
+                VALUES (1, ?, ?)
+                ON CONFLICT (singleton) DO UPDATE SET
+                    payload = EXCLUDED.payload,
+                    updated_at = EXCLUDED.updated_at
+                """,
+                (serialized, now),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def publish_pipeline_status(payload: dict[str, object]) -> None:
+    """Publish a complete status snapshot for the dashboard."""
+    _publish_shared_pipeline_payload("pipeline_status", payload)
+
+
+def publish_pipeline_config(
+    payload: dict[str, object],
+    *,
+    requested_by: str = "dashboard",
+) -> None:
+    """Publish pipeline settings so the separate worker sees changes."""
+    _publish_shared_pipeline_payload(
+        "pipeline_config",
+        payload,
+        requested_by=requested_by,
+    )
 
 
 def read_control() -> dict[str, object]:

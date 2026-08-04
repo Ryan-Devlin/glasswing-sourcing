@@ -10,6 +10,52 @@ import continuous_pipeline
 
 
 class StatusPersistenceTests(unittest.TestCase):
+    def test_status_snapshot_is_published_to_shared_cloud_store(self):
+        with tempfile.TemporaryDirectory() as directory:
+            status = Path(directory) / "continuous_status.json"
+            published = []
+            with patch.object(continuous_pipeline, "STREAM_STATUS", status), patch.object(
+                continuous_pipeline,
+                "shared_pipeline_backend_available",
+                return_value=True,
+            ), patch.object(
+                continuous_pipeline,
+                "publish_pipeline_status",
+                side_effect=lambda payload: published.append(dict(payload)),
+            ):
+                continuous_pipeline.write_status(
+                    running=True,
+                    stage="screening",
+                    screened=12,
+                )
+
+            self.assertEqual(len(published), 1)
+            self.assertTrue(published[0]["running"])
+            self.assertEqual(published[0]["screened"], 12)
+
+    def test_pipeline_prefers_shared_cloud_config(self):
+        shared = {"selected_extensions": [".ai", ".io"], "scraper_workers": 31}
+        with patch.object(
+            continuous_pipeline,
+            "shared_pipeline_backend_available",
+            return_value=True,
+        ), patch.object(
+            continuous_pipeline,
+            "read_pipeline_config",
+            return_value=shared,
+        ), patch.object(
+            continuous_pipeline,
+            "_shared_config_checked_at",
+            0.0,
+        ), patch.object(
+            continuous_pipeline,
+            "_shared_config_cache",
+            {},
+        ):
+            loaded = continuous_pipeline.load_run_config()
+
+        self.assertEqual(loaded, shared)
+
     def test_concurrent_status_writes_never_share_temp_file(self):
         with tempfile.TemporaryDirectory() as directory:
             status = Path(directory) / "continuous_status.json"
@@ -21,7 +67,11 @@ class StatusPersistenceTests(unittest.TestCase):
                 except Exception as exc:
                     errors.append(exc)
 
-            with patch.object(continuous_pipeline, "STREAM_STATUS", status):
+            with patch.object(continuous_pipeline, "STREAM_STATUS", status), patch.object(
+                continuous_pipeline,
+                "shared_pipeline_backend_available",
+                return_value=False,
+            ):
                 threads = [threading.Thread(target=writer, args=(i,)) for i in range(30)]
                 for thread in threads:
                     thread.start()

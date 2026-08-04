@@ -8,6 +8,46 @@ import runtime_control
 from common import atomic_write_json
 
 
+class _OneRowResult:
+    def __init__(self, row):
+        self.row = row
+
+    def fetchone(self):
+        return self.row
+
+
+class _SharedPipelineConnection:
+    def __init__(self):
+        self.rows = {}
+        self.commits = 0
+
+    def execute(self, query, params=()):
+        normalized = " ".join(query.split()).lower()
+        if normalized.startswith("select payload, updated_at from"):
+            table = normalized.split(" from ", 1)[1].split(" ", 1)[0]
+            return _OneRowResult(self.rows.get(table))
+        if "insert into pipeline_status" in normalized:
+            self.rows["pipeline_status"] = {
+                "payload": params[0],
+                "updated_at": params[1],
+            }
+            return _OneRowResult(None)
+        if "insert into pipeline_config" in normalized:
+            self.rows["pipeline_config"] = {
+                "payload": params[0],
+                "updated_at": params[1],
+                "requested_by": params[2],
+            }
+            return _OneRowResult(None)
+        raise AssertionError(f"Unexpected SQL: {normalized}")
+
+    def commit(self):
+        self.commits += 1
+
+    def close(self):
+        pass
+
+
 def _live_postgres_url() -> str | None:
     """Same opt-in pattern as test_classification_store.py: skip unless a
     reachable TEST_DATABASE_URL is set, so the normal run never depends on a
@@ -75,6 +115,48 @@ def test_runtime_control_defaults_paused_and_merges_requests(
     assert updated["desired"]["ai_crawler"] is True
     assert updated["desired"]["pipeline"] is False
     assert updated["requested_by"] == "unit_test"
+
+
+def test_shared_pipeline_status_and_config_round_trip(monkeypatch):
+    connection = _SharedPipelineConnection()
+    monkeypatch.setattr(
+        runtime_control,
+        "shared_pipeline_backend_available",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        runtime_control,
+        "_connect_runtime_control",
+        lambda: connection,
+    )
+
+    runtime_control.publish_pipeline_status(
+        {"running": True, "screened": 27, "queue": {"pending": 9}}
+    )
+    runtime_control.publish_pipeline_config(
+        {"selected_extensions": [".ai", ".io"], "scraper_workers": 28},
+        requested_by="unit_test",
+    )
+
+    status = runtime_control.read_pipeline_status()
+    config = runtime_control.read_pipeline_config()
+    assert status["running"] is True
+    assert status["screened"] == 27
+    assert status["shared_status_updated_at"]
+    assert config["selected_extensions"] == [".ai", ".io"]
+    assert config["scraper_workers"] == 28
+    assert connection.rows["pipeline_config"]["requested_by"] == "unit_test"
+    assert connection.commits == 2
+
+
+def test_shared_pipeline_read_returns_empty_without_backend(monkeypatch):
+    monkeypatch.setattr(
+        runtime_control,
+        "shared_pipeline_backend_available",
+        lambda: False,
+    )
+    assert runtime_control.read_pipeline_status() == {}
+    assert runtime_control.read_pipeline_config() == {}
 
 
 def test_cloud_runtime_rejects_local_process_mutation(

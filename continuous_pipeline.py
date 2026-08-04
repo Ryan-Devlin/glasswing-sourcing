@@ -63,12 +63,24 @@ from common import (
     atomic_write_json,
     stable_domain,
 )
-from runtime_control import RUNTIME_MODE, read_control
+from runtime_control import (
+    RUNTIME_MODE,
+    publish_pipeline_status,
+    read_control,
+    read_pipeline_config,
+    shared_pipeline_backend_available,
+)
 
 load_dotenv(ROOT / ".env")
 
 RUN_LOG = LOGS / "continuous_pipeline.log"
 STATUS_WRITE_LOCK = threading.Lock()
+SHARED_STATUS_PUBLISH_LOCK = threading.Lock()
+SHARED_STATUS_MIN_INTERVAL_SECONDS = 5.0
+SHARED_CONFIG_CACHE_SECONDS = 10.0
+_last_shared_status_publish = 0.0
+_shared_config_checked_at = 0.0
+_shared_config_cache: dict[str, object] = {}
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -79,6 +91,7 @@ def parse_bool(value: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 def write_status(**updates: object) -> None:
+    global _last_shared_status_publish
     with STATUS_WRITE_LOCK:
         current: dict[str, object] = {}
         if STREAM_STATUS.exists():
@@ -88,8 +101,27 @@ def write_status(**updates: object) -> None:
                 )
             except Exception:
                 current = {}
+        urgent = any(
+            key in updates and updates[key] != current.get(key)
+            for key in ("running", "stage", "last_error")
+        )
         current.update(updates)
         atomic_write_json(STREAM_STATUS, current)
+    if not shared_pipeline_backend_available():
+        return
+    now = time.monotonic()
+    if not urgent and now - _last_shared_status_publish < SHARED_STATUS_MIN_INTERVAL_SECONDS:
+        return
+    if not SHARED_STATUS_PUBLISH_LOCK.acquire(blocking=False):
+        return
+    try:
+        publish_pipeline_status(current)
+        _last_shared_status_publish = now
+    except Exception as exc:
+        # Monitoring must never take down certificate ingestion or screening.
+        print(f"shared pipeline status publish failed: {exc}", file=sys.stderr)
+    finally:
+        SHARED_STATUS_PUBLISH_LOCK.release()
 
 def ensure_domain_registry_schema(
     conn: sqlite3.Connection,
@@ -826,6 +858,20 @@ def mark_failure(
 
 
 def load_run_config() -> dict:
+    global _shared_config_cache, _shared_config_checked_at
+    if shared_pipeline_backend_available():
+        now = time.monotonic()
+        if now - _shared_config_checked_at >= SHARED_CONFIG_CACHE_SECONDS:
+            try:
+                shared = read_pipeline_config()
+            except Exception as exc:
+                print(f"shared pipeline config read failed: {exc}", file=sys.stderr)
+            else:
+                if shared:
+                    _shared_config_cache = shared
+            _shared_config_checked_at = now
+        if _shared_config_cache:
+            return dict(_shared_config_cache)
     if not RUN_CONFIG.exists():
         return {}
     try:

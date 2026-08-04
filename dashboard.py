@@ -34,8 +34,13 @@ from glasswing_portfolio import GLASSWING_PORTFOLIO_DOMAINS
 from runtime_control import (
     RUNTIME_MODE,
     control_backend_available,
+    publish_pipeline_config,
+    publish_pipeline_status,
+    read_pipeline_config,
+    read_pipeline_status,
     request_services,
     runtime_status,
+    shared_pipeline_backend_available,
 )
 from ui_theme import render_card_grid, render_hideable_table
 from training_data import (
@@ -228,23 +233,25 @@ DEFAULT_RUN_CONFIG = {
 
 
 def load_dashboard_run_config() -> dict:
-    if not RUN_CONFIG.exists():
-        return dict(DEFAULT_RUN_CONFIG)
-    try:
-        loaded = json.loads(RUN_CONFIG.read_text(encoding="utf-8"))
-    except Exception:
-        return dict(DEFAULT_RUN_CONFIG)
+    loaded: dict = {}
+    if shared_pipeline_backend_available():
+        try:
+            loaded = read_pipeline_config()
+        except Exception:
+            loaded = {}
+    if not loaded and RUN_CONFIG.exists():
+        try:
+            loaded = json.loads(RUN_CONFIG.read_text(encoding="utf-8"))
+        except Exception:
+            loaded = {}
     result = dict(DEFAULT_RUN_CONFIG)
     result.update(loaded)
     return result
 
 
 def save_dashboard_run_config(config: dict) -> None:
-    RUN_CONFIG.parent.mkdir(parents=True, exist_ok=True)
-    RUN_CONFIG.write_text(
-        json.dumps(config, indent=2),
-        encoding="utf-8",
-    )
+    atomic_write_json(RUN_CONFIG, config)
+    publish_pipeline_config(config, requested_by="dashboard")
 
 
 def parse_keyword_text(value: str) -> list[str]:
@@ -266,6 +273,24 @@ def process_is_alive(pid: int) -> bool:
 
 
 def read_stream_status() -> dict:
+    if shared_pipeline_backend_available():
+        try:
+            shared = read_pipeline_status()
+        except Exception as exc:
+            return {
+                "running": False,
+                "stage": "status unavailable",
+                "queue": {},
+                "shared_status_error": f"{type(exc).__name__}: {exc}",
+            }
+        if shared:
+            return shared
+        return {
+            "running": False,
+            "stage": "waiting for worker status",
+            "queue": {},
+            "shared_status_waiting": True,
+        }
     if not STREAM_STATUS.exists():
         return {"running": False, "stage": "stopped", "queue": {}}
     try:
@@ -301,11 +326,10 @@ def start_continuous_pipeline(config: dict) -> None:
                 "set RUNTIME_CONTROL_DATABASE_URL to enable this."
             )
             return
-        # The pipeline-worker container is always up; this just flips the
-        # shared desired-state flag it polls every loop tick. Run filters
-        # changed here don't reach it yet (its own local run_config.json
-        # lives on a different container, not synced across services) --
-        # only start/stop is wired to the cloud worker so far.
+        # The worker container is always up. Persist both the settings and
+        # desired state in Postgres so the separate service sees this exact
+        # dashboard request.
+        save_dashboard_run_config(config)
         request_services({"pipeline": True}, requested_by="dashboard_start")
         st.success(
             "Resume requested. The pipeline-worker service will pick this "
@@ -502,6 +526,7 @@ def update_manual_claude_status(
     if result is not None:
         status["last_manual_claude_result"] = result
     atomic_write_json(STREAM_STATUS, status)
+    publish_pipeline_status(status)
 
 
 def find_latest_claude_result(domain: str) -> dict | None:
@@ -1282,11 +1307,8 @@ stream_status = read_stream_status()
 if RUNTIME_MODE == "local":
     running = bool(stream_status.get("running", False))
 else:
-    # read_stream_status() reads a local file that lives on the
-    # pipeline-worker container, not this one -- cross-service invisible.
-    # The desired-state flag (Postgres-backed, correctly cross-service) is
-    # the only reliable "is it supposed to be running" signal available
-    # here.
+    # Desired state controls the always-on Railway worker. Detailed live
+    # counts and stage come independently from its shared status snapshot.
     running = bool(
         runtime_status()["services"]["pipeline"]["desired"]
     )
@@ -1742,9 +1764,9 @@ with status_col:
             stream_status.get("stage", "stopped")
         ).replace("_", " ").title()
     else:
-        # stream_status's "stage" is the same cross-service-invisible local
-        # file as "running" above -- don't show a stale/wrong detail string.
-        stage = "Cloud-managed"
+        stage = str(
+            stream_status.get("stage", "waiting for worker status")
+        ).replace("_", " ").title()
     state = "Running" if running else "Stopped"
     st.markdown(
         f'<div class="status-card"><strong>{state}</strong>'
@@ -1786,13 +1808,20 @@ if st.session_state.get("confirm_reset_run", False):
             st.session_state["confirm_reset_run"] = False
             st.rerun()
 
-if RUNTIME_MODE != "local":
+if stream_status.get("shared_status_error"):
+    st.error(
+        "Live worker status is temporarily unavailable: "
+        f"{stream_status['shared_status_error']}"
+    )
+elif stream_status.get("shared_status_waiting"):
     st.info(
-        "Running/Stopped above is live and accurate. The detailed counts "
-        "below (received, screened, queue breakdown, ...) come from a "
-        "status file local to the pipeline-worker container -- this page "
-        "can't read it, so they're stale, not real-time. For accurate "
-        "live counts, use Overview or System Health instead."
+        "Waiting for the pipeline worker's first live status update. "
+        "This normally takes only a few seconds after deployment."
+    )
+elif RUNTIME_MODE != "local":
+    st.caption(
+        "Counts, queue details, and the current stage below are live from "
+        "the pipeline worker's shared status record."
     )
 
 queue = stream_status.get("queue", {}) or {}
