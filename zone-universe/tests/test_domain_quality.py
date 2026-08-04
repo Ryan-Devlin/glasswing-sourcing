@@ -80,3 +80,55 @@ def test_unconventional_but_plausible_brands_remain_active(domain: str) -> None:
 )
 def test_low_value_names_are_cold_priority(domain: str) -> None:
     assert crawl_priority(domain) == 3
+
+
+@pytest.mark.parametrize(
+    "domain",
+    [
+        "flowers.com",
+        "bakery.com",
+        "lawoffice.com",
+        "londonplumbing.com",
+        "thebestflorist.com",
+    ],
+)
+def test_generic_dotcom_real_words_are_deprioritized(domain: str) -> None:
+    # A plain dictionary word or generic small-business name on .com is
+    # statistically identical, letter-shape-wise, to an invented startup
+    # brand -- .com's scale (100M+) means treating every non-gibberish word
+    # as crawl-worthy made the active queue effectively the whole zone
+    # file. These require an explicit thesis keyword or a short/brandable
+    # name to earn an active tier; a generic real word alone doesn't.
+    assert crawl_priority(domain) == 3
+
+
+@pytest.mark.parametrize(
+    "domain",
+    [
+        "flowers.app",
+        "bakery.app",
+        "lawoffice.app",
+    ],
+)
+def test_generic_dotapp_real_words_remain_active(domain: str) -> None:
+    # .app is a small, inherently startup-signaling universe -- keep its
+    # broader recall even for names with no explicit thesis keyword.
+    assert crawl_priority(domain) <= 2
+
+
+def test_digit_stylized_brand_names_stay_active_on_dotcom() -> None:
+    # The digit is a deliberate brand signal here (1Password, 3D Scanner),
+    # not a random-generation artifact -- these should stay in an active
+    # tier even under the stricter .com policy.
+    assert crawl_priority("1password.com") == 1
+    assert crawl_priority("3dscanner.com") == 1
+
+
+def test_widened_company_hints_catch_more_thesis_relevant_terms() -> None:
+    for domain in (
+        "acmerobotics.com",
+        "northstarbiotech.com",
+        "vertexfintech.com",
+        "clearvisionml.com",
+    ):
+        assert crawl_priority(domain) == 0

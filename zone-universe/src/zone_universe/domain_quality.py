@@ -222,32 +222,60 @@ def assess_domain(domain: str) -> DomainQuality:
 COMPANY_HINTS = (
     "ai",
     "analytics",
+    "api",
     "automation",
     "bio",
+    "biotech",
     "cloud",
     "compute",
     "cyber",
     "data",
     "defense",
+    "fintech",
+    "genai",
     "health",
+    "healthtech",
     "labs",
+    "llm",
     "medical",
+    "ml",
+    "neural",
+    "nlp",
     "platform",
+    "quantum",
     "robot",
+    "robotics",
+    "saas",
     "security",
     "software",
     "systems",
     "tech",
+    "vision",
 )
+
+# .app is a small, inherently startup-signaling universe (registration
+# requires HTTPS, and it's marketed toward developers/mobile apps) --
+# nowhere near the scale of .com, where the same permissive "plausible
+# word" tier let through the entire long tail of small-business and
+# personal-site domains alongside real companies. Keep .app's broader
+# recall; apply the stricter, keyword/short-brand-only policy to .com.
+PERMISSIVE_TLDS = frozenset({"app"})
 
 
 def crawl_priority(domain: str) -> int:
-    """Rank accepted names for crawl order without excluding the long tail.
+    """Rank accepted names for crawl order by thesis-relevant signal.
 
-    0 is the first pass. Every accepted domain remains in a later pass.
+    0 is the first pass. Priority 3 stays in the source queue, recoverable
+    later, but isn't actively worked -- a domain merely "not being
+    gibberish" isn't evidence of being an operating tech company (a plain
+    dictionary word like "flowers.com" and an invented brand like
+    "figma.com" are statistically identical letter sequences), so it takes
+    an explicit thesis keyword, a short/brandable name, or a distinctive
+    digit-stylized brand (1Password, 3D Scanner) to earn an active tier.
     """
     quality = assess_domain(domain)
     label = quality.label.removeprefix("xn--")
+    tld = str(domain).strip().lower().strip(".").rsplit(".", 1)[-1]
     letters_only = label.isalpha()
     company_hint = any(
         hint in label
@@ -284,18 +312,32 @@ def crawl_priority(domain: str) -> int:
         and quality.score > 0
     ):
         return 3
+    # Compact names that mix digits into an otherwise plausible brand word
+    # (1Password, 3D Scanner-style stylization) -- the digit is the brand
+    # signal here, not a random-generation artifact, so this stays narrow
+    # (short, low digit ratio, low noise score) rather than reopening the
+    # door to generated-looking alphanumeric strings.
     if (
-        letters_only
+        not letters_only
+        and quality.length <= 12
+        and quality.digit_ratio <= 0.3
+        and quality.score <= 20
+    ):
+        return 1
+    if (
+        tld in PERMISSIVE_TLDS
+        and letters_only
         and 4 <= quality.length <= 15
         and 0.18 <= quality.vowel_ratio <= 0.72
         and quality.bigram_ratio >= 0.20
         and quality.longest_consonant_run <= 5
     ):
         return 1
-    if letters_only and 2 <= quality.length <= 24:
+    if tld in PERMISSIVE_TLDS and letters_only and 2 <= quality.length <= 24:
         return 2
     if (
-        quality.score <= 24
+        tld in PERMISSIVE_TLDS
+        and quality.score <= 24
         and quality.digit_ratio < 0.25
         and quality.length <= 24
     ):
