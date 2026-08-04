@@ -16,12 +16,12 @@ from dotenv import load_dotenv
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
-from classification_store import frame_from_store, record_manual_move
+from classification_store import frame_from_store
 from common import (
     FILTERED, LLM, MANUAL, NO_BASKET_DATA, YES_BASKET_DATA,
     ROOT, RUN_LOCK, RUN_LOG, RUN_STATUS,
     QUEUE_DB, RUN_CONFIG, STREAM_PID, STREAM_STATUS, STREAM_STOP,
-    atomic_write_csv, atomic_write_json, normalize_domain_url, read_basket_data, remove_basket_entry,
+    atomic_write_json, read_basket_data, remove_basket_entry,
     save_basket_entries, save_basket_entry, seed_yes_basket,
     stable_domain,
 )
@@ -682,126 +682,6 @@ OVERRIDES_PATH = MANUAL / "domain_overrides.csv"
 def load_overrides() -> pd.DataFrame:
     return read_csv_safely(OVERRIDES_PATH)
 
-def save_override(
-    domain: str,
-    target: str,
-    note: str = "",
-    *,
-    objective_score: int | None = None,
-) -> None:
-    """Persist a manual classification and its matching training label."""
-    domain = stable_domain(domain)
-    if target in {"Investable Candidate", "Hard Denied"}:
-        if objective_score is None:
-            raise ValueError(
-                f"{target} requires the company's objective score."
-            )
-        objective_score = max(0, min(int(objective_score), 100))
-
-    existing = load_overrides()
-    row = pd.DataFrame([{
-        "domain": domain,
-        "override_target": target,
-        "override_note": note,
-        "updated_at": pd.Timestamp.utcnow().isoformat(),
-    }])
-    if existing.empty:
-        combined = row
-    else:
-        combined = pd.concat([existing, row], ignore_index=True, sort=False)
-        combined["domain"] = combined["domain"].map(stable_domain)
-        combined = combined.drop_duplicates("domain", keep="last")
-    OVERRIDES_PATH.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_csv(OVERRIDES_PATH, combined)
-    target_to_bucket = {
-        "Investable Candidate": "priority",
-        "Review Candidate": "review",
-        "Potential Comp": "comp",
-        "Hard Denied": "reject",
-        "Coming Soon": "coming_soon",
-        "Insufficient Evidence": "insufficient",
-    }
-    if target in target_to_bucket:
-        record_manual_move(
-            [domain],
-            target_label=target,
-            target_bucket=target_to_bucket[target],
-            scores={domain: int(objective_score or 0)},
-            note=note or "manual_move_from_glasswing",
-            source="glasswing_dashboard",
-        )
-
-    # This is deliberately part of the same classification operation. The
-    # basket writer removes the domain from the opposite basket first, so a
-    # former good candidate cannot remain in Yes after a Hard Denial.
-    if target == "Investable Candidate":
-        save_basket_entry(
-            domain,
-            "yes",
-            objective_score,
-            source="human",
-            reason="manual_investable_classification",
-        )
-    elif target == "Hard Denied":
-        save_basket_entry(
-            domain,
-            "no",
-            objective_score,
-            source="human",
-            reason="manual_hard_denial_classification",
-        )
-    # Classification tables are cached by file version; clear the in-process
-    # snapshot after an override so the next render reflects the write.
-    st.cache_data.clear()
-
-
-def save_bulk_hard_denials(frame: pd.DataFrame) -> int:
-    """Move a whole visible frame to Hard Denied with two atomic writes."""
-    if frame.empty or "domain" not in frame.columns:
-        return 0
-    rows = frame.copy()
-    rows["domain"] = rows["domain"].map(stable_domain)
-    rows = rows[rows["domain"].ne("")].drop_duplicates("domain", keep="last")
-    if rows.empty:
-        return 0
-    scores = pd.to_numeric(
-        rows.get(
-            "_display_score",
-            rows.get(
-                "_fit_score_v2",
-                rows.get("diligence_rank_score", rows.get("rule_score", 0)),
-            ),
-        ),
-        errors="coerce",
-    ).fillna(0).clip(0, 100).astype(int)
-
-    existing = load_overrides()
-    now = pd.Timestamp.utcnow().isoformat()
-    additions = pd.DataFrame({
-        "domain": rows["domain"],
-        "override_target": "Hard Denied",
-        "override_note": "bulk_move_all_to_hard_denied",
-        "updated_at": now,
-    })
-    combined = pd.concat([existing, additions], ignore_index=True, sort=False)
-    combined["domain"] = combined["domain"].map(stable_domain)
-    combined = combined.drop_duplicates("domain", keep="last")
-    atomic_write_csv(OVERRIDES_PATH, combined)
-    record_manual_move(
-        rows["domain"],
-        target_label="Hard Denied",
-        target_bucket="reject",
-        scores=dict(zip(rows["domain"], scores)),
-        note="bulk_move_all_to_hard_denied",
-        source="glasswing_dashboard",
-    )
-    return save_basket_entries(
-        zip(rows["domain"], scores),
-        "no",
-        source="human",
-        reason="bulk_move_all_to_hard_denied",
-    )
-
 def apply_overrides(frame: pd.DataFrame) -> pd.DataFrame:
     result = frame.copy()
     if result.empty or "domain" not in result.columns:
@@ -834,202 +714,7 @@ def apply_overrides(frame: pd.DataFrame) -> pd.DataFrame:
     normalized_domains = result["domain"].map(stable_domain)
     basket_labels = normalized_domains.map(basket_mapping).fillna("")
     result["_training_basket"] = basket_labels
-    no_basket_targets = basket_labels.map({"no": "Hard Denied"}).fillna("")
-    result["_override_target"] = no_basket_targets.where(
-        no_basket_targets.ne(""),
-        result["_override_target"],
-    )
     return result
-
-def move_overridden_rows(
-    all_screened: pd.DataFrame,
-    target: str,
-) -> pd.DataFrame:
-    if all_screened.empty:
-        return pd.DataFrame()
-    frame = apply_overrides(all_screened)
-    return frame[frame.get("_override_target", "").astype(str).eq(target)].copy()
-
-@st.fragment
-def manual_action_panel(
-    frame: pd.DataFrame,
-    key_prefix: str,
-    *,
-    allow_move_all_to_hard_denied: bool = False,
-) -> None:
-    """Render a scroll-stable, multi-company reclassification control."""
-    if frame.empty or "domain" not in frame.columns:
-        return
-
-    ordered = frame.copy()
-    score_series = pd.to_numeric(
-        ordered.get(
-            "_fit_score_v2",
-            ordered.get(
-                "diligence_rank_score",
-                ordered.get("rule_score", 0),
-            ),
-        ),
-        errors="coerce",
-    ).fillna(0)
-    ordered = ordered.assign(_display_score=score_series)
-    ordered = ordered.sort_values(
-        "_display_score",
-        ascending=False,
-    )
-    moved_key = f"{key_prefix}_moved_domains"
-    moved_domains = {
-        stable_domain(value)
-        for value in st.session_state.get(moved_key, [])
-    }
-    if moved_domains:
-        ordered = ordered[
-            ~ordered["domain"].map(stable_domain).isin(moved_domains)
-        ].copy()
-    message_key = f"{key_prefix}_batch_message"
-    if st.session_state.get(message_key):
-        st.success(st.session_state.pop(message_key))
-    if ordered.empty:
-        return
-
-    with st.expander(
-        "Select and move companies",
-        expanded=False,
-    ):
-        if allow_move_all_to_hard_denied:
-            if st.button(
-                f"Move all {len(ordered):,} to Hard Denied",
-                type="secondary",
-                width="stretch",
-                key=f"{key_prefix}_move_all_hard_denied",
-                help=(
-                    "Moves every company visible in this tab to Hard Denied "
-                    "and the No training basket with its current score."
-                ),
-            ):
-                moved_count = save_bulk_hard_denials(ordered)
-                # The frame was read through st.cache_data.  Invalidate that
-                # snapshot before rerunning so the moved rows disappear from
-                # every tab immediately instead of lingering until Refresh.
-                st.cache_data.clear()
-                st.session_state[moved_key] = sorted(
-                    moved_domains.union(
-                        ordered["domain"].map(stable_domain)
-                    )
-                )
-                st.session_state[message_key] = (
-                    f"Moved all {moved_count:,} companies to Hard Denied."
-                )
-                # A bulk move changes multiple global views (classification,
-                # both baskets, and counts), so use one controlled full rerun.
-                # This avoids the stale-fragment/glitchy double-click state.
-                st.rerun()
-
-        batch = pd.DataFrame(index=ordered.index)
-        batch["Select"] = False
-        batch["Company"] = ordered.get(
-            "page_title",
-            ordered["domain"],
-        ).fillna("").astype(str)
-        batch["Domain"] = ordered["domain"].astype(str)
-        batch["Website"] = ordered.apply(
-            lambda row: (
-                str(row.get("final_url", "")).strip()
-                or normalize_domain_url(row.get("domain", ""))
-            ),
-            axis=1,
-        )
-        batch["Score"] = ordered["_display_score"].fillna(0).astype(int)
-
-        edited = st.data_editor(
-            batch.reset_index(drop=False).rename(
-                columns={"index": "_source_index"}
-            ),
-            width="stretch",
-            hide_index=True,
-            disabled=[
-                "_source_index",
-                "Company",
-                "Domain",
-                "Website",
-                "Score",
-            ],
-            column_config={
-                "_source_index": None,
-                "Select": st.column_config.CheckboxColumn(
-                    "Move",
-                    help="Select as many companies as you want.",
-                ),
-                "Score": st.column_config.ProgressColumn(
-                    "Score",
-                    min_value=0,
-                    max_value=100,
-                    format="%d",
-                ),
-                "Website": st.column_config.LinkColumn(
-                    "Website",
-                    display_text="Open website",
-                    help="Open the company website in a new tab.",
-                ),
-            },
-            key=f"{key_prefix}_batch_editor",
-        )
-
-        action_col, button_col = st.columns([2.5, 1])
-        with action_col:
-            decision = st.selectbox(
-                "Move selected to",
-                [
-                "Needs Review",
-                "Investable Candidate",
-                "Potential Comp",
-                "Insufficient Evidence",
-                "Hard Denied",
-                "Coming Soon",
-                ],
-                key=f"{key_prefix}_batch_decision",
-            )
-        with button_col:
-            st.write("")
-            move_clicked = st.button(
-                "Move selected",
-                type="primary",
-                width="stretch",
-                key=f"{key_prefix}_batch_apply",
-            )
-
-        if move_clicked:
-            selected = edited[edited["Select"]].copy()
-            if selected.empty:
-                st.warning("Select at least one company first.")
-                return
-            target_map = {
-                "Needs Review": "Review Candidate",
-                "Investable Candidate": "Investable Candidate",
-                "Potential Comp": "Potential Comp",
-                "Insufficient Evidence": "Insufficient Evidence",
-                "Hard Denied": "Hard Denied",
-                "Coming Soon": "Coming Soon",
-            }
-            moved = []
-            for _, selected_item in selected.iterrows():
-                selected_domain = stable_domain(selected_item["Domain"])
-                save_override(
-                    selected_domain,
-                    target_map[decision],
-                    objective_score=int(selected_item["Score"]),
-                )
-                moved.append(selected_domain)
-            st.session_state[moved_key] = sorted(
-                moved_domains.union(moved)
-            )
-            st.session_state[message_key] = (
-                f"Moved {len(moved)} compan"
-                f"{'y' if len(moved) == 1 else 'ies'} to {decision}."
-            )
-            st.rerun(scope="fragment")
-
-
 
 def safe_dataframe(frame: pd.DataFrame, **kwargs) -> None:
     """Render without crashing on duplicate columns or malformed values."""
@@ -2735,127 +2420,6 @@ def candidate_table(frame: pd.DataFrame) -> pd.DataFrame:
     return output.reset_index(drop=True)
 
 
-def basket_ratings() -> tuple[dict[str, int], dict[str, int]]:
-    mappings = []
-    for path in (YES_BASKET_DATA, NO_BASKET_DATA):
-        frame = read_basket_data(path)
-        mappings.append({
-            stable_domain(row["domain_url"]): int(row["rating"])
-            for _, row in frame.iterrows()
-        })
-    return mappings[0], mappings[1]
-
-
-def basket_selection_editor(frame: pd.DataFrame, key_prefix: str) -> None:
-    """Label visible companies directly without a company dropdown."""
-    if frame.empty or "domain" not in frame.columns:
-        return
-    with st.expander("Add or edit training basket labels", expanded=False):
-        search = st.text_input(
-            "Filter companies",
-            placeholder="Search company or domain",
-            key=f"{key_prefix}_basket_search",
-        ).strip().lower()
-        source = frame.drop_duplicates("domain", keep="last").copy()
-        if search:
-            searchable = (
-                source.get("page_title", pd.Series("", index=source.index))
-                .astype(str)
-                + " "
-                + source["domain"].astype(str)
-            ).str.lower()
-            source = source[searchable.str.contains(search, regex=False)]
-
-        score = pd.to_numeric(
-            source.get(
-                "_fit_score_v2",
-                source.get("diligence_rank_score", source.get("rule_score", 0)),
-            ),
-            errors="coerce",
-        ).fillna(0).clip(0, 100).astype(int)
-        source = source.assign(_basket_sort_score=score).sort_values(
-            "_basket_sort_score",
-            ascending=False,
-        ).head(250)
-        if source.empty:
-            st.info("No matching companies.")
-            return
-
-        yes_map, no_map = basket_ratings()
-        editor = pd.DataFrame(index=source.index)
-        domains = source["domain"].map(stable_domain)
-        editor["Yes"] = domains.isin(yes_map)
-        editor["No"] = domains.isin(no_map)
-        editor["Rating"] = [
-            yes_map.get(domain, no_map.get(domain, int(score.loc[index])))
-            for index, domain in domains.items()
-        ]
-        editor["Company"] = source.get(
-            "page_title",
-            source["domain"],
-        )
-        editor["Domain URL"] = source.apply(
-            lambda row: normalize_domain_url(
-                row.get("final_url") or row.get("domain")
-            ),
-            axis=1,
-        )
-        editor["Description"] = source.get("meta_description", "")
-        baseline = editor[["Yes", "No", "Rating", "Domain URL"]].copy()
-
-        edited = st.data_editor(
-            editor.reset_index(drop=True),
-            width="stretch",
-            hide_index=True,
-            disabled=["Company", "Domain URL", "Description"],
-            column_config={
-                "Yes": st.column_config.CheckboxColumn("Yes basket"),
-                "No": st.column_config.CheckboxColumn("No basket"),
-                "Rating": st.column_config.NumberColumn(
-                    "Rating",
-                    min_value=0,
-                    max_value=100,
-                    step=1,
-                    format="%d",
-                ),
-                "Domain URL": st.column_config.LinkColumn("Domain URL"),
-                "Description": st.column_config.TextColumn(
-                    "Description",
-                    width="large",
-                ),
-            },
-            key=f"{key_prefix}_basket_editor",
-        )
-        if st.button(
-            "Save basket edits",
-            type="primary",
-            key=f"{key_prefix}_basket_save",
-        ):
-            conflicts = edited[edited["Yes"] & edited["No"]]
-            if not conflicts.empty:
-                st.error("A company cannot be in both baskets.")
-                return
-            changed = 0
-            baseline = baseline.reset_index(drop=True)
-            for index, row in edited.iterrows():
-                before = baseline.loc[index]
-                if (
-                    bool(row["Yes"]) == bool(before["Yes"])
-                    and bool(row["No"]) == bool(before["No"])
-                    and int(row["Rating"]) == int(before["Rating"])
-                ):
-                    continue
-                if bool(row["Yes"]):
-                    save_basket_entry(row["Domain URL"], "yes", row["Rating"])
-                elif bool(row["No"]):
-                    save_basket_entry(row["Domain URL"], "no", row["Rating"])
-                else:
-                    remove_basket_entry(row["Domain URL"])
-                changed += 1
-            st.success(f"Saved {changed} basket edit{'s' if changed != 1 else ''}.")
-            st.rerun()
-
-
 def render_basket_editor(*, basket: str, path) -> None:
     frame = read_basket_data(path)
     label = "Yes" if basket == "yes" else "No"
@@ -2872,7 +2436,7 @@ def render_basket_editor(*, basket: str, path) -> None:
         key=f"download_{basket}_basket",
     )
     editor = frame.copy()
-    editor[f"Move to {other}"] = False
+    editor[f"Set {other}"] = False
     editor["Remove"] = False
     edited = st.data_editor(
         editor,
@@ -2888,8 +2452,8 @@ def render_basket_editor(*, basket: str, path) -> None:
                 step=1,
                 format="%d",
             ),
-            f"Move to {other}": st.column_config.CheckboxColumn(
-                f"Move to {other}"
+            f"Set {other}": st.column_config.CheckboxColumn(
+                f"Set {other}"
             ),
             "Remove": st.column_config.CheckboxColumn("Remove"),
         },
@@ -2903,7 +2467,7 @@ def render_basket_editor(*, basket: str, path) -> None:
         for index, row in edited.iterrows():
             if bool(row["Remove"]):
                 remove_basket_entry(row["domain_url"])
-            elif bool(row[f"Move to {other}"]):
+            elif bool(row[f"Set {other}"]):
                 save_basket_entry(row["domain_url"], other.lower(), row["rating"])
             elif int(row["rating"]) != int(frame.loc[index, "rating"]):
                 save_basket_entry(row["domain_url"], basket, row["rating"])
@@ -3017,12 +2581,6 @@ with tabs[0]:
         "filters appear here. Uncertain and mismatched companies are "
         "retained outside the visible dashboard, not mislabeled."
     )
-    basket_selection_editor(investable_candidates, "investable")
-    manual_action_panel(
-        investable_candidates,
-        "investable_actions",
-        allow_move_all_to_hard_denied=True,
-    )
     manual_claude_panel(investable_candidates)
     render_candidate_table(
         investable_candidates,
@@ -3037,7 +2595,6 @@ with tabs[1]:
         "active industry and keyword filters. Squarespace templates and "
         "pages that only say Coming Soon remain excluded."
     )
-    basket_selection_editor(coming_soon, "coming_soon")
     render_candidate_table(
         coming_soon,
         "No valid coming-soon companies have cleared the filters.",
@@ -3049,12 +2606,6 @@ with tabs[2]:
         "Credible borderline companies appear here: score 25+ plus "
         "at least one enterprise evidence dimension, or a clear enterprise "
         "signal. Low-signal sites are excluded from this queue."
-    )
-    basket_selection_editor(needs_review, "needs_review")
-    manual_action_panel(
-        needs_review,
-        "needs_review_actions",
-        allow_move_all_to_hard_denied=True,
     )
     render_candidate_table(
         needs_review,
@@ -3068,11 +2619,6 @@ with tabs[3]:
         "Sites that are inaccessible, sparse, login-only, or below the "
         "evidence threshold live here. This is an uncertainty state, not "
         "an investment rejection."
-    )
-    basket_selection_editor(insufficient_evidence, "insufficient")
-    manual_action_panel(
-        insufficient_evidence,
-        "insufficient_evidence_actions",
     )
     if insufficient_evidence.empty:
         st.info("No companies currently have insufficient evidence.")
@@ -3140,9 +2686,6 @@ with tabs[4]:
         "Only companies with explicit factual disqualifying evidence "
         "appear here. Low score or incomplete evidence is not a denial."
     )
-    basket_selection_editor(hard_denied, "hard_denied")
-    manual_action_panel(hard_denied, "hard_denied_actions")
-
     if hard_denied.empty:
         st.info("No hard-denied companies.")
     else:
@@ -3208,9 +2751,6 @@ with tabs[5]:
         "classification bucket; companies with persistent manual "
         "overrides are excluded."
     )
-    basket_selection_editor(claude_rejected, "claude_rejected")
-    manual_action_panel(claude_rejected, "claude_rejected_actions")
-
     if claude_rejected.empty:
         st.info("Claude has no active rejected companies in this view.")
     else:
@@ -3416,30 +2956,12 @@ with tabs[8]:
             if not invalid.empty:
                 st.error("Every checked row needs a Yes or No decision.")
             else:
-                for label, target, bucket in (
-                    ("yes", "Investable Candidate", "priority"),
-                    ("no", "Hard Denied", "reject"),
-                ):
+                for label in ("yes", "no"):
                     group = selected[
                         selected["Decision"].astype(str).eq(label)
                     ]
                     if group.empty:
                         continue
-                    domains = group["Domain"].map(stable_domain)
-                    scores = dict(zip(
-                        domains,
-                        pd.to_numeric(
-                            group["Rating"], errors="coerce"
-                        ).fillna(0).astype(int),
-                    ))
-                    record_manual_move(
-                        domains,
-                        target_label=target,
-                        target_bucket=bucket,
-                        scores=scores,
-                        note="label_next_human_review",
-                        source="glasswing_dashboard",
-                    )
                     for reason, reason_group in group.groupby(
                         group["Reason"].astype(str).replace(
                             "", "human_reviewed"

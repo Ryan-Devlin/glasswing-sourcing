@@ -39,19 +39,13 @@ from classification_store import (
     count_classifications,
     query_corpus_classifications,
     recent_movements,
-    record_manual_move,
 )
 from common import (
     FILTERED,
-    MANUAL,
     NO_BASKET_DATA,
     QUEUE_DB,
     YES_BASKET_DATA,
-    atomic_write_csv,
     read_basket_data,
-    remove_basket_entry,
-    save_basket_entry,
-    save_basket_entries,
     stable_domain,
 )
 from ui_theme import render_hideable_table, render_worker_controls
@@ -107,7 +101,7 @@ def apply_actions(edited: pd.DataFrame) -> dict[str, int]:
     selected = edited[
         edited["Apply"] & edited["Action"].astype(str).ne("")
     ]
-    counts = {"screen": 0, "yes": 0, "no": 0}
+    counts = {"screen": 0}
     screen_domains: list[str] = []
     for _, row in selected.iterrows():
         domain = stable_domain(row["Domain"])
@@ -115,24 +109,6 @@ def apply_actions(edited: pd.DataFrame) -> dict[str, int]:
         if action == "Send to Python screening":
             screen_domains.append(domain)
             counts["screen"] += 1
-        elif action == "Add to Yes":
-            save_basket_entry(
-                f"https://{domain}",
-                "yes",
-                90,
-                source="ai_search_page",
-                reason="Selected from .AI Company Search",
-            )
-            counts["yes"] += 1
-        elif action == "Reject to No":
-            save_basket_entry(
-                f"https://{domain}",
-                "no",
-                0,
-                source="ai_search_page",
-                reason="Rejected from .AI Company Search",
-            )
-            counts["no"] += 1
     if screen_domains:
         result = enqueue_for_screening(
             QUEUE_DB,
@@ -141,81 +117,6 @@ def apply_actions(edited: pd.DataFrame) -> dict[str, int]:
         )
         counts["screen"] = result["queued"]
     return counts
-
-
-def move_crawler_domains(
-    selected: pd.DataFrame,
-    destination: str,
-) -> int:
-    if selected.empty:
-        return 0
-    target_map = {
-        "Investable Candidate": ("Investable Candidate", "priority"),
-        "Coming Soon": ("Coming Soon", "coming_soon"),
-        "Needs Review": ("Review Candidate", "review"),
-        "Potential Comp": ("Potential Comp", "comp"),
-        "Insufficient Evidence": (
-            "Insufficient Evidence",
-            "insufficient",
-        ),
-        "Hard Denied": ("Hard Denied", "reject"),
-    }
-    override_target, routing_bucket = target_map[destination]
-    domains = selected["Domain"].map(stable_domain).drop_duplicates()
-    score_column = "Score" if "Score" in selected else "Fit"
-    if score_column in selected:
-        score_values = (
-            pd.to_numeric(selected[score_column], errors="coerce")
-            .fillna(0).clip(0, 100).astype(int)
-        )
-    else:
-        score_values = pd.Series(0, index=selected.index)
-    score_map = dict(zip(
-        selected["Domain"].map(stable_domain),
-        score_values,
-    ))
-    overrides_path = MANUAL / "domain_overrides.csv"
-    overrides = read_csv(overrides_path)
-    additions = pd.DataFrame({
-        "domain": domains,
-        "override_target": override_target,
-        "override_note": "manual_move_from_ai_search",
-        "updated_at": pd.Timestamp.utcnow().isoformat(),
-    })
-    overrides = pd.concat(
-        [overrides, additions], ignore_index=True, sort=False
-    )
-    overrides["domain"] = overrides["domain"].map(stable_domain)
-    overrides = overrides.drop_duplicates("domain", keep="last")
-    atomic_write_csv(overrides_path, overrides)
-
-    record_manual_move(
-        domains,
-        target_label=override_target,
-        target_bucket=routing_bucket,
-        scores=score_map,
-        note="manual_move_from_ai_search",
-        source="ai_search_page",
-    )
-
-    if destination == "Investable Candidate":
-        save_basket_entries(
-            [(domain, max(70, score_map.get(domain, 90))) for domain in domains],
-            "yes",
-            source="human",
-            reason="manual_ai_search_move_to_investable",
-        )
-    elif destination == "Hard Denied":
-        save_basket_entries(
-            [(domain, score_map.get(domain, 0)) for domain in domains],
-            "no",
-            source="human",
-            reason="manual_ai_search_move_to_hard_denied",
-        )
-    else:
-        for domain in domains:
-            remove_basket_entry(domain)
-    return len(domains)
 
 
 st.title(".AI Company Search")
@@ -386,8 +287,6 @@ with tabs[0]:
                         options=[
                             "",
                             "Send to Python screening",
-                            "Add to Yes",
-                            "Reject to No",
                         ],
                         width="medium",
                     ),
@@ -411,9 +310,7 @@ with tabs[0]:
             ):
                 result = apply_actions(edited)
                 st.success(
-                    f"Queued {result['screen']} for screening · "
-                    f"added {result['yes']} to Yes · "
-                    f"rejected {result['no']} to No"
+                    f"Queued {result['screen']} for screening."
                 )
                 st.rerun()
             previous, next_col, _ = st.columns([1, 1, 8])
@@ -547,7 +444,6 @@ with tabs[1]:
                     )
 
                 bucket_table = pd.DataFrame({
-                    "Select": False,
                     "Company": selected_bucket["company_name"],
                     "Domain": selected_bucket["domain"],
                     "Availability": selected_bucket["availability_status"],
@@ -574,13 +470,11 @@ with tabs[1]:
                     "Reason": selected_bucket["routing_reason"],
                     "Website": selected_bucket["final_url"],
                 })
-                edited_bucket = render_hideable_table(
+                render_hideable_table(
                     bucket_table,
                     domain_column="Domain",
-                    editable_columns=["Select"],
                     height=min(760, 45 + len(bucket_table) * 35),
                     column_config={
-                        "Select": st.column_config.CheckboxColumn("Move"),
                         "Fit": st.column_config.ProgressColumn(
                             "Fit",
                             min_value=0,
@@ -630,52 +524,6 @@ with tabs[1]:
                     },
                     key=f"crawler_bucket_editor_{bucket_name}",
                 )
-
-                action_col, button_col = st.columns([2.5, 1])
-                with action_col:
-                    destination = st.selectbox(
-                        "Move selected to",
-                        [
-                            "Needs Review",
-                            "Investable Candidate",
-                            "Potential Comp",
-                            "Insufficient Evidence",
-                            "Hard Denied",
-                            "Coming Soon",
-                        ],
-                        key=(
-                            "crawler_bucket_destination_"
-                            f"{bucket_name}"
-                        ),
-                    )
-                with button_col:
-                    st.write("")
-                    move_clicked = st.button(
-                        "Move selected",
-                        type="primary",
-                        width="stretch",
-                        key=f"crawler_bucket_move_{bucket_name}",
-                    )
-
-                if move_clicked:
-                    selected_to_move = edited_bucket[
-                        edited_bucket["Select"]
-                    ].copy()
-                    if selected_to_move.empty:
-                        st.warning("Select at least one company first.")
-                    else:
-                        moved = move_crawler_domains(
-                            selected_to_move,
-                            destination,
-                        )
-                        st.session_state[
-                            f"crawler_bucket_message_{bucket_name}"
-                        ] = (
-                            f"Moved {moved} compan"
-                            f"{'y' if moved == 1 else 'ies'} "
-                            f"to {destination}."
-                        )
-                        st.rerun()
 
                 previous_col, next_col, _ = st.columns([1, 1, 6])
                 if previous_col.button(

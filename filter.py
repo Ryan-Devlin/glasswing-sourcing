@@ -38,7 +38,6 @@ from common import (
     ZONE_UNIVERSE_DB,
     atomic_write_csv,
     clean,
-    read_label_metadata,
     read_basket_data,
     stable_domain,
     upsert_csv,
@@ -3888,7 +3887,7 @@ def apply_run_preferences(
 
 
 def apply_persistent_overrides(output: pd.DataFrame) -> pd.DataFrame:
-    """Apply manual decisions and human training labels as final authority."""
+    """Apply classification overrides and attach independent training labels."""
     path = ROOT / "data" / "manual" / "domain_overrides.csv"
     if output.empty:
         return output
@@ -3960,48 +3959,26 @@ def apply_persistent_overrides(output: pd.DataFrame) -> pd.DataFrame:
             override.get("updated_at", "")
         )
 
-    basket_targets: dict[str, tuple[str, str, int]] = {}
-    for basket_path, basket, target in (
-        (YES_BASKET_DATA, "yes", "Investable Candidate"),
-        (NO_BASKET_DATA, "no", "Hard Denied"),
+    basket_targets: dict[str, tuple[str, int]] = {}
+    for basket_path, basket in (
+        (YES_BASKET_DATA, "yes"),
+        (NO_BASKET_DATA, "no"),
     ):
         examples = read_basket_data(basket_path)
         for _, example in examples.iterrows():
             basket_targets[stable_domain(example.get("domain_url", ""))] = (
                 basket,
-                target,
                 int(example.get("rating", 0)),
             )
-
-    label_metadata = read_label_metadata()
-    trusted_label_domains = {
-        stable_domain(row.get("domain", ""))
-        for _, row in label_metadata.iterrows()
-        if str(row.get("source", "")).lower()
-        in {"human", "manual", "glasswing_portfolio"}
-    }
-    trusted_label_domains.update(
-        stable_domain(domain) for domain in GLASSWING_PORTFOLIO_DOMAINS
-    )
 
     for idx, row in result.iterrows():
         domain = stable_domain(row.get("domain", ""))
         basket_entry = basket_targets.get(domain)
         if not basket_entry:
             continue
-        basket, target, rating = basket_entry
+        basket, rating = basket_entry
         result.at[idx, "training_basket"] = basket
         result.at[idx, "human_rating"] = rating
-        if domain not in trusted_label_domains:
-            continue
-        if basket == "yes":
-            result.at[idx, "routing_bucket"] = "priority"
-            result.at[idx, "routing_reason"] = "trusted_human_training_yes"
-            result.at[idx, "viability_label"] = "Investable Candidate"
-        elif basket == "no":
-            result.at[idx, "routing_bucket"] = "reject"
-            result.at[idx, "routing_reason"] = "human_training_basket_no"
-            result.at[idx, "viability_label"] = target
 
     return result
 

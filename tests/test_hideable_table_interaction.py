@@ -1,4 +1,4 @@
-"""Exercise the real Streamlit widget-state cycle for Hide and Restore."""
+"""Exercise the real Streamlit widget-state cycle for Hide and Yes/No."""
 
 import os
 import subprocess
@@ -50,6 +50,35 @@ app.session_state["probe_editor"] = {
 app.run()
 assert not app.exception
 assert hidden_domain_set(["probe.ai"]) == set()
+
+# Yes/No are mutually exclusive training labels and never hide the row.
+app.session_state["probe_editor"] = {
+    "edited_rows": {0: {"Yes": True}},
+    "added_rows": [],
+    "deleted_rows": [],
+}
+app.run()
+assert not app.exception
+from common import NO_BASKET_DATA, YES_BASKET_DATA, read_basket_data, stable_domain
+yes_domains = set(read_basket_data(YES_BASKET_DATA)["domain_url"].map(stable_domain))
+no_domains = set(read_basket_data(NO_BASKET_DATA)["domain_url"].map(stable_domain))
+assert "probe.ai" in yes_domains
+assert "probe.ai" not in no_domains
+assert hidden_domain_set(["probe.ai"]) == set()
+
+# Selecting No replaces Yes. The row remains in the original table.
+app.session_state["probe_editor"] = {
+    "edited_rows": {0: {"No": True}},
+    "added_rows": [],
+    "deleted_rows": [],
+}
+app.run()
+assert not app.exception
+yes_domains = set(read_basket_data(YES_BASKET_DATA)["domain_url"].map(stable_domain))
+no_domains = set(read_basket_data(NO_BASKET_DATA)["domain_url"].map(stable_domain))
+assert "probe.ai" not in yes_domains
+assert "probe.ai" in no_domains
+assert hidden_domain_set(["probe.ai"]) == set()
 '''
 
 
@@ -58,6 +87,9 @@ def test_hide_survives_rerun_and_unhide_restores_visibility():
         root = Path(directory)
         env = dict(os.environ)
         env.pop("DATABASE_URL", None)
+        env.pop("CLASSIFICATION_DATABASE_URL", None)
+        env.pop("PIPELINE_DATABASE_URL", None)
+        env.pop("RUNTIME_CONTROL_DATABASE_URL", None)
         env["PYTHONPATH"] = str(ROOT)
         env["GLASSWING_DATA_ROOT"] = str(root / "data")
         env["GLASSWING_CLASSIFICATION_DB"] = str(

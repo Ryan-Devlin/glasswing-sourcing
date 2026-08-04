@@ -41,36 +41,16 @@ class BasketRoutingTests(unittest.TestCase):
         self.assertEqual(row["training_basket"], "yes")
         self.assertEqual(row["human_rating"], 90)
 
-    def test_trusted_human_yes_moves_to_investable(self):
-        metadata = pd.DataFrame([{
-            "domain": "labeled.ai",
-            "label": "yes",
-            "source": "human",
-        }])
-        with patch.object(
-            screening_filter,
-            "read_label_metadata",
-            return_value=metadata,
-        ):
-            row = self.apply_basket("yes", "review")
-        self.assertEqual(row["routing_bucket"], "priority")
-        self.assertEqual(row["viability_label"], "Investable Candidate")
-        self.assertEqual(row["routing_reason"], "trusted_human_training_yes")
+    def test_human_yes_stays_in_original_classification(self):
+        row = self.apply_basket("yes", "review")
+        self.assertEqual(row["routing_bucket"], "review")
+        self.assertEqual(row["training_basket"], "yes")
+        self.assertEqual(row["human_rating"], 90)
 
-    def test_trusted_human_no_moves_to_hard_denied(self):
-        metadata = pd.DataFrame([{
-            "domain": "labeled.ai",
-            "label": "no",
-            "source": "human",
-        }])
-        with patch.object(
-            screening_filter,
-            "read_label_metadata",
-            return_value=metadata,
-        ):
-            row = self.apply_basket("no", "priority")
-        self.assertEqual(row["routing_bucket"], "reject")
-        self.assertEqual(row["viability_label"], "Hard Denied")
+    def test_human_no_stays_in_original_classification(self):
+        row = self.apply_basket("no", "priority")
+        self.assertEqual(row["routing_bucket"], "priority")
+        self.assertEqual(row["training_basket"], "no")
         self.assertEqual(row["human_rating"], 0)
 
     def test_unverified_no_basket_does_not_create_a_rejection(self):

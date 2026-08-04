@@ -27,14 +27,9 @@ from zone_universe.database import ZONE_UNIVERSE_DATABASE_ENV_VAR
 from classification_store import (
     corpus_bucket_counts,
     query_corpus_classifications,
-    record_manual_move,
 )
 from common import (
-    MANUAL,
     QUEUE_DB,
-    atomic_write_csv,
-    remove_basket_entry,
-    save_basket_entries,
     stable_domain,
 )
 from runtime_control import RUNTIME_MODE
@@ -266,86 +261,6 @@ def read_csv(path: Path) -> pd.DataFrame:
         return pd.read_csv(path, dtype=str).fillna("")
     except (OSError, pd.errors.EmptyDataError, pd.errors.ParserError):
         return pd.DataFrame()
-
-
-def move_zone_domains(
-    selected: pd.DataFrame,
-    destination: str,
-) -> int:
-    if selected.empty:
-        return 0
-    target_map = {
-        "Investable Candidate": ("Investable Candidate", "priority"),
-        "Coming Soon": ("Coming Soon", "coming_soon"),
-        "Needs Review": ("Review Candidate", "review"),
-        "Potential Comp": ("Potential Comp", "comp"),
-        "Insufficient Evidence": (
-            "Insufficient Evidence",
-            "insufficient",
-        ),
-        "Hard Denied": ("Hard Denied", "reject"),
-    }
-    target_label, routing_bucket = target_map[destination]
-    domains = (
-        selected["Domain"]
-        .map(stable_domain)
-        .loc[lambda values: values.ne("")]
-        .drop_duplicates()
-    )
-    scores = pd.to_numeric(
-        selected.get("Fit", 0),
-        errors="coerce",
-    ).fillna(0).clip(0, 100).astype(int)
-    score_map = dict(
-        zip(selected["Domain"].map(stable_domain), scores)
-    )
-
-    overrides_path = MANUAL / "domain_overrides.csv"
-    overrides = read_csv(overrides_path)
-    additions = pd.DataFrame({
-        "domain": domains,
-        "override_target": target_label,
-        "override_note": "manual_move_from_zone_universe",
-        "updated_at": pd.Timestamp.utcnow().isoformat(),
-    })
-    overrides = pd.concat(
-        [overrides, additions],
-        ignore_index=True,
-        sort=False,
-    )
-    overrides["domain"] = overrides["domain"].map(stable_domain)
-    overrides = overrides.drop_duplicates("domain", keep="last")
-    atomic_write_csv(overrides_path, overrides)
-
-    record_manual_move(
-        domains,
-        target_label=target_label,
-        target_bucket=routing_bucket,
-        scores=score_map,
-        note="manual_move_from_zone_universe",
-        source="zone_universe_page",
-    )
-    if destination == "Investable Candidate":
-        save_basket_entries(
-            [
-                (domain, max(70, score_map.get(domain, 90)))
-                for domain in domains
-            ],
-            "yes",
-            source="human",
-            reason="manual_zone_move_to_investable",
-        )
-    elif destination == "Hard Denied":
-        save_basket_entries(
-            [(domain, score_map.get(domain, 0)) for domain in domains],
-            "no",
-            source="human",
-            reason="manual_zone_move_to_hard_denied",
-        )
-    else:
-        for domain in domains:
-            remove_basket_entry(domain)
-    return len(domains)
 
 
 st.title(".COM + .APP Company Search")
@@ -906,7 +821,7 @@ with tabs[1]:
                 editable_columns=["Select"],
                 height=min(760, 45 + len(bucket_table) * 35),
                 column_config={
-                    "Select": st.column_config.CheckboxColumn("Move"),
+                    "Select": st.column_config.CheckboxColumn("Select"),
                     "Fit": st.column_config.ProgressColumn(
                         "Glasswing fit",
                         min_value=0,
@@ -960,19 +875,7 @@ with tabs[1]:
                 },
                 key=f"zone_bucket_editor_{bucket_name}",
             )
-            action_col, rdap_col, button_col = st.columns([2.5, 1.4, 1])
-            destination = action_col.selectbox(
-                "Move selected to",
-                [
-                    "Needs Review",
-                    "Investable Candidate",
-                    "Potential Comp",
-                    "Insufficient Evidence",
-                    "Hard Denied",
-                    "Coming Soon",
-                ],
-                key=f"zone_bucket_destination_{bucket_name}",
-            )
+            rdap_col, _ = st.columns([1.6, 4])
             rdap_col.write("")
             lookup_clicked = rdap_col.button(
                 "Get registration dates",
@@ -982,13 +885,6 @@ with tabs[1]:
                     "Select up to 10 companies. Dates are cached after the "
                     "authoritative registry lookup."
                 ),
-            )
-            button_col.write("")
-            move_clicked = button_col.button(
-                "Move selected",
-                type="primary",
-                width="stretch",
-                key=f"zone_bucket_move_{bucket_name}",
             )
             if lookup_clicked:
                 chosen = edited_bucket[edited_bucket["Select"]].copy()
@@ -1007,17 +903,6 @@ with tabs[1]:
                         st.warning("\n".join(errors))
                     if found:
                         st.rerun()
-            if move_clicked:
-                chosen = edited_bucket[edited_bucket["Select"]].copy()
-                if chosen.empty:
-                    st.warning("Select at least one company first.")
-                else:
-                    moved = move_zone_domains(chosen, destination)
-                    st.success(
-                        f"Moved {moved} compan"
-                        f"{'y' if moved == 1 else 'ies'} to {destination}."
-                    )
-                    st.rerun()
             previous, next_col, _ = st.columns([1, 1, 6])
             if previous.button(
                 "← Previous",

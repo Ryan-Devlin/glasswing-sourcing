@@ -6,6 +6,9 @@ class ReviewQualityUiFixTests(unittest.TestCase):
     def setUp(self):
         self.dashboard = Path("dashboard.py").read_text(encoding="utf-8")
         self.filter = Path("filter.py").read_text(encoding="utf-8")
+        self.ui_theme = Path("ui_theme.py").read_text(encoding="utf-8")
+        self.ai_search = Path("pages/ai_search.py").read_text(encoding="utf-8")
+        self.zone_universe = Path("pages/zone_universe.py").read_text(encoding="utf-8")
 
     def test_review_floor_is_enforced(self):
         self.assertIn("review_floor = 25", self.dashboard)
@@ -50,26 +53,17 @@ class ReviewQualityUiFixTests(unittest.TestCase):
         self.assertIn("website_copy.map(score_text)", self.dashboard)
         self.assertIn('website_copy_is_usable = website_copy.ne("")', self.dashboard)
 
-    def test_compact_review_ui(self):
-        self.assertIn(
-            '"Select and move companies"',
-            self.dashboard,
-        )
-        self.assertIn('"Move selected to"', self.dashboard)
-        self.assertIn('"Move selected"', self.dashboard)
+    def test_inline_review_controls_replace_move_ui(self):
+        self.assertNotIn('"Move selected to"', self.dashboard)
+        self.assertNotIn('"Move selected"', self.dashboard)
+        self.assertNotIn('"Move selected"', self.ai_search)
+        self.assertNotIn('"Move selected"', self.zone_universe)
+        self.assertIn('"Yes": st.column_config.CheckboxColumn(', self.ui_theme)
+        self.assertIn('"No": st.column_config.CheckboxColumn(', self.ui_theme)
+        self.assertIn('reason="inline_yes_checkbox"', self.ui_theme)
+        self.assertIn('reason="inline_no_checkbox"', self.ui_theme)
         self.assertNotIn('cols = st.columns(5)', self.dashboard)
-        self.assertIn("@st.fragment", self.dashboard)
-        self.assertIn('st.rerun(scope="fragment")', self.dashboard)
-        self.assertIn('"Select"] = False', self.dashboard)
-        self.assertIn('batch["Website"]', self.dashboard)
-        self.assertIn(
-            '"Open website"',
-            self.dashboard,
-        )
-        self.assertIn(
-            "_batch_message",
-            self.dashboard,
-        )
+        self.assertIn("render_hideable_table(", self.dashboard)
 
     def test_needs_review_caption_explains_gate(self):
         self.assertIn(
@@ -86,10 +80,10 @@ class ReviewQualityUiFixTests(unittest.TestCase):
             'if decision in {"Needs Review", "Investable Candidate"}:',
             self.dashboard,
         )
-        self.assertIn(
-            'if target == "Investable Candidate":',
-            self.dashboard,
-        )
+        self.assertNotIn("no_basket_targets", self.dashboard)
+        self.assertNotIn("trusted_human_training_yes", self.filter)
+        self.assertNotIn("human_training_basket_no", self.filter)
+        self.assertIn('result.at[idx, "training_basket"]', self.filter)
 
     def test_required_keyword_miss_cannot_be_promoted_to_review(self):
         self.assertIn("missing_required_keywords", self.dashboard)
@@ -113,36 +107,18 @@ class ReviewQualityUiFixTests(unittest.TestCase):
         self.assertIn('"Yes Basket"', self.dashboard)
         self.assertIn('"No Basket"', self.dashboard)
         self.assertIn('st.data_editor(', self.dashboard)
-        self.assertIn('"Save basket edits"', self.dashboard)
         self.assertIn('"Save table edits"', self.dashboard)
         self.assertIn("save_basket_entry", self.dashboard)
+        self.assertIn("save_basket_entries", self.ui_theme)
         self.assertIn("with tabs[8]:", self.dashboard)
 
-    def test_manual_hard_denial_atomically_moves_company_to_no(self):
+    def test_training_labels_do_not_create_manual_classification_moves(self):
+        self.assertNotIn("record_manual_move", self.dashboard)
+        self.assertNotIn("save_bulk_hard_denials", self.dashboard)
+        self.assertNotIn("allow_move_all_to_hard_denied", self.dashboard)
         self.assertIn(
-            'elif target == "Hard Denied":',
-            self.dashboard,
-        )
-        self.assertIn(
-            '"manual_hard_denial_classification"',
-            self.dashboard,
-        )
-        self.assertIn(
-            'objective_score=int(selected_item["Score"])',
-            self.dashboard,
-        )
-
-    def test_investable_and_review_support_bulk_hard_denial(self):
-        self.assertIn("save_bulk_hard_denials", self.dashboard)
-        self.assertEqual(
-            self.dashboard.count(
-                "allow_move_all_to_hard_denied=True"
-            ),
-            2,
-        )
-        self.assertIn(
-            '"bulk_move_all_to_hard_denied"',
-            self.dashboard,
+            "Yes/No are training labels only. They never reclassify",
+            self.ui_theme,
         )
 
     def test_streamlit_width_api_is_current(self):
