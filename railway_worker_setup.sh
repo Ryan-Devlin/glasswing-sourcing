@@ -18,6 +18,7 @@ echo "=== 4. Set pipeline-worker env vars ==="
 railway variables --service pipeline-worker \
   --set 'GLASSWING_RUNTIME_MODE=cloud' \
   --set 'PIPELINE_DATABASE_URL=${{web.PIPELINE_DATABASE_URL}}' \
+  --set 'RUNTIME_CONTROL_DATABASE_URL=${{web.RUNTIME_CONTROL_DATABASE_URL}}' \
   --set 'AI_SEARCH_DATABASE_URL=${{web.AI_SEARCH_DATABASE_URL}}' \
   --set 'ZONE_UNIVERSE_DATABASE_URL=${{web.ZONE_UNIVERSE_DATABASE_URL}}' \
   --set 'ANTHROPIC_API_KEY=${{web.ANTHROPIC_API_KEY}}' \
@@ -31,6 +32,7 @@ railway variables --service ai-worker \
   --set 'DATABASE_URL=${{web.DATABASE_URL}}' \
   --set 'AI_SEARCH_DATABASE_URL=${{web.AI_SEARCH_DATABASE_URL}}' \
   --set 'PIPELINE_DATABASE_URL=${{web.PIPELINE_DATABASE_URL}}' \
+  --set 'RUNTIME_CONTROL_DATABASE_URL=${{web.RUNTIME_CONTROL_DATABASE_URL}}' \
   --set 'S3_BUCKET=${{web.S3_BUCKET}}' \
   --set 'S3_ENDPOINT_URL=${{web.S3_ENDPOINT_URL}}' \
   --set 'S3_ACCESS_KEY_ID=${{web.S3_ACCESS_KEY_ID}}' \
@@ -49,6 +51,7 @@ railway variables --service zone-worker \
   --set 'DATABASE_URL=${{web.DATABASE_URL}}' \
   --set 'ZONE_UNIVERSE_DATABASE_URL=${{web.ZONE_UNIVERSE_DATABASE_URL}}' \
   --set 'PIPELINE_DATABASE_URL=${{web.PIPELINE_DATABASE_URL}}' \
+  --set 'RUNTIME_CONTROL_DATABASE_URL=${{web.RUNTIME_CONTROL_DATABASE_URL}}' \
   --set 'S3_BUCKET=${{web.S3_BUCKET}}' \
   --set 'S3_ENDPOINT_URL=${{web.S3_ENDPOINT_URL}}' \
   --set 'S3_ACCESS_KEY_ID=${{web.S3_ACCESS_KEY_ID}}' \
@@ -58,6 +61,10 @@ railway variables --service zone-worker \
   --set 'ZONE_UNIVERSE_DB=/app/zone-data/universe.sqlite3' \
   --set 'ZONE_UNIVERSE_HTML_ARCHIVE=/app/zone-html' \
   --set 'ZONE_UNIVERSE_LOG_ROOT=/app/logs' \
+  --set 'ZONE_UNIVERSE_BATCH_SIZE=100' \
+  --set 'ZONE_UNIVERSE_PREFLIGHT_ENABLED=1' \
+  --set 'ZONE_UNIVERSE_PREFLIGHT_MAX_RESPONSE_BYTES=131072' \
+  --set 'ZONE_UNIVERSE_PREFLIGHT_CONCURRENCY=100' \
   --skip-deploys
 
 echo "=== Done creating services + setting variables. ==="

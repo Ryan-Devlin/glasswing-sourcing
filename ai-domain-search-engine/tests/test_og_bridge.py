@@ -2,6 +2,7 @@ import sqlite3
 
 from ai_search.database import add_domain, connect, set_worker_state, utc_now
 from ai_search.og_bridge import (
+    complete_screening_records,
     crawler_state,
     enqueue_for_screening,
     screenable_domains,
@@ -130,3 +131,47 @@ def test_successful_new_crawl_requeues_stale_ghost(tmp_path):
     ).fetchone()
     queue_conn.close()
     assert row == ("pending", 0, "")
+
+
+def test_direct_classification_completes_canonical_queue_record(tmp_path):
+    queue_db = tmp_path / "queue.sqlite3"
+    queue_conn = create_queue(queue_db)
+    now = utc_now()
+    queue_conn.execute(
+        """
+        INSERT INTO domains(
+            domain,first_seen,last_seen,status,attempts,next_attempt_at,
+            last_processed_at,classification,last_error,seen_count,
+            first_seen_run_id,last_seen_run_id
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            "promising.app",
+            now,
+            now,
+            "pending",
+            0,
+            now,
+            None,
+            "",
+            "",
+            1,
+            "zone",
+            "zone",
+        ),
+    )
+    queue_conn.commit()
+    queue_conn.close()
+
+    assert complete_screening_records(
+        queue_db,
+        {"promising.app": "priority"},
+    ) == 1
+
+    queue_conn = sqlite3.connect(queue_db)
+    row = queue_conn.execute(
+        "SELECT status,classification,next_attempt_at,last_error "
+        "FROM domains WHERE domain='promising.app'"
+    ).fetchone()
+    queue_conn.close()
+    assert row == ("complete", "priority", None, "")

@@ -32,6 +32,9 @@ class Settings:
     tlds: tuple[str, ...]
     concurrency: int
     batch_size: int
+    preflight_enabled: bool
+    preflight_concurrency: int
+    preflight_max_response_bytes: int
     timeout_seconds: float
     max_response_bytes: int
     minimum_free_gb: float
@@ -74,7 +77,30 @@ def load_settings() -> Settings:
         ),
         batch_size=max(
             1,
-            min(5000, int(os.getenv("ZONE_UNIVERSE_BATCH_SIZE", "500"))),
+            min(5000, int(os.getenv("ZONE_UNIVERSE_BATCH_SIZE", "100"))),
+        ),
+        preflight_enabled=os.getenv(
+            "ZONE_UNIVERSE_PREFLIGHT_ENABLED",
+            "1",
+        ).strip().lower() not in {"0", "false", "no"},
+        preflight_concurrency=max(
+            1,
+            min(
+                250,
+                int(os.getenv("ZONE_UNIVERSE_PREFLIGHT_CONCURRENCY", "100")),
+            ),
+        ),
+        preflight_max_response_bytes=max(
+            32_000,
+            min(
+                512_000,
+                int(
+                    os.getenv(
+                        "ZONE_UNIVERSE_PREFLIGHT_MAX_RESPONSE_BYTES",
+                        "131072",
+                    )
+                ),
+            ),
         ),
         timeout_seconds=max(
             2.0,

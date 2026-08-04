@@ -4,7 +4,11 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from db_backend import PostgresConnection, connect_postgres, using_postgres
+from db_backend import (
+    PostgresConnection,
+    connect_postgres,
+    using_postgres,
+)
 
 from .config import DATABASE
 
@@ -108,6 +112,10 @@ CREATE TABLE IF NOT EXISTS shards (
     http_error INTEGER NOT NULL DEFAULT 0,
     empty INTEGER NOT NULL DEFAULT 0,
     other_error INTEGER NOT NULL DEFAULT 0,
+    preflight_checked INTEGER NOT NULL DEFAULT 0,
+    preflight_promising INTEGER NOT NULL DEFAULT 0,
+    preflight_rejected INTEGER NOT NULL DEFAULT 0,
+    preflight_response_bytes BIGINT NOT NULL DEFAULT 0,
     skipped_existing INTEGER NOT NULL DEFAULT 0,
     skipped_low_priority INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL,
@@ -243,6 +251,25 @@ def _already_bigint(conn: PostgresConnection, table: str, column: str) -> bool:
 def migrate_postgres(conn: PostgresConnection) -> None:
     conn.executescript(_POSTGRES_SCHEMA)
     conn.commit()
+    shard_columns = {
+        str(row["column_name"])
+        for row in conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema='zone_universe' AND table_name='shards'"
+        ).fetchall()
+    }
+    shard_additions = {
+        "preflight_checked": "INTEGER NOT NULL DEFAULT 0",
+        "preflight_promising": "INTEGER NOT NULL DEFAULT 0",
+        "preflight_rejected": "INTEGER NOT NULL DEFAULT 0",
+        "preflight_response_bytes": "BIGINT NOT NULL DEFAULT 0",
+    }
+    for column, definition in shard_additions.items():
+        if column not in shard_columns:
+            conn.execute(
+                f"ALTER TABLE shards ADD COLUMN {column} {definition}"
+            )
+    conn.commit()
     # These columns were originally created as plain INTEGER; a real .com
     # zone file's source_size (~4.8GB) overflows Postgres's 32-bit int range
     # (max ~2.1GB), something SQLite's flexible typing never caught. Widening
@@ -315,6 +342,10 @@ def migrate(conn: sqlite3.Connection) -> None:
             http_error INTEGER NOT NULL DEFAULT 0,
             empty INTEGER NOT NULL DEFAULT 0,
             other_error INTEGER NOT NULL DEFAULT 0,
+            preflight_checked INTEGER NOT NULL DEFAULT 0,
+            preflight_promising INTEGER NOT NULL DEFAULT 0,
+            preflight_rejected INTEGER NOT NULL DEFAULT 0,
+            preflight_response_bytes INTEGER NOT NULL DEFAULT 0,
             skipped_existing INTEGER NOT NULL DEFAULT 0,
             skipped_low_priority INTEGER NOT NULL DEFAULT 0,
             updated_at TEXT NOT NULL,
@@ -488,6 +519,17 @@ def migrate(conn: sqlite3.Connection) -> None:
             "ALTER TABLE shards ADD COLUMN "
             "skipped_low_priority INTEGER NOT NULL DEFAULT 0"
         )
+    shard_additions = {
+        "preflight_checked": "INTEGER NOT NULL DEFAULT 0",
+        "preflight_promising": "INTEGER NOT NULL DEFAULT 0",
+        "preflight_rejected": "INTEGER NOT NULL DEFAULT 0",
+        "preflight_response_bytes": "INTEGER NOT NULL DEFAULT 0",
+    }
+    for column, definition in shard_additions.items():
+        if column not in shard_columns:
+            conn.execute(
+                f"ALTER TABLE shards ADD COLUMN {column} {definition}"
+            )
     zone_additions = {
         "snapshot_path": "TEXT NOT NULL DEFAULT ''",
         "added_domains": "INTEGER NOT NULL DEFAULT 0",
@@ -571,6 +613,26 @@ def diagnostics(conn: sqlite3.Connection) -> dict[str, int]:
         ),
         "low_priority_quarantined": (
             "SELECT coalesce(sum(skipped_low_priority),0) FROM shards s "
+            "JOIN zones z ON z.tld=s.tld "
+            "AND z.active_queue_version=s.queue_version"
+        ),
+        "preflight_checked": (
+            "SELECT coalesce(sum(preflight_checked),0) FROM shards s "
+            "JOIN zones z ON z.tld=s.tld "
+            "AND z.active_queue_version=s.queue_version"
+        ),
+        "preflight_promising": (
+            "SELECT coalesce(sum(preflight_promising),0) FROM shards s "
+            "JOIN zones z ON z.tld=s.tld "
+            "AND z.active_queue_version=s.queue_version"
+        ),
+        "preflight_rejected": (
+            "SELECT coalesce(sum(preflight_rejected),0) FROM shards s "
+            "JOIN zones z ON z.tld=s.tld "
+            "AND z.active_queue_version=s.queue_version"
+        ),
+        "preflight_response_bytes": (
+            "SELECT coalesce(sum(preflight_response_bytes),0) FROM shards s "
             "JOIN zones z ON z.tld=s.tld "
             "AND z.active_queue_version=s.queue_version"
         ),

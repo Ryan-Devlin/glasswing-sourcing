@@ -1,0 +1,155 @@
+import asyncio
+from dataclasses import replace
+from pathlib import Path
+
+from ai_search.extract import extract_page
+from zone_universe import crawler
+from zone_universe.config import load_settings
+from zone_universe.crawler import CrawlOutcome
+from zone_universe.database import connect, diagnostics, utc_now
+
+
+def prepared_database(tmp_path: Path):
+    database = tmp_path / "universe.sqlite3"
+    shard_path = tmp_path / "000.txt"
+    shard_path.write_text("candidateai.com\n", encoding="ascii")
+    conn = connect(database)
+    conn.execute(
+        """
+        INSERT INTO zones(
+            tld,import_status,active_queue_version,discovered_domains
+        ) VALUES ('com','ready','v1',1)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO shards(
+            tld,queue_version,shard,path,total_bytes,
+            queued_domains,updated_at
+        ) VALUES ('com','v1',0,?,?,1,?)
+        """,
+        (str(shard_path), shard_path.stat().st_size, utc_now()),
+    )
+    conn.commit()
+    settings = replace(
+        load_settings(),
+        database=database,
+        batch_size=10,
+        minimum_free_gb=2,
+        retain_raw_html=False,
+        auto_screen=False,
+        auto_classify=False,
+        auto_registration=False,
+    )
+    return conn, settings, shard_path
+
+
+def test_rejected_preflight_advances_checkpoint_without_storing_html(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    conn, settings, shard_path = prepared_database(tmp_path)
+
+    async def rejected(session, domain, selected_settings):
+        return CrawlOutcome(
+            domain=domain,
+            tld="com",
+            status="preflight_rejected",
+            preflight_reason="no_clear_technology_company_signal",
+            response_bytes=4096,
+        )
+
+    monkeypatch.setattr(crawler, "preflight_domain", rejected)
+    counts = asyncio.run(crawler.crawl_once(conn, settings, tld="com"))
+
+    assert counts["preflight_checked"] == 1
+    assert counts["preflight_rejected"] == 1
+    assert conn.execute("SELECT count(*) FROM pages").fetchone()[0] == 0
+    shard = conn.execute("SELECT * FROM shards").fetchone()
+    assert shard["attempted"] == 1
+    assert shard["preflight_rejected"] == 1
+    assert shard["preflight_response_bytes"] == 4096
+    assert shard["byte_offset"] == shard_path.stat().st_size
+    assert diagnostics(conn)["preflight_rejected"] == 1
+    conn.close()
+
+
+def test_promising_preflight_is_the_only_path_to_html_storage(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    conn, settings, _ = prepared_database(tmp_path)
+    html = """
+    <html><title>Candidate AI</title><body>
+    Enterprise artificial intelligence infrastructure software platform.
+    </body></html>
+    """
+
+    async def promising(session, domain, selected_settings):
+        return CrawlOutcome(
+            domain=domain,
+            tld="com",
+            status="preflight_promising",
+            final_url=f"https://{domain}",
+            preflight_reason="frontier_or_ai_product_signal",
+            preflight_score=80,
+            response_bytes=2048,
+        )
+
+    async def full_crawl(
+        session,
+        domain,
+        selected_settings,
+        **kwargs,
+    ):
+        return CrawlOutcome(
+            domain=domain,
+            tld="com",
+            status="success",
+            final_url=f"https://{domain}",
+            http_status=200,
+            html=html,
+            page=extract_page(html, f"https://{domain}"),
+        )
+
+    monkeypatch.setattr(crawler, "preflight_domain", promising)
+    monkeypatch.setattr(crawler, "crawl_domain", full_crawl)
+    counts = asyncio.run(crawler.crawl_once(conn, settings, tld="com"))
+
+    assert counts["preflight_promising"] == 1
+    assert counts["success"] == 1
+    assert conn.execute("SELECT count(*) FROM pages").fetchone()[0] == 1
+    shard = conn.execute("SELECT * FROM shards").fetchone()
+    assert shard["preflight_promising"] == 1
+    assert shard["success"] == 1
+    conn.close()
+
+
+def test_pause_after_quick_check_does_not_lose_queue_position(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    conn, settings, _ = prepared_database(tmp_path)
+
+    async def promising(session, domain, selected_settings):
+        return CrawlOutcome(
+            domain=domain,
+            tld="com",
+            status="preflight_promising",
+            final_url=f"https://{domain}",
+        )
+
+    monkeypatch.setattr(crawler, "preflight_domain", promising)
+    counts = asyncio.run(crawler.crawl_once(
+        conn,
+        settings,
+        tld="com",
+        should_pause=lambda: True,
+    ))
+
+    assert counts["pause_requested"] == 1
+    assert conn.execute("SELECT count(*) FROM pages").fetchone()[0] == 0
+    shard = conn.execute("SELECT * FROM shards").fetchone()
+    assert shard["byte_offset"] == 0
+    assert shard["attempted"] == 0
+    conn.close()

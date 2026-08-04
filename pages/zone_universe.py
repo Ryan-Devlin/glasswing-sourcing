@@ -96,9 +96,17 @@ def stage_copy(state: dict[str, str]) -> tuple[str, str]:
     if stage.startswith("crawling_"):
         tld = stage.removeprefix("crawling_")
         return (
-            f"Crawling .{tld} websites",
-            "Domains are being checked in parallel. Successful websites are "
-            "saved, made searchable, and sent through company screening.",
+            f"Checking .{tld} websites",
+            "A capped homepage preflight runs first. Only promising technology "
+            "companies receive a full crawl, HTML storage, search indexing, "
+            "and company screening.",
+        )
+    if stage == "paused":
+        return (
+            "Crawler paused",
+            "No new .com or .app work is being claimed. Saved HTML, decisions, "
+            "and exact queue checkpoints are intact; Start / resume continues "
+            "from them.",
         )
     if stage == "paused_low_disk":
         return (
@@ -278,6 +286,10 @@ stats = {
         "homepage_only",
         "evidence_enriched",
         "low_priority_quarantined",
+        "preflight_checked",
+        "preflight_promising",
+        "preflight_rejected",
+        "preflight_response_bytes",
         "raw_html_bytes",
         "compressed_html_bytes",
         "gibberish_rejected",
@@ -307,6 +319,12 @@ progress_rows = [
                coalesce(sum(s.http_error),0) AS http_errors,
                coalesce(sum(s.empty),0) AS empty_pages,
                coalesce(sum(s.other_error),0) AS other_errors,
+               coalesce(sum(s.preflight_checked),0)
+                   AS preflight_checked,
+               coalesce(sum(s.preflight_promising),0)
+                   AS preflight_promising,
+               coalesce(sum(s.preflight_rejected),0)
+                   AS preflight_rejected,
                coalesce(sum(s.skipped_low_priority),0)
                    AS low_priority_quarantined,
                z.rejected_gibberish
@@ -349,6 +367,9 @@ elif active_stage == "paused_low_disk":
     st.error(f"**{stage_title}**\n\n{stage_description}")
 else:
     st.warning(f"**{stage_title}**\n\n{stage_description}")
+phase = str(state.get("crawler_phase", "")).replace("_", " ").strip()
+if phase:
+    st.caption(f"Current worker step: {phase}.")
 
 st.markdown("### Domain lists")
 domain_columns = st.columns(2)
@@ -369,7 +390,7 @@ for domain_column, tld in zip(domain_columns, ("app", "com")):
                 f"{saved_by_tld.get(tld, 0):,}",
             )
             split = st.columns(2)
-            split[0].metric("Kept for crawling", f"{kept:,}")
+            split[0].metric("Kept for quick check", f"{kept:,}")
             split[1].metric("Skipped as likely junk", f"{skipped:,}")
             st.caption(
                 f"{total:,} processed = {kept:,} kept + "
@@ -382,7 +403,7 @@ for domain_column, tld in zip(domain_columns, ("app", "com")):
                 file_size(Path(str(row.get("zone_path", "")))),
             )
             pending = st.columns(2)
-            pending[0].metric("Kept for crawling", "Pending")
+            pending[0].metric("Kept for quick check", "Pending")
             pending[1].metric("Skipped as likely junk", "Pending")
             st.caption(
                 "The importer is still counting. Final totals appear together "
@@ -393,32 +414,36 @@ for domain_column, tld in zip(domain_columns, ("app", "com")):
         else:
             st.info("No completed domain-list import yet.")
 
-database_metrics = st.columns(5)
+database_metrics = st.columns(6)
 database_metrics[0].metric(
     "Searchable websites",
     f"{stats['searchable_pages']:,}",
 )
 database_metrics[1].metric(
-    "Homepage sufficient",
-    f"{stats['homepage_only']:,}",
+    "Quick checks",
+    f"{stats['preflight_checked']:,}",
     help=(
-        "One homepage was enough to retain and classify the site without "
-        "spending more requests."
+        "Capped homepage reads used to decide whether a domain deserves the "
+        "expensive pipeline."
     ),
 )
 database_metrics[2].metric(
-    "Evidence enriched",
-    f"{stats['evidence_enriched']:,}",
+    "Stopped before storage",
+    f"{stats['preflight_rejected']:,}",
     help=(
-        "Additional Product, Technology, Security, Research, About, or Team "
-        "pages were retained."
+        "Reachable sites with no clear technology-company signal. Their HTML "
+        "was not retained and they were not classified."
     ),
 )
 database_metrics[3].metric(
+    "Admitted to full crawl",
+    f"{stats['preflight_promising']:,}",
+)
+database_metrics[4].metric(
     "HTML documents retained",
     f"{stats['documents']:,}",
 )
-database_metrics[4].metric(
+database_metrics[5].metric(
     "Compressed HTML storage",
     human_bytes(stats["compressed_html_bytes"]),
 )
@@ -429,9 +454,6 @@ bytes_per_fetched_site = (
     stats["compressed_html_bytes"] / max(stats["success"], 1)
 )
 safe_archive_gb = max(0.0, available_gb - settings.minimum_free_gb)
-local_capacity = int(
-    safe_archive_gb * (1024 ** 3) / max(bytes_per_fetched_site, 1)
-)
 remaining_total = max(
     0,
     int(stats["queued_domains"])
@@ -439,7 +461,21 @@ remaining_total = max(
     - int(stats["low_priority_quarantined"]),
 )
 projected_remaining_gb = (
-    remaining_total * bytes_per_fetched_site / (1024 ** 3)
+    remaining_total
+    * (
+        min(
+            1.0,
+            stats["preflight_promising"]
+            / max(stats["preflight_checked"], 1),
+        )
+        if stats["preflight_checked"]
+        else min(
+            1.0,
+            stats["success"] / max(stats["attempted"], 1),
+        )
+    )
+    * bytes_per_fetched_site
+    / (1024 ** 3)
 )
 tabs = st.tabs([
     "Search",
@@ -923,7 +959,8 @@ with tabs[2]:
     st.subheader("System status")
     st.caption(
         "Follow the pipeline from downloaded domain list → filtered queue → "
-        "website crawl → searchable HTML → company bucket."
+        "quick homepage gate → full crawl for promising sites → searchable "
+        "HTML → company bucket."
     )
     st.markdown("#### Domain-list and crawl progress")
     if progress_rows:
@@ -933,6 +970,11 @@ with tabs[2]:
             discovered = int(row["discovered_domains"] or 0)
             attempted = int(row["attempted"] or 0)
             successful = int(row["successful"] or 0)
+            preflight_checked = int(row["preflight_checked"] or 0)
+            preflight_promising = int(
+                row["preflight_promising"] or 0
+            )
+            preflight_rejected = int(row["preflight_rejected"] or 0)
             skipped = int(row["rejected_gibberish"] or 0)
             quarantined = int(
                 row["low_priority_quarantined"] or 0
@@ -953,17 +995,27 @@ with tabs[2]:
                 "Skipped names": (
                     "Counting…" if importing else f"{skipped:,}"
                 ),
-                "Checked in current queue": (
+                "Quick website checks": (
                     "Waiting for import"
                     if importing
-                    else f"{attempted:,}"
+                    else f"{preflight_checked:,}"
+                ),
+                "Admitted to full crawl": (
+                    "Waiting for import"
+                    if importing
+                    else f"{preflight_promising:,}"
+                ),
+                "Stopped before storage": (
+                    "Waiting for import"
+                    if importing
+                    else f"{preflight_rejected:,}"
                 ),
                 "Cold names bypassed": (
                     "Waiting for import"
                     if importing
                     else f"{quarantined:,}"
                 ),
-                "Saved from current queue": (
+                "Websites saved": (
                     "Waiting for import"
                     if importing
                     else f"{successful:,}"
@@ -1015,6 +1067,16 @@ with tabs[2]:
             label,
             f"{value:,}" if isinstance(value, int) else value,
         )
+    if stats["preflight_checked"]:
+        admission_rate = (
+            stats["preflight_promising"]
+            / max(stats["preflight_checked"], 1)
+        )
+        st.caption(
+            f"Quick homepage transfer: "
+            f"{human_bytes(stats['preflight_response_bytes'])} · "
+            f"{admission_rate:.1%} admitted to the expensive pipeline."
+        )
     if active_stage.startswith("importing_com"):
         st.warning(
             f"The storage forecast currently covers .app only. The .com "
@@ -1035,8 +1097,10 @@ with tabs[2]:
 
     st.markdown("#### Processing controls")
     st.caption(
-        "Start resumes from saved checkpoints. Stop finishes the current safe "
-        "operation before exiting, so no completed work is discarded."
+        "Start resumes from exact queue checkpoints. Pause stops new work and "
+        "is checked again immediately after each capped homepage batch. The "
+        "default batch is 100 domains, so the crawler no longer waits behind "
+        "a 500-domain full-crawl batch."
     )
     if RUNTIME_MODE != "local":
         render_worker_controls(
@@ -1150,7 +1214,7 @@ with tabs[2]:
 
 with tabs[2]:
     st.divider()
-    st.subheader("Domains skipped as obvious junk")
+    st.subheader("Cost gates before full crawling")
     st.write(
         "Before crawling, the importer skips names with several strong signs "
         "of machine-generated noise—for example long random character strings "
@@ -1165,13 +1229,13 @@ with tabs[2]:
     completed_names = (
         int(stats["queued_domains"]) + int(stats["gibberish_rejected"])
     )
-    hygiene_metrics = st.columns(4)
+    hygiene_metrics = st.columns(5)
     hygiene_metrics[0].metric(
         "Names processed",
         f"{completed_names:,}",
     )
     hygiene_metrics[1].metric(
-        "Kept for crawling",
+        "Kept for quick check",
         f"{stats['queued_domains']:,}",
     )
     hygiene_metrics[2].metric(
@@ -1186,6 +1250,15 @@ with tabs[2]:
             "skipped before DNS/HTTP. Newly registered names bypass this gate."
         ),
     )
+    hygiene_metrics[4].metric(
+        "Homepage gate stopped",
+        f"{stats['preflight_rejected']:,}",
+        help=(
+            "Reachable pages without enough technology-company evidence. "
+            "They consume no full crawl, HTML archive, search index, RDAP, or "
+            "Python classification work."
+        ),
+    )
     st.caption(
         f"{completed_names:,} processed = {stats['queued_domains']:,} kept + "
         f"{stats['gibberish_rejected']:,} skipped. Filter setting: conservative."
@@ -1194,6 +1267,16 @@ with tabs[2]:
         "Active crawl policy: priority "
         f"0–{settings.max_crawl_priority}. Lower-value priority 3 names stay "
         "recoverable in the source queue but do not consume DNS or HTTP."
+    )
+    st.caption(
+        "Homepage preflight: "
+        + (
+            f"on · first {settings.preflight_max_response_bytes / 1024:.0f} KB "
+            f"maximum · {settings.preflight_concurrency} concurrent quick checks"
+            if settings.preflight_enabled
+            else "off (every name-gate survivor receives a full crawl)"
+        )
+        + "."
     )
     if active_stage.startswith("importing_com"):
         st.caption(

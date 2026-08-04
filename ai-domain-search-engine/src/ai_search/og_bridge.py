@@ -24,6 +24,20 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def screening_queue_connection(
+    queue_db: Path,
+) -> sqlite3.Connection | PostgresConnection:
+    """Open the canonical screening queue in local or cloud mode."""
+    if _using_postgres(_PIPELINE_DATABASE_ENV_VAR):
+        conn = connect_postgres(env_var=_PIPELINE_DATABASE_ENV_VAR)
+        conn.execute("SET search_path TO pipeline, public")
+        return conn
+    conn = sqlite3.connect(queue_db, timeout=30)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
+
 def search_connection(path: Path) -> sqlite3.Connection | PostgresConnection:
     return _ai_search_connect(path, read_only=True)
 
@@ -311,7 +325,7 @@ def pipeline_status_for_corpus(
             search_db_env_var=search_db_env_var,
         )
 
-    conn = sqlite3.connect(queue_db, timeout=30)
+    conn = screening_queue_connection(queue_db)
     conn.row_factory = sqlite3.Row
     try:
         conn.execute("ATTACH DATABASE ? AS search_corpus", (str(search_db),))
@@ -448,12 +462,12 @@ def enqueue_for_screening(
     """Insert only unknown domains; preserve every existing queue record."""
     if not domains:
         return {"requested": 0, "queued": 0, "already_known": 0}
-    conn = sqlite3.connect(queue_db, timeout=30)
+    conn = screening_queue_connection(queue_db)
     now = utc_now()
     queued = 0
     try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("BEGIN IMMEDIATE")
+        if not isinstance(conn, PostgresConnection):
+            conn.execute("BEGIN IMMEDIATE")
         for domain in dict.fromkeys(domains):
             if requeue_existing:
                 cursor = conn.execute("""
@@ -498,3 +512,36 @@ def enqueue_for_screening(
         "queued": queued,
         "already_known": len(set(domains)) - queued,
     }
+
+
+def complete_screening_records(
+    queue_db: Path,
+    classifications: dict[str, str],
+) -> int:
+    """Mark directly classified crawler records complete in the same queue."""
+    if not classifications:
+        return 0
+    conn = screening_queue_connection(queue_db)
+    try:
+        conn.executemany(
+            """
+            UPDATE domains SET
+                status='complete',
+                next_attempt_at=NULL,
+                last_processed_at=?,
+                classification=?,
+                last_error=''
+            WHERE domain=?
+            """,
+            [
+                (utc_now(), bucket, domain)
+                for domain, bucket in classifications.items()
+            ],
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return len(classifications)

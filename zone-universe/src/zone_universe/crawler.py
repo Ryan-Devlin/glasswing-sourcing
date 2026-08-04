@@ -10,6 +10,7 @@ import zlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Callable
 
 import aiohttp
 from ai_search.extract import (
@@ -24,6 +25,7 @@ from .config import DATA_ROOT, Settings
 from .database import log_event, set_state, utc_now
 from .domain_quality import crawl_priority
 from .html_archive import append_html
+from .preflight import assess_homepage
 
 
 @dataclass
@@ -41,6 +43,9 @@ class CrawlOutcome:
     document_count: int = 0
     enrichment_reason: str = ""
     from_retry: bool = False
+    preflight_reason: str = ""
+    preflight_score: int = 0
+    response_bytes: int = 0
 
 
 def free_disk_gb(path: Path) -> float:
@@ -143,6 +148,31 @@ async def _read_html(
     return b"".join(chunks).decode(
         response.charset or "utf-8",
         errors="replace",
+    )
+
+
+async def _read_html_prefix(
+    response: aiohttp.ClientResponse,
+    maximum_bytes: int,
+) -> tuple[str, int]:
+    """Read only enough of a homepage for its metadata and opening copy."""
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in response.content.iter_chunked(32_768):
+        remaining = maximum_bytes - size
+        if remaining <= 0:
+            break
+        selected = chunk[:remaining]
+        chunks.append(selected)
+        size += len(selected)
+        if len(selected) < len(chunk) or size >= maximum_bytes:
+            break
+    return (
+        b"".join(chunks).decode(
+            response.charset or "utf-8",
+            errors="replace",
+        ),
+        size,
     )
 
 
@@ -249,11 +279,47 @@ async def _fetch_html_page(
         raise
 
 
-async def crawl_domain(
+async def _fetch_homepage_preflight(
+    session: aiohttp.ClientSession,
+    requested: str,
+    settings: Settings,
+) -> tuple[aiohttp.ClientResponse, str, ExtractedPage, int]:
+    response = await session.get(
+        requested,
+        allow_redirects=True,
+        max_redirects=5,
+        headers={
+            "Range": (
+                "bytes=0-"
+                f"{settings.preflight_max_response_bytes - 1}"
+            )
+        },
+    )
+    try:
+        content_type = response.headers.get("Content-Type", "")
+        if response.status in {401, 403, 429}:
+            raise PermissionError(f"http_{response.status}")
+        if response.status >= 400:
+            raise ValueError(f"http_{response.status}")
+        if "html" not in content_type.lower():
+            raise ValueError(f"non_html:{content_type}"[:300])
+        html, bytes_read = await _read_html_prefix(
+            response,
+            settings.preflight_max_response_bytes,
+        )
+        page = extract_page(html, str(response.url))
+        return response, html, page, bytes_read
+    except Exception:
+        response.release()
+        raise
+
+
+async def preflight_domain(
     session: aiohttp.ClientSession,
     domain: str,
     settings: Settings,
 ) -> CrawlOutcome:
+    """Run one capped homepage check without retaining HTML or subpages."""
     tld = domain.rsplit(".", 1)[-1]
     started = time.monotonic()
     if settings.dns_preflight and not await domain_resolves(domain):
@@ -269,6 +335,99 @@ async def crawl_domain(
         f"https://www.{domain}",
         f"http://{domain}",
     )
+    final_status = "other_error"
+    final_error = ""
+    final_http: int | None = None
+    bytes_read = 0
+    for requested in candidates:
+        response = None
+        try:
+            response, _, page, response_bytes = (
+                await _fetch_homepage_preflight(
+                    session,
+                    requested,
+                    settings,
+                )
+            )
+            final_http = response.status
+            bytes_read += response_bytes
+            decision = assess_homepage(domain, page)
+            return CrawlOutcome(
+                domain=domain,
+                tld=tld,
+                status=(
+                    "preflight_promising"
+                    if decision.promising
+                    else "preflight_rejected"
+                ),
+                requested_url=requested,
+                final_url=str(response.url),
+                http_status=response.status,
+                page=page,
+                duration_ms=int((time.monotonic() - started) * 1000),
+                preflight_reason=decision.reason,
+                preflight_score=decision.score,
+                response_bytes=bytes_read,
+            )
+        except PermissionError as exc:
+            final_error = str(exc)
+            final_http = int(final_error.rsplit("_", 1)[-1])
+            final_status = "blocked"
+        except ValueError as exc:
+            final_error = str(exc)[:300]
+            if final_error.startswith("http_"):
+                final_status = "http_error"
+                try:
+                    final_http = int(final_error.rsplit("_", 1)[-1])
+                except ValueError:
+                    pass
+            else:
+                final_status = "other_error"
+        except Exception as exc:
+            final_status = classify_exception(exc)
+            final_error = f"{type(exc).__name__}: {exc}"[:300]
+        finally:
+            if response is not None:
+                response.release()
+    return CrawlOutcome(
+        domain=domain,
+        tld=tld,
+        status=final_status,
+        http_status=final_http,
+        duration_ms=int((time.monotonic() - started) * 1000),
+        error=final_error,
+        response_bytes=bytes_read,
+    )
+
+
+async def crawl_domain(
+    session: aiohttp.ClientSession,
+    domain: str,
+    settings: Settings,
+    *,
+    skip_dns_preflight: bool = False,
+    preferred_url: str = "",
+) -> CrawlOutcome:
+    tld = domain.rsplit(".", 1)[-1]
+    started = time.monotonic()
+    if (
+        settings.dns_preflight
+        and not skip_dns_preflight
+        and not await domain_resolves(domain)
+    ):
+        return CrawlOutcome(
+            domain=domain,
+            tld=tld,
+            status="dns_error",
+            duration_ms=int((time.monotonic() - started) * 1000),
+            error="dns_preflight_no_apex_or_www_address",
+        )
+    candidates = tuple(dict.fromkeys(filter(None, (
+        preferred_url,
+        f"https://{domain}",
+        f"https://www.{domain}",
+        f"http://{domain}",
+    ))))
     final_status = "other_error"
     final_error = ""
     final_http: int | None = None
@@ -571,7 +730,11 @@ def append_failures(outcomes: list[CrawlOutcome]) -> None:
     failures = [
         outcome
         for outcome in outcomes
-        if outcome.status not in {"success", "empty"}
+        if outcome.status not in {
+            "success",
+            "empty",
+            "preflight_rejected",
+        }
     ]
     if not failures:
         return
@@ -762,24 +925,9 @@ async def classify_cached_successes(
         classifications,
         settings,
     )
-    with sqlite3.connect(settings.screening_queue, timeout=30) as queue:
-        queue.execute("PRAGMA journal_mode=WAL")
-        queue.executemany(
-            """
-            UPDATE domains SET
-                status='complete',
-                next_attempt_at=NULL,
-                last_processed_at=?,
-                classification=?,
-                last_error=''
-            WHERE domain=?
-            """,
-            [
-                (utc_now(), bucket, domain)
-                for domain, bucket in classifications.items()
-            ],
-        )
-        queue.commit()
+    from ai_search.og_bridge import complete_screening_records
+
+    complete_screening_records(settings.screening_queue, classifications)
     return {
         "classified": len(classifications),
         "registration_queued": registration_queued,
@@ -792,6 +940,7 @@ async def crawl_once(
     settings: Settings,
     *,
     tld: str,
+    should_pause: Callable[[], bool] | None = None,
 ) -> dict[str, int]:
     if free_disk_gb(settings.database.parent) < settings.minimum_free_gb:
         set_state(
@@ -861,7 +1010,7 @@ async def crawl_once(
         sock_read=settings.timeout_seconds,
     )
     connector = aiohttp.TCPConnector(
-        limit=settings.concurrency,
+        limit=max(settings.concurrency, settings.preflight_concurrency),
         ttl_dns_cache=600,
     )
     semaphore = asyncio.Semaphore(settings.concurrency)
@@ -875,13 +1024,77 @@ async def crawl_once(
         connector=connector,
         headers=headers,
     ) as session:
-        async def guarded(domain: str) -> CrawlOutcome:
-            async with semaphore:
-                return await crawl_domain(session, domain, settings)
+        if settings.preflight_enabled:
+            set_state(conn, "crawler_phase", "quick_homepage_preflight")
+            preflight_semaphore = asyncio.Semaphore(
+                settings.preflight_concurrency
+            )
 
-        outcomes = await asyncio.gather(
-            *(guarded(domain) for domain in domains)
-        )
+            async def guarded_preflight(domain: str) -> CrawlOutcome:
+                async with preflight_semaphore:
+                    return await preflight_domain(
+                        session,
+                        domain,
+                        settings,
+                    )
+
+            preflight_outcomes = list(await asyncio.gather(*(
+                guarded_preflight(domain) for domain in domains
+            )))
+            if should_pause is not None and should_pause():
+                set_state(conn, "crawler_phase", "paused_after_preflight")
+                return {
+                    "pause_requested": 1,
+                    "preflight_checked": len(preflight_outcomes),
+                    "preflight_promising": sum(
+                        outcome.status == "preflight_promising"
+                        for outcome in preflight_outcomes
+                    ),
+                    "preflight_rejected": sum(
+                        outcome.status == "preflight_rejected"
+                        for outcome in preflight_outcomes
+                    ),
+                }
+        else:
+            preflight_outcomes = [
+                CrawlOutcome(
+                    domain=domain,
+                    tld=tld,
+                    status="preflight_promising",
+                )
+                for domain in domains
+            ]
+
+        promising = [
+            outcome
+            for outcome in preflight_outcomes
+            if outcome.status == "preflight_promising"
+        ]
+        stopped_at_gate = [
+            outcome
+            for outcome in preflight_outcomes
+            if outcome.status != "preflight_promising"
+        ]
+        set_state(conn, "crawler_phase", "full_crawl_promising_sites")
+
+        async def guarded_crawl(preflight: CrawlOutcome) -> CrawlOutcome:
+            async with semaphore:
+                outcome = await crawl_domain(
+                    session,
+                    preflight.domain,
+                    settings,
+                    skip_dns_preflight=True,
+                    preferred_url=preflight.final_url,
+                )
+                outcome.preflight_reason = preflight.preflight_reason
+                outcome.preflight_score = preflight.preflight_score
+                outcome.response_bytes += preflight.response_bytes
+                return outcome
+
+        full_outcomes = list(await asyncio.gather(*(
+            guarded_crawl(preflight) for preflight in promising
+        )))
+        outcomes = stopped_at_gate + full_outcomes
     retry_set = set(retry_domains)
     for outcome in outcomes:
         outcome.from_retry = outcome.domain in retry_set
@@ -898,8 +1111,22 @@ async def crawl_once(
             "other_error",
         )
     }
+    counts["preflight_checked"] = (
+        len(preflight_outcomes) if settings.preflight_enabled else 0
+    )
+    counts["preflight_promising"] = (
+        len(promising) if settings.preflight_enabled else 0
+    )
+    counts["preflight_rejected"] = sum(
+        outcome.status == "preflight_rejected"
+        for outcome in preflight_outcomes
+    )
+    counts["preflight_response_bytes"] = sum(
+        outcome.response_bytes for outcome in preflight_outcomes
+    )
     counts["skipped_low_priority"] = skipped_low_priority
-    conn.execute("BEGIN IMMEDIATE")
+    if not isinstance(conn, PostgresConnection):
+        conn.execute("BEGIN IMMEDIATE")
     for outcome in outcomes:
         if outcome.status == "success":
             save_success(
@@ -915,6 +1142,12 @@ async def crawl_once(
         )
     new_outcomes = [
         outcome for outcome in outcomes if not outcome.from_retry
+    ]
+    new_domain_set = set(new_domains)
+    new_preflight_outcomes = [
+        outcome
+        for outcome in preflight_outcomes
+        if outcome.domain in new_domain_set
     ]
     if shard is not None and new_domains:
         new_counts = {
@@ -933,6 +1166,10 @@ async def crawl_once(
                 http_error=http_error+?,
                 empty=empty+?,
                 other_error=other_error+?,
+                preflight_checked=preflight_checked+?,
+                preflight_promising=preflight_promising+?,
+                preflight_rejected=preflight_rejected+?,
+                preflight_response_bytes=preflight_response_bytes+?,
                 skipped_existing=skipped_existing+?,
                 skipped_low_priority=skipped_low_priority+?,
                 updated_at=?
@@ -948,6 +1185,31 @@ async def crawl_once(
                 new_counts["http_error"],
                 new_counts["empty"],
                 new_counts["other_error"],
+                (
+                    len(new_preflight_outcomes)
+                    if settings.preflight_enabled
+                    else 0
+                ),
+                (
+                    sum(
+                        outcome.status == "preflight_promising"
+                        for outcome in new_preflight_outcomes
+                    )
+                    if settings.preflight_enabled
+                    else 0
+                ),
+                sum(
+                    outcome.status == "preflight_rejected"
+                    for outcome in new_preflight_outcomes
+                ),
+                (
+                    sum(
+                        outcome.response_bytes
+                        for outcome in new_preflight_outcomes
+                    )
+                    if settings.preflight_enabled
+                    else 0
+                ),
                 skipped_existing,
                 skipped_low_priority,
                 utc_now(),
@@ -991,4 +1253,5 @@ async def crawl_once(
     set_state(conn, "last_batch_retry_count", len(retry_domains))
     set_state(conn, "last_batch", counts)
     set_state(conn, "last_batch_tld", tld)
+    set_state(conn, "crawler_phase", "batch_complete")
     return counts

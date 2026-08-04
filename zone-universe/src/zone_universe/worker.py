@@ -132,12 +132,16 @@ async def wait_or_stop(stop: asyncio.Event, seconds: float) -> None:
 async def enrich_registration_dates(
     settings: Settings,
     stop: asyncio.Event,
+    should_pause,
 ) -> None:
     """Run low-volume RDAP lookups independently of website crawling."""
     if not settings.auto_registration:
         return
     recover_registration_queue(database=settings.database)
     while not stop.is_set() and not STOP_FILE.exists():
+        if should_pause():
+            await wait_or_stop(stop, 5)
+            continue
         if (
             automatic_lookups_today(database=settings.database)
             >= settings.registration_daily_limit
@@ -189,6 +193,20 @@ async def run() -> None:
     PID_FILE.parent.mkdir(parents=True, exist_ok=True)
     PID_FILE.write_text(str(os.getpid()), encoding="utf-8")
     conn = connect(settings.database)
+
+    def zone_crawler_requested() -> bool:
+        if RUNTIME_MODE == "local":
+            return True
+        return bool(
+            read_control()["desired"].get("zone_crawler", True)
+        )
+
+    def pause_requested() -> bool:
+        return bool(
+            stop.is_set()
+            or STOP_FILE.exists()
+            or not zone_crawler_requested()
+        )
     if settings.auto_registration:
         from classification_store import classification_map
 
@@ -210,17 +228,18 @@ async def run() -> None:
         conn,
         "worker_started",
         f"TLDs={','.join(settings.tlds)}; "
-        f"workers={settings.concurrency}; batch={settings.batch_size}",
+        f"workers={settings.concurrency}; batch={settings.batch_size}; "
+        f"preflight={settings.preflight_enabled}; "
+        f"preflight_workers={settings.preflight_concurrency}",
     )
     registration_task = asyncio.create_task(
-        enrich_registration_dates(settings, stop)
+        enrich_registration_dates(settings, stop, pause_requested)
     )
     try:
         while not stop.is_set() and not STOP_FILE.exists():
-            if RUNTIME_MODE != "local" and not read_control()["desired"].get(
-                "zone_crawler", True
-            ):
+            if not zone_crawler_requested():
                 set_state(conn, "crawler_status", "paused")
+                set_state(conn, "crawler_phase", "paused_by_user")
                 await wait_or_stop(stop, 5)
                 continue
             try:
@@ -246,8 +265,12 @@ async def run() -> None:
                         conn,
                         settings,
                         tld=tld,
+                        should_pause=pause_requested,
                     )
                     made_progress = made_progress or bool(counts)
+                    if pause_requested():
+                        set_state(conn, "crawler_status", "paused")
+                        break
                 except RuntimeError as exc:
                     set_state(conn, "last_error", str(exc))
                     if str(exc).startswith("low_disk_space"):

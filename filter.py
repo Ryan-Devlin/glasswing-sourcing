@@ -16,6 +16,7 @@ from urllib.parse import urljoin, urlparse
 
 import aiohttp
 import pandas as pd
+from db_backend import using_postgres
 from glasswing_portfolio import GLASSWING_PORTFOLIO_DOMAINS
 from bs4 import BeautifulSoup
 from label_calibrator import calibrate_text
@@ -823,15 +824,21 @@ def load_crawler_fetches(domains: list[str]) -> dict[str, Fetch]:
     except sqlite3.Error:
         pass
 
-    if zone_db.exists():
+    if zone_db.exists() or using_postgres("ZONE_UNIVERSE_DATABASE_URL"):
+        conn = None
         try:
-            conn = sqlite3.connect(
-                f"file:{zone_db}?mode=ro",
-                uri=True,
-                timeout=30,
-            )
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA query_only=ON")
+            if using_postgres("ZONE_UNIVERSE_DATABASE_URL"):
+                from zone_universe.database import connect as connect_zone
+
+                conn = connect_zone(read_only=True)
+            else:
+                conn = sqlite3.connect(
+                    f"file:{zone_db}?mode=ro",
+                    uri=True,
+                    timeout=30,
+                )
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA query_only=ON")
             for start in range(0, len(normalized), 800):
                 batch = normalized[start : start + 800]
                 marks = ",".join("?" for _ in batch)
@@ -863,9 +870,14 @@ def load_crawler_fetches(domains: list[str]) -> dict[str, Fetch]:
                         crawl_status="success",
                         crawled_at=str(row["crawled_at"] or ""),
                     )
-            conn.close()
-        except sqlite3.Error:
+        except Exception:
+            # Cache reuse is an optimization, not a reason to abort the
+            # classifier. A missing/unavailable corpus falls back to the
+            # normal network fetch path.
             pass
+        finally:
+            if conn is not None:
+                conn.close()
     return results
 
 
