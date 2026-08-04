@@ -1,12 +1,31 @@
 import asyncio
+import sys
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import filter as screening_filter
+import continuous_pipeline
 from continuous_pipeline import adaptive_screening_profile
 
 
 class ScraperResilienceTests(unittest.TestCase):
+    def test_standalone_pipeline_can_import_both_crawler_packages(self):
+        project_root = Path(continuous_pipeline.__file__).resolve().parent
+        self.assertIn(
+            str(project_root / "ai-domain-search-engine" / "src"),
+            sys.path,
+        )
+        self.assertIn(
+            str(project_root / "zone-universe" / "src"),
+            sys.path,
+        )
+        from ai_search import database as ai_database
+        from zone_universe import database as zone_database
+
+        self.assertTrue(callable(ai_database.connect))
+        self.assertTrue(callable(zone_database.connect))
+
     def test_apex_success_does_not_open_www_connection(self):
         calls = []
 
