@@ -66,6 +66,48 @@ class RuleCalibrationTests(unittest.TestCase):
         self.assertTrue(directory)
         self.assertFalse(product)
 
+    def test_ai_newsletter_with_buzzwords_is_caught_despite_product_language(self):
+        # An AI newsletter reporting on the industry naturally uses the same
+        # buzzwords ("proprietary", "platform", "automation") a real product
+        # page would -- this used to slip through the old product_hits<=1
+        # gate. Confirmed reported bug: these were scoring up to 100.
+        newsletter, evidence = media_newsletter_assessment(
+            "AI Weekly Report is a daily newsletter covering the latest news "
+            "in artificial intelligence. Subscribe to get curated news on "
+            "proprietary foundation model platforms, enterprise automation "
+            "trends, and workflow research. Read the latest stories and stay "
+            "on top of AI with our editorial team's daily brief."
+        )
+        self.assertTrue(newsletter)
+        self.assertIn("daily newsletter", evidence)
+
+    def test_webinar_landing_page_is_non_product_content(self):
+        webinar, _ = media_newsletter_assessment(
+            "Join our free webinar on scaling AI infrastructure. Register "
+            "now to save your seat, view the agenda, and meet our speakers."
+        )
+        self.assertTrue(webinar)
+
+    def test_personal_portfolio_site_is_non_product_content(self):
+        personal, _ = media_newsletter_assessment(
+            "Welcome to my personal website. This is my portfolio "
+            "showcasing projects I've built as a freelance developer. "
+            "Hire me for your next project."
+        )
+        self.assertTrue(personal)
+
+    def test_founder_site_with_company_language_is_not_flagged_as_personal(self):
+        # A solo founder's legitimate startup site can read personally, but
+        # mentioning a team/customers/pricing means it isn't a bare
+        # portfolio -- don't let the personal-site check reject real
+        # early-stage companies.
+        founder_site, _ = media_newsletter_assessment(
+            "Welcome to my personal website. I'm building the future of "
+            "enterprise data infrastructure. Our platform serves customers "
+            "across our team, with pricing plans for every stage."
+        )
+        self.assertFalse(founder_site)
+
     def test_positive_fit_requires_a_phrase_bundle(self):
         matched, evidence = high_conviction_fit_assessment(
             "Evaluation infrastructure for application-layer robotics with "

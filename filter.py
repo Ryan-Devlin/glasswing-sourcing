@@ -1363,6 +1363,12 @@ def media_newsletter_assessment(text: str) -> tuple[bool, list[str]]:
             ["speakers", "agenda", "tickets", "workshops",
              "reserve my seat", "register", "take place"],
         ),
+        (
+            ["webinar", "live webinar", "on-demand webinar", "virtual event",
+             "free webinar"],
+            ["register", "rsvp", "save your seat", "reserve your seat",
+             "agenda", "speakers", "sign up to attend"],
+        ),
     )
     for identity_terms, confirming_terms in education_patterns:
         identity = [term for term in identity_terms if term in leading_copy]
@@ -1416,21 +1422,52 @@ def media_newsletter_assessment(text: str) -> tuple[bool, list[str]]:
     if newsletter_identity:
         strong_hits.append("newsletter/news identity")
 
+    # A personal site/portfolio, not an operating company -- distinct from
+    # the media/newsletter case above but the same underlying problem: no
+    # company to invest in. Requires an explicit personal-site
+    # self-identification near the top of the page AND the total absence of
+    # any company-ish language, so a solo founder's legitimate startup site
+    # (which almost always mentions a team, customers, or pricing somewhere)
+    # isn't caught by this.
+    personal_site_terms = [
+        "my portfolio", "personal portfolio", "personal website",
+        "welcome to my website", "welcome to my personal site",
+        "this is my personal site", "i'm a freelance", "i am a freelance",
+        "freelance portfolio", "my resume", "hire me",
+        "thanks for visiting my site",
+    ]
+    company_signals = [
+        "our platform", "our product", "our customers", "our team",
+        "pricing", "book a demo", "request a demo", "enterprise",
+        "case studies", "customers include", "our mission",
+    ]
+    personal_site_hits = [
+        term for term in personal_site_terms if term in leading_copy
+    ]
+    company_hits = [term for term in company_signals if term in lower]
+    is_personal_site = bool(personal_site_hits) and not company_hits
+
     is_media = (
         bool(education_identity_hits)
         or bool(directory_identity_hits)
         or newsletter_identity
+        or is_personal_site
         or
         (
             len(strong_hits) >= 2
-            and len(product_hits) <= 1
+            and len(product_hits) <= 2
         )
         or len(strong_hits) >= 3
+        # The narrow strong_media list can miss real newsletters entirely;
+        # a broad hit count this high across the full MEDIA_NEWSLETTER
+        # lexicon is unlikely on a genuine product/company page.
+        or len(hits) >= 5
     )
     evidence = list(dict.fromkeys(
         education_identity_hits
         + directory_identity_hits
         + strong_hits
+        + personal_site_hits
         + hits
     ))[:10]
     return is_media, evidence
