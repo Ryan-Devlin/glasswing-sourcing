@@ -205,18 +205,40 @@ def health_report(*, include_integrity: bool = False) -> dict[str, object]:
                 "Status": "Error",
                 "Detail": f"{type(exc).__name__}: {exc}",
             })
-        remaining = (
-            ("Pipeline queue", QUEUE_DB),
-            (".AI search database", AI_SEARCH_DB),
-            ("Zone database", ZONE_DB),
-        )
-    else:
-        remaining = (
-            ("Classification database", CLASSIFICATION_DB),
-            ("Pipeline queue", QUEUE_DB),
-            (".AI search database", AI_SEARCH_DB),
-            ("Zone database", ZONE_DB),
-        )
+
+    # Each of these has its own dedicated Postgres env var (see
+    # _database_counts) -- checking the local file's mere existence would
+    # be wrong once that subsystem has moved to Postgres, since the local
+    # path is then an unused leftover, not a missing database.
+    postgres_backed = (
+        ("Pipeline queue", QUEUE_DB, PIPELINE_DATABASE_ENV_VAR, None),
+        (".AI search database", AI_SEARCH_DB, AI_SEARCH_DATABASE_ENV_VAR, connect_ai_search),
+        ("Zone database", ZONE_DB, ZONE_UNIVERSE_DATABASE_ENV_VAR, connect_zone_universe),
+    )
+    remaining = [] if using_postgres() else [("Classification database", CLASSIFICATION_DB)]
+    for name, path, env_var, connect_fn in postgres_backed:
+        if not using_postgres(env_var):
+            remaining.append((name, path))
+            continue
+        try:
+            with _timed(f"{name} ping"):
+                if connect_fn is not None:
+                    with connect_fn(path, read_only=True):
+                        pass
+                else:
+                    connect_postgres(read_only=True, env_var=env_var).close()
+            checks.append({
+                "Check": name,
+                "Status": "Healthy",
+                "Detail": "Connected (Postgres)",
+            })
+        except Exception as exc:
+            checks.append({
+                "Check": name,
+                "Status": "Error",
+                "Detail": f"{type(exc).__name__}: {exc}",
+            })
+
     for name, path in remaining:
         if not path.exists():
             checks.append({
