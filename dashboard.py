@@ -31,7 +31,12 @@ from filter import (
     score_text,
 )
 from glasswing_portfolio import GLASSWING_PORTFOLIO_DOMAINS
-from runtime_control import RUNTIME_MODE
+from runtime_control import (
+    RUNTIME_MODE,
+    control_backend_available,
+    request_services,
+    runtime_status,
+)
 from ui_theme import render_card_grid
 from training_data import (
     backfill_label_metadata, balanced_instruction_frame,
@@ -290,10 +295,23 @@ def read_stream_status() -> dict:
 
 def start_continuous_pipeline(config: dict) -> None:
     if RUNTIME_MODE != "local":
-        st.error(
-            "Process controls are delegated to the cloud runtime. Use the "
-            "cloud platform's worker controls instead."
+        if not control_backend_available():
+            st.error(
+                "No shared control store is configured for cloud mode -- "
+                "set RUNTIME_CONTROL_DATABASE_URL to enable this."
+            )
+            return
+        # The pipeline-worker container is always up; this just flips the
+        # shared desired-state flag it polls every loop tick. Run filters
+        # changed here don't reach it yet (its own local run_config.json
+        # lives on a different container, not synced across services) --
+        # only start/stop is wired to the cloud worker so far.
+        request_services({"pipeline": True}, requested_by="dashboard_start")
+        st.success(
+            "Resume requested. The pipeline-worker service will pick this "
+            "up within a few seconds."
         )
+        st.rerun()
         return
     status = read_stream_status()
     stale_pid = 0
@@ -362,10 +380,19 @@ def start_continuous_pipeline(config: dict) -> None:
 
 def stop_continuous_pipeline() -> None:
     if RUNTIME_MODE != "local":
-        st.error(
-            "Process controls are delegated to the cloud runtime. Use the "
-            "cloud platform's worker controls instead."
+        if not control_backend_available():
+            st.error(
+                "No shared control store is configured for cloud mode -- "
+                "set RUNTIME_CONTROL_DATABASE_URL to enable this."
+            )
+            return
+        request_services({"pipeline": False}, requested_by="dashboard_stop")
+        st.info(
+            "Pause requested. The pipeline-worker service will stop "
+            "claiming new batches within a few seconds -- the CertStream "
+            "listener stays connected so no events are missed."
         )
+        st.rerun()
         return
     status = read_stream_status()
     if not status.get("running") and not STREAM_PID.exists():
@@ -1252,7 +1279,17 @@ def format_denied_table(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 stream_status = read_stream_status()
-running = bool(stream_status.get("running", False))
+if RUNTIME_MODE == "local":
+    running = bool(stream_status.get("running", False))
+else:
+    # read_stream_status() reads a local file that lives on the
+    # pipeline-worker container, not this one -- cross-service invisible.
+    # The desired-state flag (Postgres-backed, correctly cross-service) is
+    # the only reliable "is it supposed to be running" signal available
+    # here.
+    running = bool(
+        runtime_status()["services"]["pipeline"]["desired"]
+    )
 
 # Refresh the complete dashboard at a deliberately slow, predictable cadence
 # while the pipeline is active.  This keeps new rows flowing in without the
@@ -1700,9 +1737,14 @@ with reset_col:
         st.session_state["confirm_reset_run"] = True
 
 with status_col:
-    stage = str(
-        stream_status.get("stage", "stopped")
-    ).replace("_", " ").title()
+    if RUNTIME_MODE == "local":
+        stage = str(
+            stream_status.get("stage", "stopped")
+        ).replace("_", " ").title()
+    else:
+        # stream_status's "stage" is the same cross-service-invisible local
+        # file as "running" above -- don't show a stale/wrong detail string.
+        stage = "Cloud-managed"
     state = "Running" if running else "Stopped"
     st.markdown(
         f'<div class="status-card"><strong>{state}</strong>'
@@ -1743,6 +1785,15 @@ if st.session_state.get("confirm_reset_run", False):
         if st.button("Cancel", width="stretch"):
             st.session_state["confirm_reset_run"] = False
             st.rerun()
+
+if RUNTIME_MODE != "local":
+    st.info(
+        "Running/Stopped above is live and accurate. The detailed counts "
+        "below (received, screened, queue breakdown, ...) come from a "
+        "status file local to the pipeline-worker container -- this page "
+        "can't read it, so they're stale, not real-time. For accurate "
+        "live counts, use Overview or System Health instead."
+    )
 
 queue = stream_status.get("queue", {}) or {}
 status_metrics = st.columns(5)
