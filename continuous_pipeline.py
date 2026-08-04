@@ -23,6 +23,17 @@ from pathlib import Path
 import websockets
 from dotenv import load_dotenv
 
+# Running as its own standalone service (pipeline-worker), this process never
+# gets the sys.path setup the Streamlit pages do. filter.py's rejection-purge
+# step lazily imports rejection_cleanup, which imports ai_search.database --
+# without this, that import crashes every batch that has any rejected
+# domain (nearly all of them), and the whole batch gets marked failed and
+# requeued instead of completing. Confirmed live via pipeline-worker's status
+# file: last_error was "ModuleNotFoundError: No module named 'ai_search'".
+_AI_SEARCH_SRC = Path(__file__).resolve().parent / "ai-domain-search-engine" / "src"
+if str(_AI_SEARCH_SRC) not in sys.path:
+    sys.path.insert(0, str(_AI_SEARCH_SRC))
+
 import filter as screening_filter
 from db_backend import connect_postgres, using_postgres
 
