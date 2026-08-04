@@ -38,6 +38,10 @@ for _source_root in (_AI_SEARCH_SRC, _ZONE_UNIVERSE_SRC):
         sys.path.insert(0, str(_source_root))
 
 import filter as screening_filter
+from classification_store import (
+    import_private_sqlite_into_shared,
+    using_classification_postgres,
+)
 from db_backend import connect_postgres, using_postgres
 
 from collector import (
@@ -74,6 +78,9 @@ from runtime_control import (
 load_dotenv(ROOT / ".env")
 
 RUN_LOG = LOGS / "continuous_pipeline.log"
+SHARED_CLASSIFICATION_MIGRATION_MARKER = (
+    DATA / ".shared_classifications_imported_v1.json"
+)
 STATUS_WRITE_LOCK = threading.Lock()
 SHARED_STATUS_PUBLISH_LOCK = threading.Lock()
 SHARED_STATUS_MIN_INTERVAL_SECONDS = 5.0
@@ -1681,6 +1688,40 @@ async def async_main() -> None:
         last_error="",
         queue=queue_counts(conn),
     )
+
+    if (
+        using_classification_postgres()
+        and not SHARED_CLASSIFICATION_MIGRATION_MARKER.exists()
+    ):
+        write_status(
+            stage="syncing_saved_results",
+            updated_at=utc_now(),
+        )
+        try:
+            imported = await asyncio.to_thread(
+                import_private_sqlite_into_shared
+            )
+        except Exception as exc:
+            write_status(
+                classification_sync_error=(
+                    f"{type(exc).__name__}: {exc}"
+                )[:800],
+                updated_at=utc_now(),
+            )
+        else:
+            atomic_write_json(
+                SHARED_CLASSIFICATION_MIGRATION_MARKER,
+                {
+                    "imported": int(imported),
+                    "completed_at": utc_now(),
+                },
+            )
+            write_status(
+                migrated_private_classifications=int(imported),
+                classification_sync_error="",
+                stage="starting",
+                updated_at=utc_now(),
+            )
 
     async def stop_file_watch() -> None:
         while not stop.is_set():

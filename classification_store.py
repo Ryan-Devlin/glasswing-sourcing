@@ -33,6 +33,11 @@ CLASSIFICATION_DB = Path(
     )
 ).expanduser().resolve()
 MODEL_VERSION = "glasswing-local-v4-venture-quality"
+CLASSIFICATION_DATABASE_ENV_VARS = (
+    "CLASSIFICATION_DATABASE_URL",
+    "DATABASE_URL",
+    "PIPELINE_DATABASE_URL",
+)
 
 CORE_COLUMNS = (
     "domain",
@@ -62,6 +67,24 @@ CORE_COLUMNS = (
 )
 
 
+def classification_database_env_var() -> str:
+    """Return the configured shared classification database variable.
+
+    Railway's web service historically receives ``DATABASE_URL`` while the
+    standalone CertStream worker receives ``PIPELINE_DATABASE_URL``. They
+    point at the same Postgres service, but checking only the first name made
+    the worker silently fall back to its private SQLite volume.
+    """
+    for env_var in CLASSIFICATION_DATABASE_ENV_VARS:
+        if using_postgres(env_var):
+            return env_var
+    return ""
+
+
+def using_classification_postgres() -> bool:
+    return bool(classification_database_env_var())
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -71,8 +94,12 @@ def connect_store(
     *,
     read_only: bool = False,
 ) -> sqlite3.Connection | PostgresConnection:
-    if using_postgres():
-        conn = connect_postgres(read_only=read_only)
+    database_env_var = classification_database_env_var()
+    if database_env_var:
+        conn = connect_postgres(
+            read_only=read_only,
+            env_var=database_env_var,
+        )
         if not read_only:
             # This connection string is now shared by the web service and
             # the ai-worker/zone-worker cloud services too -- multiple
@@ -447,8 +474,24 @@ def upsert_classifications(
     if not records:
         return 0
     placeholders = ",".join("?" for _ in CORE_COLUMNS)
+    human_truth_columns = {
+        "routing_bucket",
+        "routing_reason",
+        "fit_score",
+        "confidence_score",
+        "priority_score",
+        "manual_override",
+        "manual_override_target",
+        "record_json",
+        "model_version",
+    }
     updates = ",".join(
-        f"{column}=excluded.{column}"
+        (
+            f"{column}=CASE WHEN classifications.manual_override=1 "
+            f"THEN classifications.{column} ELSE excluded.{column} END"
+            if column in human_truth_columns
+            else f"{column}=excluded.{column}"
+        )
         for column in CORE_COLUMNS
         if column not in {"domain", "classified_at"}
     )
@@ -470,7 +513,7 @@ def upsert_classifications(
 def count_classifications(
     path: Path | str = CLASSIFICATION_DB,
 ) -> int:
-    if not using_postgres() and not Path(path).exists():
+    if not using_classification_postgres() and not Path(path).exists():
         return 0
     with connect_store(path, read_only=True) as conn:
         return int(
@@ -494,7 +537,9 @@ def search_classifications(
     not an archival lookup across every domain ever seen. Ranked by score,
     not recency, since finding the best matches fast is the point."""
     query = query.strip()
-    if not query or (not using_postgres() and not Path(path).exists()):
+    if not query or (
+        not using_classification_postgres() and not Path(path).exists()
+    ):
         return []
     needle = f"%{query.lower()}%"
     with connect_store(path, read_only=True) as conn:
@@ -590,7 +635,9 @@ def hidden_domain_set(
     values = list(dict.fromkeys(
         stable_domain(domain) for domain in domains if stable_domain(domain)
     ))
-    if not values or (not using_postgres() and not Path(path).exists()):
+    if not values or (
+        not using_classification_postgres() and not Path(path).exists()
+    ):
         return set()
     try:
         with connect_store(path, read_only=True) as conn:
@@ -621,7 +668,7 @@ def list_hidden_domains(
     path: Path | str = CLASSIFICATION_DB,
 ) -> list[dict[str, str]]:
     """Return recent hidden preferences for a global unhide control."""
-    if not using_postgres() and not Path(path).exists():
+    if not using_classification_postgres() and not Path(path).exists():
         return []
     try:
         with connect_store(path, read_only=True) as conn:
@@ -656,11 +703,72 @@ def bootstrap_from_csv(
     return max(0, count_classifications(path) - existing)
 
 
+def import_private_sqlite_into_shared(
+    sqlite_path: Path | str = CLASSIFICATION_DB,
+) -> int:
+    """Merge classifications stranded on a worker volume into Postgres.
+
+    This is a one-time cloud migration helper. It reads SQLite explicitly so
+    backend auto-selection cannot redirect the source read back to Postgres,
+    and imports only records newer than the shared store's latest update.
+    Existing human overrides are protected by ``upsert_classifications``.
+    """
+    source = Path(sqlite_path)
+    if not using_classification_postgres() or not source.exists():
+        return 0
+
+    with connect_store(read_only=True) as shared:
+        row = shared.execute(
+            "SELECT max(updated_at) AS latest FROM classifications"
+        ).fetchone()
+    cutoff = pd.to_datetime(
+        row["latest"] if row else "",
+        utc=True,
+        errors="coerce",
+    )
+
+    with sqlite3.connect(
+        f"file:{source}?mode=ro",
+        uri=True,
+        timeout=30,
+    ) as local:
+        try:
+            rows = local.execute(
+                "SELECT record_json FROM classifications"
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc).lower():
+                return 0
+            raise
+
+    records: list[dict[str, object]] = []
+    for (raw_record,) in rows:
+        try:
+            record = json.loads(raw_record or "{}")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    if not records:
+        return 0
+
+    frame = pd.DataFrame(records)
+    timestamp = pd.Series(pd.NaT, index=frame.index, dtype="datetime64[ns, UTC]")
+    for column in ("screened_at", "observed_at", "run_started_at"):
+        if column not in frame.columns:
+            continue
+        candidate = pd.to_datetime(frame[column], utc=True, errors="coerce")
+        timestamp = timestamp.fillna(candidate)
+    if not pd.isna(cutoff):
+        frame = frame[timestamp.gt(cutoff)].copy()
+    return upsert_classifications(frame)
+
+
 def classification_map(
     domains: Iterable[str] | None = None,
     path: Path | str = CLASSIFICATION_DB,
 ) -> dict[str, str]:
-    if not using_postgres() and not Path(path).exists():
+    if not using_classification_postgres() and not Path(path).exists():
         return {}
     with connect_store(path, read_only=True) as conn:
         if domains is None:
@@ -830,7 +938,7 @@ def recent_movements(
     limit: int = 100,
     path: Path | str = CLASSIFICATION_DB,
 ) -> list[dict[str, object]]:
-    if not using_postgres() and not Path(path).exists():
+    if not using_classification_postgres() and not Path(path).exists():
         return []
     with connect_store(path, read_only=True) as conn:
         rows = conn.execute(
@@ -865,11 +973,11 @@ def corpus_bucket_counts(
     search_db: Path,
     path: Path | str = CLASSIFICATION_DB,
 ) -> dict[str, int]:
-    if not using_postgres() and not Path(path).exists():
+    if not using_classification_postgres() and not Path(path).exists():
         return {}
     if not search_db.exists():
         return {}
-    if using_postgres():
+    if using_classification_postgres():
         domains = _crawled_corpus_domains(search_db)
         if not domains:
             return {}
@@ -914,7 +1022,7 @@ def query_corpus_classifications(
     bucket_values = list(dict.fromkeys(str(bucket) for bucket in buckets))
     if not bucket_values or not search_db.exists():
         return []
-    if not using_postgres() and not Path(path).exists():
+    if not using_classification_postgres() and not Path(path).exists():
         return []
     order = {
         "Fit: high to low": "fit_score DESC, domain",
@@ -925,7 +1033,7 @@ def query_corpus_classifications(
     }.get(sort, "priority_score DESC, fit_score DESC, domain")
     bounded_limit = max(1, min(int(limit), 250))
     bounded_offset = max(0, int(offset))
-    if using_postgres():
+    if using_classification_postgres():
         domains = set(_crawled_corpus_domains(search_db))
         if not domains:
             return []
@@ -1008,7 +1116,7 @@ def query_corpus_classifications(
 def frame_from_store(
     path: Path | str = CLASSIFICATION_DB,
 ) -> pd.DataFrame:
-    if not using_postgres() and not Path(path).exists():
+    if not using_classification_postgres() and not Path(path).exists():
         return pd.DataFrame()
     with connect_store(path, read_only=True) as conn:
         rows = conn.execute(

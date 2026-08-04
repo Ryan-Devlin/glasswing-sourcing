@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
-from classification_store import record_manual_move
+from classification_store import frame_from_store, record_manual_move
 from common import (
     FILTERED, LLM, MANUAL, NO_BASKET_DATA, YES_BASKET_DATA,
     ROOT, RUN_LOCK, RUN_LOG, RUN_STATUS,
@@ -150,6 +150,12 @@ def read_csv_safely(path: Path) -> pd.DataFrame:
         if isinstance(previous, pd.DataFrame):
             return previous.copy()
         return pd.DataFrame()
+
+
+@st.cache_data(show_spinner=False, ttl=15, max_entries=2)
+def read_screened_classifications() -> pd.DataFrame:
+    """Read the canonical cross-service store, not a container-local CSV."""
+    return frame_from_store()
 
 def read_status() -> dict:
     if not RUN_STATUS.exists():
@@ -1841,11 +1847,11 @@ status_metrics[0].metric(
     ),
 )
 status_metrics[1].metric(
-    "Screened",
+    "Classified",
     int(stream_status.get("screened", 0) or 0),
     help=(
-        "New domains successfully classified during this run. "
-        "Ghost sites and failed fetches are excluded."
+        "Websites that reached a decision-ready classification during this "
+        "run. Inaccessible and evidence-free sites are excluded."
     ),
 )
 status_metrics[2].metric(
@@ -2039,7 +2045,17 @@ llm_denied = read_csv_safely(LLM / "llm_denied_master.csv")
 python_denied = read_csv_safely(FILTERED / "python_denied_master.csv")
 coming = read_csv_safely(FILTERED / "coming_soon_master.csv")
 
-all_screened = read_csv_safely(FILTERED / "all_screened.csv")
+try:
+    all_screened = read_screened_classifications()
+except Exception as exc:
+    st.error(
+        "The shared classification store is temporarily unavailable. "
+        f"Showing the local compatibility export instead: "
+        f"{type(exc).__name__}: {exc}"
+    )
+    all_screened = read_csv_safely(FILTERED / "all_screened.csv")
+if all_screened.empty:
+    all_screened = read_csv_safely(FILTERED / "all_screened.csv")
 all_screened = apply_overrides(all_screened)
 
 active_display_extensions = set(
@@ -2579,7 +2595,6 @@ if result_scope == "Current Run":
 else:
     funnel_received = len(all_history_screened)
 
-screened_rows = classified_screened.copy()
 visible_screened = pd.concat(
     [
         investable_candidates,
@@ -2594,8 +2609,16 @@ visible_screened = pd.concat(
 if not visible_screened.empty and "domain" in visible_screened.columns:
     visible_screened = visible_screened.drop_duplicates("domain", keep="last")
 
-funnel_screened = len(visible_screened)
-funnel_usable = len(visible_screened)
+if result_scope == "Current Run":
+    funnel_screened = int(stream_status.get("processed", 0) or 0)
+else:
+    funnel_screened = len(all_history_screened)
+raw_routing = all_screened.get(
+    "routing_bucket",
+    pd.Series("", index=all_screened.index),
+).astype(str).str.strip().str.lower()
+inaccessible_count = int(raw_routing.eq("ghost").sum())
+funnel_usable = max(0, funnel_screened - inaccessible_count)
 funnel_in_scope = (
     len(investable_candidates)
     + len(coming_soon)
@@ -2603,9 +2626,17 @@ funnel_in_scope = (
 )
 
 funnel_1.metric("New domains", funnel_received)
-funnel_2.metric("Screened", funnel_screened)
-funnel_3.metric("Usable websites", funnel_usable)
-funnel_4.metric("Within scope", funnel_in_scope)
+funnel_2.metric(
+    "Websites checked",
+    funnel_screened,
+    help="Includes older queued domains processed during this run.",
+)
+funnel_3.metric(
+    "Accessible websites",
+    funnel_usable,
+    help="Checked websites excluding known inaccessible or ghost sites.",
+)
+funnel_4.metric("Potential Glasswing fit", funnel_in_scope)
 funnel_5.metric("Investable", len(investable_candidates))
 
 metric_1, metric_2, metric_3, metric_4, metric_5 = st.columns(5)
@@ -2618,23 +2649,19 @@ metric_3.metric("Needs review", len(needs_review))
 metric_4.metric("Insufficient evidence", len(insufficient_evidence))
 metric_5.metric("Hard denied", len(hard_denied))
 
-visible_total = (
+retained_total = (
     len(investable_candidates)
     + len(coming_soon)
     + len(needs_review)
     + len(insufficient_evidence)
     + len(hard_denied)
 )
-if visible_total != funnel_screened:
-    st.error(
-        "Classification reconciliation error: visible result buckets do "
-        "not equal the screened total."
-    )
-else:
-    st.caption(
-        f"All {visible_total:,} screened websites are represented in the "
-        "five visible result buckets."
-    )
+st.caption(
+    f"The five review tabs contain {retained_total:,} retained records. "
+    "Automatic Python rejections are included in processing totals, but "
+    "their domain data is intentionally deleted and therefore does not "
+    "appear in the tabs."
+)
 
 tabs = st.tabs([
     "Investable Candidates",
@@ -3491,7 +3518,7 @@ with tabs[9]:
             "Count": len(insufficient_evidence),
         },
         {"Bucket": "Hard denied", "Count": len(hard_denied)},
-        {"Bucket": "Visible total", "Count": visible_total},
+        {"Bucket": "Retained total", "Count": retained_total},
     ])
     st.dataframe(
         reconciliation,

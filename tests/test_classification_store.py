@@ -4,6 +4,7 @@ import os
 import pandas as pd
 import pytest
 
+import classification_store
 from classification_store import (
     classification_map,
     connect_store,
@@ -11,9 +12,36 @@ from classification_store import (
     hide_domains,
     list_hidden_domains,
     record_manual_move,
+    import_private_sqlite_into_shared,
     unhide_domains,
     upsert_classifications,
 )
+
+
+def test_pipeline_database_url_is_cloud_fallback(monkeypatch):
+    monkeypatch.delenv("CLASSIFICATION_DATABASE_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("PIPELINE_DATABASE_URL", "postgresql://shared/example")
+
+    assert (
+        classification_store.classification_database_env_var()
+        == "PIPELINE_DATABASE_URL"
+    )
+    assert classification_store.using_classification_postgres() is True
+
+
+def test_dedicated_classification_database_takes_precedence(monkeypatch):
+    monkeypatch.setenv(
+        "CLASSIFICATION_DATABASE_URL",
+        "postgresql://classification/example",
+    )
+    monkeypatch.setenv("DATABASE_URL", "postgresql://web/example")
+    monkeypatch.setenv("PIPELINE_DATABASE_URL", "postgresql://pipeline/example")
+
+    assert (
+        classification_store.classification_database_env_var()
+        == "CLASSIFICATION_DATABASE_URL"
+    )
 
 
 def _live_postgres_url() -> str | None:
@@ -167,6 +195,83 @@ def test_manual_move_is_transactional_and_audited(tmp_path):
     assert len(history) == 1
     assert history[0]["from_bucket"] == "review"
     assert json.loads(stored["record_json"])["manual_override"] is True
+
+    # A later automated crawl may refresh website fields, but it must never
+    # erase a human decision while upserting that new evidence.
+    upsert_classifications(
+        pd.DataFrame([{
+            "domain": "move.ai",
+            "routing_bucket": "reject",
+            "routing_reason": "automated_rejection",
+            "rule_score": 2,
+            "meta_description": "Refreshed website copy",
+        }]),
+        database,
+    )
+    with connect_store(database, read_only=True) as conn:
+        preserved = conn.execute(
+            "SELECT routing_bucket,manual_override,record_json "
+            "FROM classifications WHERE domain='move.ai'"
+        ).fetchone()
+    assert preserved["routing_bucket"] == "priority"
+    assert preserved["manual_override"] == 1
+    assert json.loads(preserved["record_json"])["manual_override"] is True
+
+
+def test_private_sqlite_import_only_merges_newer_records(tmp_path, monkeypatch):
+    source = tmp_path / "private.sqlite3"
+    import sqlite3
+
+    with sqlite3.connect(source) as conn:
+        conn.execute("CREATE TABLE classifications(record_json TEXT)")
+        conn.executemany(
+            "INSERT INTO classifications(record_json) VALUES (?)",
+            [
+                (json.dumps({
+                    "domain": "old.ai",
+                    "observed_at": "2026-07-01T00:00:00Z",
+                }),),
+                (json.dumps({
+                    "domain": "new.ai",
+                    "observed_at": "2026-08-04T00:00:00Z",
+                }),),
+            ],
+        )
+
+    class SharedConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, _sql):
+            class Result:
+                @staticmethod
+                def fetchone():
+                    return {"latest": "2026-07-30T00:00:00Z"}
+
+            return Result()
+
+    imported = []
+    monkeypatch.setattr(
+        classification_store,
+        "using_classification_postgres",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        classification_store,
+        "connect_store",
+        lambda *args, **kwargs: SharedConnection(),
+    )
+    monkeypatch.setattr(
+        classification_store,
+        "upsert_classifications",
+        lambda frame: imported.extend(frame["domain"].tolist()) or len(frame),
+    )
+
+    assert import_private_sqlite_into_shared(source) == 1
+    assert imported == ["new.ai"]
 
 
 @pytest.mark.skipif(
