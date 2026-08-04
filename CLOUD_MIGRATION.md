@@ -195,40 +195,47 @@ See `.env.example` for every variable and its default (unset = local mode).
 
 ## Not yet done
 
-- **Still one Railway service**, not the four-service split below. There is
-  no `pipeline-worker`/`ai-worker`/`zone-worker` split running today --
-  CertStream discovery and crawling are not currently running in the cloud.
-  This is the one piece left, and it's a different kind of decision than
-  everything above: it means real, continuous crawling and Anthropic API
-  spend running unattended, not a storage/database setting. Needs the
-  user's explicit go-ahead, not something to start opportunistically.
+- **Worker desired-state coordination across services.** Now that
+  `pipeline-worker`/`ai-worker`/`zone-worker` run as separate Railway
+  services (see below), the old local-JSON-file worker control in
+  `runtime_control.py` can't reach across the service boundary.
+  `runtime_control.py` grew a Postgres-backed shared control store for
+  this (own `runtime` schema, own `RUNTIME_CONTROL_DATABASE_URL`), but it
+  is groundwork only: none of the three worker entrypoints
+  (`continuous_pipeline.py`, `ai_search/worker.py`, `zone_universe/worker.py`)
+  poll it, and System Health's cloud-mode tab still shows worker control as
+  read-only/delegated rather than calling it. Wiring that up for real is a
+  separate, deliberate decision since it touches the entrypoints of
+  services already running continuous crawling and Anthropic API spend.
+- Bulk-migrating the pre-existing HTML archive into S3/R2 (new crawls
+  already write there; the old archive was deliberately left in place).
 
-## Target service split (when the multi-worker split happens)
+## Service split (live)
 
 This used to be hard-blocked: Railway doesn't share one volume across
 services, and the workers wrote local SQLite files the `web` service read
-directly. That's no longer true, and not just in principle -- every database
-involved (classifications, pipeline queue, ai_search, zone_universe) is now
-actually on the same shared Postgres instance, each in its own schema, and
-the `web` service already reads all four through it. What's missing is the
-workers themselves: no `pipeline-worker`/`ai-worker`/`zone-worker` service
-exists yet, so nothing is claiming queue rows or crawling right now.
-Starting those is still a deliberate, unstarted step -- it's real,
-continuous crawling and Anthropic API spend, not a config change.
+directly. That's no longer true -- every database involved (classifications,
+pipeline queue, ai_search, zone_universe) is on the same shared Postgres
+instance, each in its own schema, and all four Railway services read/write
+through it.
 
-Separate Railway services from the same repository:
+Separate Railway services from the same repository, all live:
 
-1. `web`: Streamlit dashboard only (live today).
-2. `pipeline-worker`: certificate/new-domain screening.
-3. `ai-worker`: `.AI` discovery and crawling.
-4. `zone-worker`: `.COM`/`.APP` queue crawling.
+1. `web`: Streamlit dashboard.
+2. `pipeline-worker`: certificate/new-domain screening (`continuous_pipeline.py`).
+3. `ai-worker`: `.AI` discovery and crawling (`ai_search.worker`).
+4. `zone-worker`: `.COM`/`.APP` queue crawling (`zone_universe.worker`).
 5. managed PostgreSQL: classifications, pipeline queue, ai_search,
-   zone_universe -- all four live today, read and written through the same
-   Postgres instance; the workers that would add new rows to the pipeline
-   queue and crawl aren't running yet, so its counts only reflect the
-   one-time migration.
+   zone_universe -- all four live, read and written through the same
+   Postgres instance by all four services above.
 6. S3-compatible object storage: HTML packs (live for new crawls; the
    pre-existing archive was not bulk-migrated) and manual snapshots (live).
+
+Each worker service has its own `railway.<name>-worker.json` config-as-code
+file (no HTTP healthcheck, since these have no web server -- only `web`
+uses the shared `railway.json` with `healthcheckPath: /_stcore/health`).
+`railway_worker_setup.sh` documents how the three services and their env
+vars were created.
 
 ## Portable service modules
 
@@ -258,6 +265,11 @@ Separate Railway services from the same repository:
    (`screenable_domains`, `crawler.py`, `maintenance.py`, `worker.py`).
 7. ~~Migrate Zone Universe search (FTS5 -> tsvector/ts_rank_cd) to
    Postgres.~~ Done, same scope as step 6, real data migrated and live.
-8. Run the web and three workers as separate services.
+8. ~~Run the web and three workers as separate services.~~ Done, all four
+   live on Railway.
 9. Keep `human_ground_truth.csv` as an export, not the cloud source of truth
    (already true today -- Postgres holds the live table).
+10. Wire worker desired-state (pause/resume from System Health) across the
+    service boundary -- `runtime_control.py` has the Postgres-backed store
+    built, but none of the three worker entrypoints poll it yet. Still
+    pending, see "Not yet done" above.

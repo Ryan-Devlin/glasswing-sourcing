@@ -135,12 +135,16 @@ those snapshots, reports database/index integrity and model reversal metrics,
 and controls all local workers through a bounded-restart supervisor.
 
 The application is local-first but cloud-portable. Configure storage roots
-with `.env.example`. It is deployed today on Railway with a PostgreSQL
-classification store and S3-compatible object storage for manual snapshots,
-both selected purely by environment variable presence -- local SQLite/local
+with `.env.example`. It is deployed today on Railway as four services --
+`web` (this dashboard) plus `pipeline-worker`, `ai-worker`, and
+`zone-worker`, each running its own crawler continuously -- backed by a
+shared PostgreSQL instance (classification store, pipeline queue, `.AI`
+search, Zone Universe, each in its own schema) and S3-compatible object
+storage for manual snapshots and new HTML archives. Every backend is
+selected purely by environment variable presence -- local SQLite/local
 files remain the default with no configuration required. See
-`CLOUD_MIGRATION.md` for what's live, what's not yet migrated, and the target
-Railway service split.
+`CLOUD_MIGRATION.md` for exact status and `CUTOVER_RUNBOOK.md` for how each
+piece was turned on.
 
 For a code-level map, see `CODE_MENTAL_MODEL.md`.
 

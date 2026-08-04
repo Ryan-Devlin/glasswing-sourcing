@@ -1,15 +1,17 @@
 # Cutover runbook
 
-Everything in `CLOUD_MIGRATION.md` is built and verified but switched
-**off** in production. This is the exact, concrete sequence for switching
-any of it on for real. Nothing here should run without deciding to run it
--- these are real, mostly one-way actions on real data and real money, not
-a checklist to work through automatically.
+This is the exact, concrete sequence used to switch each piece of
+`CLOUD_MIGRATION.md` on for real. Kept as a reference for how the current
+live state was reached and as a template for any future subsystem --
+not a pending checklist. Nothing here should run without deciding to run
+it -- these are real, mostly one-way actions on real data and real money.
 
-Current state (verified 2026-08-03): one Railway service (`web`) plus one
-managed `Postgres` service, project `glasswing-sourcing`. `DATABASE_URL` is
-the only cloud-backend variable currently set on `web` (classification
-store only).
+Current state (updated 2026-08-04): four Railway services (`web`,
+`pipeline-worker`, `ai-worker`, `zone-worker`) plus one managed `Postgres`
+service, project `glasswing-sourcing`. All four databases (classification
+store, pipeline queue, ai_search, zone_universe) are on Postgres and all
+three workers are running continuously in the cloud. See Part 1 and Part 2
+below for how each step was done.
 
 ## Part 1: database + archive cutover
 
@@ -75,20 +77,18 @@ zone_universe} and/or the S3 backend for HTML archives, for real data.
    deliberately did not build tooling for, since it wasn't asked for and
    isn't required for new data to start landing in R2 immediately.
 
-## Part 2: multi-service split
+## Part 2: multi-service split (done, live)
 
 Splits `pipeline`/`ai-worker`/`zone-worker` into their own Railway services
 instead of running as local-only processes controlled from the Streamlit
-UI. This is technically unblocked now (every database has a Postgres
-backend, so services no longer need a shared volume) but has **not been
-started** -- no service exists yet for any of these.
+UI. All three exist and are running continuously in the cloud today
+(created via `railway_worker_setup.sh` + each service's own
+`railway.<name>-worker.json` config-as-code file). Kept below as the exact
+steps taken, for reference.
 
-**This starts real, continuous crawling and CertStream ingestion running in
-the cloud around the clock.** That's a different kind of decision than
-everything else in this runbook: it's not just enabling a backend, it's
-turning on live, ongoing automated processes (and, for Claude diligence
-calls, ongoing Anthropic API spend). Confirm you actually want this running
-unattended before doing any of the below.
+**This runs real, continuous crawling and CertStream ingestion in the cloud
+around the clock**, including ongoing Anthropic API spend for Claude
+diligence calls -- that's a live fact now, not a future decision.
 
 Per new worker service:
 
