@@ -266,6 +266,19 @@ def migrate_postgres(conn: PostgresConnection) -> None:
             )
         )
         conn.commit()
+    # Confirmed live: event_log's SERIAL sequence was left behind the real
+    # migrated data's max id (whatever bulk-copied it preserved explicit
+    # ids without a matching setval() afterward), so the very first
+    # log_event() insert on worker startup collided with an existing row
+    # and crash-looped the whole process. Cheap and idempotent -- a no-op
+    # once the sequence is already past the current max, so safe to run
+    # on every connect() rather than only once.
+    conn.execute(
+        "SELECT setval(pg_get_serial_sequence(?, ?), "
+        "COALESCE((SELECT MAX(id) FROM event_log), 1))",
+        ("event_log", "id"),
+    )
+    conn.commit()
 
 
 def migrate(conn: sqlite3.Connection) -> None:
