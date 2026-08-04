@@ -412,14 +412,22 @@ saved_by_tld = {
 }
 conn.close()
 settings = load_settings()
-worker_pid = active_worker_pid()
-worker_running = worker_pid is not None
+if RUNTIME_MODE == "local":
+    worker_pid = active_worker_pid()
+    worker_running: bool | None = worker_pid is not None
+else:
+    # active_worker_pid() reads a local PID file that only exists on the
+    # zone-worker container -- this page renders on the web container, so
+    # there's no local process to check. Trust the shared crawler_status
+    # below instead of reporting a false "stopped".
+    worker_pid = None
+    worker_running = None
 stage_title, stage_description = stage_copy(state)
 active_stage = str(state.get("crawler_status", "")).lower()
 zone_by_tld = {str(row.get("tld", "")): row for row in zone_rows}
 
 st.markdown("### What is happening now")
-if active_stage.startswith(("importing_", "crawling_")) and worker_running:
+if active_stage.startswith(("importing_", "crawling_")) and worker_running is not False:
     st.info(f"**{stage_title}**\n\n{stage_description}")
 elif active_stage == "paused_low_disk":
     st.error(f"**{stage_title}**\n\n{stage_description}")
@@ -1176,7 +1184,7 @@ with tabs[2]:
     if start_col.button(
         "Start / resume",
         type="primary",
-        disabled=worker_running,
+        disabled=(RUNTIME_MODE != "local") or bool(worker_running),
         width="stretch",
     ):
         if RUNTIME_MODE != "local":
@@ -1189,7 +1197,7 @@ with tabs[2]:
         st.rerun()
     if stop_col.button(
         "Stop safely",
-        disabled=not worker_running,
+        disabled=(RUNTIME_MODE != "local") or not worker_running,
         width="stretch",
     ):
         if RUNTIME_MODE != "local":
@@ -1206,14 +1214,21 @@ with tabs[2]:
                 "its atomic save before the process exits."
             )
         st.rerun()
-    state_col.info(
-        f"**{stage_title}**\n\n"
-        + (
-            f"Process {worker_pid} is active."
-            if worker_running
-            else "No processing process is running."
+    if RUNTIME_MODE != "local":
+        state_col.info(
+            f"**{stage_title}**\n\n"
+            "Cloud-managed (Railway) -- liveness isn't visible from here; "
+            "the stage above reflects the worker's own last report."
         )
-    )
+    else:
+        state_col.info(
+            f"**{stage_title}**\n\n"
+            + (
+                f"Process {worker_pid} is active."
+                if worker_running
+                else "No processing process is running."
+            )
+        )
 
     zone_files = discover_zonefiles()
     with st.expander("Advanced: manually import a downloaded domain list"):
