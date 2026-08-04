@@ -17,6 +17,7 @@ from rejection_cleanup import rebuild_full_text_indexes
 from runtime_control import (
     RUNTIME_MODE,
     SERVICES,
+    control_backend_available,
     ensure_supervisor,
     recover_stuck_jobs,
     request_services,
@@ -78,12 +79,82 @@ tabs = st.tabs([
 with tabs[0]:
     st.subheader("Processing controls")
     runtime = report["runtime"]
+    service_names = {
+        "pipeline": "New-domain screening",
+        "ai_crawler": ".AI discovery crawler",
+        "zone_crawler": ".COM/.APP zone crawler",
+    }
     if RUNTIME_MODE != "local":
-        st.info(
-            "Worker lifecycle is delegated to the cloud runtime. This page "
-            "remains read-only; Railway or the future container platform "
-            "starts and restarts worker services."
-        )
+        if not control_backend_available():
+            st.info(
+                "Worker containers are managed by Railway, and pause/resume "
+                "isn't wired up yet -- set RUNTIME_CONTROL_DATABASE_URL to "
+                "enable the controls below."
+            )
+        else:
+            st.caption(
+                "Railway keeps each worker's container running; these "
+                "controls pause or resume that worker's own processing loop "
+                "via a shared flag. Start doesn't spawn a container and "
+                "Stop doesn't terminate one -- the container stays up, idle, "
+                "and picks back up the moment you resume it."
+            )
+            start_col, pause_col = st.columns(2)
+            if start_col.button(
+                "Start / resume everything",
+                type="primary",
+                width="stretch",
+            ):
+                request_services(
+                    {service: True for service in SERVICES},
+                    requested_by="system_health_start_all",
+                )
+                st.cache_data.clear()
+                st.success("Resume requested for every worker.")
+                st.rerun()
+            if pause_col.button("Pause everything safely", width="stretch"):
+                request_services(
+                    {service: False for service in SERVICES},
+                    requested_by="system_health_pause_all",
+                )
+                st.cache_data.clear()
+                st.info("Pause requested for every worker.")
+                st.rerun()
+
+            st.markdown("#### Individual services")
+            for service in SERVICES:
+                row = runtime["services"][service]
+                label_col, status_col, start_col, pause_col = st.columns(
+                    [3, 2, 1, 1]
+                )
+                label_col.write(f"**{service_names[service]}**")
+                status_col.write(
+                    "Desired: running" if row["desired"] else "Desired: paused"
+                )
+                if start_col.button(
+                    "Start",
+                    key=f"start_{service}",
+                    disabled=bool(row["desired"]),
+                    width="stretch",
+                ):
+                    request_services(
+                        {service: True},
+                        requested_by="system_health_start_one",
+                    )
+                    st.cache_data.clear()
+                    st.rerun()
+                if pause_col.button(
+                    "Pause",
+                    key=f"pause_{service}",
+                    disabled=not row["desired"],
+                    width="stretch",
+                ):
+                    request_services(
+                        {service: False},
+                        requested_by="system_health_pause_one",
+                    )
+                    st.cache_data.clear()
+                    st.rerun()
     else:
         start_col, pause_col, recover_col = st.columns(3)
         if start_col.button(
@@ -118,11 +189,6 @@ with tabs[0]:
             st.rerun()
 
         st.markdown("#### Individual services")
-        service_names = {
-            "pipeline": "New-domain screening",
-            "ai_crawler": ".AI discovery crawler",
-            "zone_crawler": ".COM/.APP zone crawler",
-        }
         service_rows = []
         for service in SERVICES:
             row = runtime["services"][service]

@@ -4,7 +4,16 @@ import argparse
 import asyncio
 import os
 import signal
+import sys
 from pathlib import Path
+
+# Running as its own standalone service (zone-worker), so the repo root
+# (holding runtime_control.py) isn't guaranteed to already be on sys.path.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from runtime_control import RUNTIME_MODE, read_control
 
 from .config import PID_FILE, STOP_FILE, ZONEFILES, Settings, load_settings
 from .crawler import crawl_once, queue_candidate_registrations
@@ -208,6 +217,12 @@ async def run() -> None:
     )
     try:
         while not stop.is_set() and not STOP_FILE.exists():
+            if RUNTIME_MODE != "local" and not read_control()["desired"].get(
+                "zone_crawler", True
+            ):
+                set_state(conn, "crawler_status", "paused")
+                await wait_or_stop(stop, 5)
+                continue
             try:
                 await import_new_zonefiles(conn, settings)
             except Exception as exc:

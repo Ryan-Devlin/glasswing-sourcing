@@ -5,9 +5,19 @@ import asyncio
 import logging
 import os
 import signal
+import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import aiohttp
+
+# Running as its own standalone service (ai-worker), so the repo root
+# (holding runtime_control.py) isn't guaranteed to already be on sys.path.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from runtime_control import RUNTIME_MODE, read_control
 
 from .config import PROJECT_ROOT, load_settings
 from .crawler import crawl_pending
@@ -66,6 +76,17 @@ def sync_crawled_domains_to_original_queue(database) -> dict[str, int]:
 
 async def crawl_loop(database, settings, stop: asyncio.Event) -> None:
     while not stop.is_set():
+        if RUNTIME_MODE != "local" and not read_control()["desired"].get(
+            "ai_crawler", True
+        ):
+            conn = connect(database)
+            set_worker_state(conn, "crawler_status", "paused")
+            conn.close()
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                pass
+            continue
         conn = connect(database)
         try:
             set_worker_state(conn, "crawler_status", "running")

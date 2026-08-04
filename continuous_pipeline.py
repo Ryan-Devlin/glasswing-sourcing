@@ -60,6 +60,7 @@ from common import (
     atomic_write_json,
     stable_domain,
 )
+from runtime_control import RUNTIME_MODE, read_control
 
 load_dotenv(ROOT / ".env")
 
@@ -1313,6 +1314,19 @@ async def worker_loop(
     total_rows_screened = 0
 
     while not stop.is_set():
+        if RUNTIME_MODE != "local" and not read_control()["desired"].get(
+            "pipeline", True
+        ):
+            # Cloud pause: leave the CertStream listener connected (so no
+            # events are missed) and just stop claiming new batches. Cheap
+            # enough to check every tick since read_control() is a single
+            # indexed Postgres lookup.
+            write_status(stage="paused", updated_at=utc_now())
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                pass
+            continue
         counts_before = queue_counts(conn)
         pending = int(counts_before.get("pending", 0) or 0)
         profile = adaptive_screening_profile(
