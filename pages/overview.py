@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,8 +17,7 @@ from ai_search.og_bridge import search_companies
 from classification_store import search_classifications
 from common import AI_SEARCH_DB, ZONE_UNIVERSE_DB
 from health_monitor import health_report
-from runtime_control import RUNTIME_MODE, SERVICES
-from ui_theme import render_card_grid
+from runtime_control import SERVICES
 from zone_universe.search import search_pages
 
 st.title("Glasswing Sourcing")
@@ -33,28 +33,13 @@ overall = str(report["overall"])
 runtime = report["runtime"]
 counts = report["counts"]
 
-status_cols = st.columns(4)
+status_cols = st.columns(2)
 {
     "Healthy": status_cols[0].success,
     "Warning": status_cols[0].warning,
     "Error": status_cols[0].error,
 }[overall](f"System: **{overall}**")
-
-if RUNTIME_MODE == "local":
-    running_count = sum(
-        1 for service in SERVICES if runtime["services"][service]["running"]
-    )
-    status_cols[1].metric("Workers running", f"{running_count}/{len(SERVICES)}")
-else:
-    # Local PID files don't apply once each worker is its own Railway
-    # service -- there's no local process on this container to check, so
-    # "running" is unknown here rather than false. See runtime_status().
-    status_cols[1].metric("Workers", "Cloud-managed")
-status_cols[2].metric("Companies tracked", f"{int(counts['classifications']):,}")
-status_cols[3].metric(
-    "Pages indexed",
-    f"{int(counts['ai_indexed']) + int(counts['zone_indexed']):,}",
-)
+status_cols[1].metric("Companies tracked", f"{int(counts['classifications']):,}")
 
 service_labels = {
     "pipeline": "New-domain screening",
@@ -107,45 +92,58 @@ def _company_blurb(row: dict) -> str | None:
     return None
 
 
+_LINK_COLUMN = st.column_config.LinkColumn("Domain", display_text=r"https?://(?:www\.)?([^/]+).*")
+
+
+def _results_table(rows: list[dict], columns: list[str]) -> None:
+    frame = pd.DataFrame(rows, columns=columns)
+    st.dataframe(
+        frame,
+        hide_index=True,
+        width="stretch",
+        column_config={"Domain": _LINK_COLUMN},
+    )
+
+
 if active_query:
-    company_rows = search_classifications(active_query, limit=5)
+    company_rows = search_classifications(active_query, limit=25)
     st.subheader("Companies you're tracking")
     if company_rows:
-        render_card_grid([
-            {
-                "title": row["domain"],
-                "link": row.get("final_url") or None,
-                "meta": _company_blurb(row),
-                "tags": (
-                    [row["thesis_pillar"].replace("_", " ").title()]
-                    if row.get("thesis_pillar")
-                    else []
-                ),
-                "activity": [
-                    ("Score", str(row["fit_score"])),
-                    ("Last updated", (row["updated_at"] or "")[:10]),
-                ],
-            }
-            for row in company_rows
-        ])
+        _results_table(
+            [
+                {
+                    "Domain": row.get("final_url") or f"https://{row['domain']}",
+                    "Description": _company_blurb(row) or "",
+                    "Thesis pillar": (
+                        row["thesis_pillar"].replace("_", " ").title()
+                        if row.get("thesis_pillar")
+                        else ""
+                    ),
+                    "Score": row["fit_score"],
+                    "Last updated": (row["updated_at"] or "")[:10],
+                }
+                for row in company_rows
+            ],
+            columns=["Domain", "Description", "Thesis pillar", "Score", "Last updated"],
+        )
     else:
         st.caption("No investable matches in your classification list.")
 
-    ai_rows = search_companies(AI_SEARCH_DB, active_query, limit=5)
+    ai_rows = search_companies(AI_SEARCH_DB, active_query, limit=25)
     st.subheader(".AI pages")
     if ai_rows:
-        render_card_grid([
-            {
-                "title": row["domain"],
-                "link": row.get("final_url") or None,
-                "meta": row["title"] or "(no title)",
-                "activity": [
-                    ("Match", _clean_snippet(row["snippet"])),
-                    ("Crawled", (row["crawled_at"] or "")[:10]),
-                ],
-            }
-            for row in ai_rows
-        ])
+        _results_table(
+            [
+                {
+                    "Domain": row.get("final_url") or f"https://{row['domain']}",
+                    "Title": row["title"] or "(no title)",
+                    "Match": _clean_snippet(row["snippet"]),
+                    "Crawled": (row["crawled_at"] or "")[:10],
+                }
+                for row in ai_rows
+            ],
+            columns=["Domain", "Title", "Match", "Crawled"],
+        )
         if st.button("Open full results in .AI Search"):
             st.session_state["ai_page_query"] = active_query
             st.session_state["ai_page_number"] = 1
@@ -153,21 +151,22 @@ if active_query:
     else:
         st.caption("No matches in the .AI corpus.")
 
-    zone_rows = search_pages(active_query, limit=5, database=ZONE_UNIVERSE_DB)
+    zone_rows = search_pages(active_query, limit=25, database=ZONE_UNIVERSE_DB)
     st.subheader("Zone Universe pages (.com / .app)")
     if zone_rows:
-        render_card_grid([
-            {
-                "title": row["domain"],
-                "link": row.get("final_url") or None,
-                "meta": f"{row['tld']} · {row['title'] or '(no title)'}",
-                "activity": [
-                    ("Match", _clean_snippet(row["snippet"])),
-                    ("Crawled", (row["crawled_at"] or "")[:10]),
-                ],
-            }
-            for row in zone_rows
-        ])
+        _results_table(
+            [
+                {
+                    "Domain": row.get("final_url") or f"https://{row['domain']}",
+                    "TLD": row["tld"],
+                    "Title": row["title"] or "(no title)",
+                    "Match": _clean_snippet(row["snippet"]),
+                    "Crawled": (row["crawled_at"] or "")[:10],
+                }
+                for row in zone_rows
+            ],
+            columns=["Domain", "TLD", "Title", "Match", "Crawled"],
+        )
         if st.button("Open full results in Zone Universe"):
             st.session_state["zone_query"] = active_query
             st.session_state["zone_page"] = 1
