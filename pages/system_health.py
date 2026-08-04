@@ -1,7 +1,23 @@
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import pandas as pd
 import streamlit as st
+
+# health_monitor imports ai_search.database and zone_universe.database.
+# Unlike overview.py/ai_search.py/zone_universe.py, this page never set up
+# sys.path itself -- it silently relied on one of those other pages having
+# already run first in the same Streamlit process. Landing here directly
+# on a fresh process (e.g. right after a deploy) crashed with
+# ModuleNotFoundError: No module named 'ai_search'.
+ROOT = Path(__file__).resolve().parents[1]
+AI_SRC = ROOT / "ai-domain-search-engine" / "src"
+ZONE_SRC = ROOT / "zone-universe" / "src"
+for source in (ROOT, AI_SRC, ZONE_SRC):
+    if str(source) not in sys.path:
+        sys.path.insert(0, str(source))
 
 from db_backend import using_postgres
 from health_monitor import health_report
