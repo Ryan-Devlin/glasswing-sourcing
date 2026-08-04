@@ -167,6 +167,27 @@ CREATE INDEX IF NOT EXISTS idx_pages_search_vector ON pages USING GIN(search_vec
 """
 
 
+_BIGINT_COLUMNS = (
+    ("pages", "html_archive_offset"),
+    ("pages", "html_archive_length"),
+    ("pages", "raw_html_bytes"),
+    ("pages", "compressed_html_bytes"),
+    ("html_blobs", "archive_offset"),
+    ("html_blobs", "archive_length"),
+    ("html_blobs", "raw_bytes"),
+)
+
+
+def _already_bigint(conn: PostgresConnection, table: str, column: str) -> bool:
+    row = conn.execute(
+        "SELECT data_type FROM information_schema.columns "
+        "WHERE table_schema = 'ai_search' AND table_name = ? "
+        "AND column_name = ?",
+        (table, column),
+    ).fetchone()
+    return bool(row) and str(row["data_type"]) == "bigint"
+
+
 def migrate_postgres(conn: PostgresConnection) -> None:
     conn.executescript(_POSTGRES_SCHEMA)
     conn.commit()
@@ -175,18 +196,26 @@ def migrate_postgres(conn: PostgresConnection) -> None:
     # Postgres's ~2.1GB 32-bit int max) -- something SQLite's flexible typing
     # never catches. These are the same shape of column (append-only archive
     # byte offsets/lengths), so widen them here too before they hit the same
-    # wall as the archive grows. Widening is a safe, lossless conversion, so
-    # this always runs rather than only guarding for a missing column.
-    conn.executescript("""
-        ALTER TABLE pages ALTER COLUMN html_archive_offset TYPE BIGINT;
-        ALTER TABLE pages ALTER COLUMN html_archive_length TYPE BIGINT;
-        ALTER TABLE pages ALTER COLUMN raw_html_bytes TYPE BIGINT;
-        ALTER TABLE pages ALTER COLUMN compressed_html_bytes TYPE BIGINT;
-        ALTER TABLE html_blobs ALTER COLUMN archive_offset TYPE BIGINT;
-        ALTER TABLE html_blobs ALTER COLUMN archive_length TYPE BIGINT;
-        ALTER TABLE html_blobs ALTER COLUMN raw_bytes TYPE BIGINT;
-    """)
-    conn.commit()
+    # wall as the archive grows. Widening is a safe, lossless conversion, but
+    # `ALTER COLUMN TYPE` takes an ACCESS EXCLUSIVE lock even when the type
+    # already matches -- with a live crawler continuously writing to `pages`,
+    # re-running this unconditionally on every connect() would starve
+    # ordinary reads the same way it did for zone_universe's identical
+    # pattern. Checking the catalog first means the common case, already
+    # widened, only costs a metadata lookup rather than an exclusive lock.
+    to_widen = [
+        (table, column)
+        for table, column in _BIGINT_COLUMNS
+        if not _already_bigint(conn, table, column)
+    ]
+    if to_widen:
+        conn.executescript(
+            "".join(
+                f"ALTER TABLE {table} ALTER COLUMN {column} TYPE BIGINT;\n"
+                for table, column in to_widen
+            )
+        )
+        conn.commit()
 
 
 def migrate(conn: sqlite3.Connection) -> None:

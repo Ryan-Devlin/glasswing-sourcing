@@ -216,27 +216,56 @@ CREATE OR REPLACE VIEW domains AS
 """
 
 
+_BIGINT_COLUMNS = (
+    ("zones", "source_size"),
+    ("shards", "byte_offset"),
+    ("shards", "total_bytes"),
+    ("pages", "html_archive_offset"),
+    ("pages", "html_archive_length"),
+    ("pages", "raw_html_bytes"),
+    ("pages", "compressed_html_bytes"),
+    ("html_blobs", "archive_offset"),
+    ("html_blobs", "archive_length"),
+    ("html_blobs", "raw_bytes"),
+)
+
+
+def _already_bigint(conn: PostgresConnection, table: str, column: str) -> bool:
+    row = conn.execute(
+        "SELECT data_type FROM information_schema.columns "
+        "WHERE table_schema = 'zone_universe' AND table_name = ? "
+        "AND column_name = ?",
+        (table, column),
+    ).fetchone()
+    return bool(row) and str(row["data_type"]) == "bigint"
+
+
 def migrate_postgres(conn: PostgresConnection) -> None:
     conn.executescript(_POSTGRES_SCHEMA)
     conn.commit()
     # These columns were originally created as plain INTEGER; a real .com
     # zone file's source_size (~4.8GB) overflows Postgres's 32-bit int range
     # (max ~2.1GB), something SQLite's flexible typing never caught. Widening
-    # is a safe, lossless conversion (existing values fit fine into BIGINT),
-    # so this always runs rather than only guarding for a missing column.
-    conn.executescript("""
-        ALTER TABLE zones ALTER COLUMN source_size TYPE BIGINT;
-        ALTER TABLE shards ALTER COLUMN byte_offset TYPE BIGINT;
-        ALTER TABLE shards ALTER COLUMN total_bytes TYPE BIGINT;
-        ALTER TABLE pages ALTER COLUMN html_archive_offset TYPE BIGINT;
-        ALTER TABLE pages ALTER COLUMN html_archive_length TYPE BIGINT;
-        ALTER TABLE pages ALTER COLUMN raw_html_bytes TYPE BIGINT;
-        ALTER TABLE pages ALTER COLUMN compressed_html_bytes TYPE BIGINT;
-        ALTER TABLE html_blobs ALTER COLUMN archive_offset TYPE BIGINT;
-        ALTER TABLE html_blobs ALTER COLUMN archive_length TYPE BIGINT;
-        ALTER TABLE html_blobs ALTER COLUMN raw_bytes TYPE BIGINT;
-    """)
-    conn.commit()
+    # is a safe, lossless conversion, but `ALTER COLUMN TYPE` takes an
+    # ACCESS EXCLUSIVE lock on the table even when the type already matches --
+    # with a live crawler continuously writing to `pages`, re-running this
+    # unconditionally on every connect() starves ordinary reads (confirmed
+    # live: this is why the dashboard's own page-count query was hanging).
+    # Checking the catalog first means the common case, already widened,
+    # only costs a metadata lookup rather than an exclusive table lock.
+    to_widen = [
+        (table, column)
+        for table, column in _BIGINT_COLUMNS
+        if not _already_bigint(conn, table, column)
+    ]
+    if to_widen:
+        conn.executescript(
+            "".join(
+                f"ALTER TABLE {table} ALTER COLUMN {column} TYPE BIGINT;\n"
+                for table, column in to_widen
+            )
+        )
+        conn.commit()
 
 
 def migrate(conn: sqlite3.Connection) -> None:
