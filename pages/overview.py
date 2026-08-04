@@ -138,15 +138,16 @@ master_metric_columns = st.columns(len(view_totals))
 for column, (label, total) in zip(master_metric_columns, view_totals.items()):
     column.metric(label, f"{total:,}")
 
-selected_bucket_name = st.segmented_control(
-    "Company table",
+st.tabs(
     list(view_totals),
     default="Investable",
-    label_visibility="collapsed",
-    width="stretch",
-    key="overview_master_view",
+    key="overview_master_tabs",
+    on_change="rerun",
 )
-selected_bucket_name = selected_bucket_name or "Investable"
+selected_bucket_name = st.session_state.get(
+    "overview_master_tabs",
+    "Investable",
+)
 master_sort_col, master_rows_col, master_status_col = st.columns([2.5, 1, 2])
 if selected_bucket_name in {"Yes", "No"}:
     master_sort = master_sort_col.selectbox(
