@@ -32,7 +32,7 @@ CLASSIFICATION_DB = Path(
         str(DATA / "classifications.sqlite3"),
     )
 ).expanduser().resolve()
-MODEL_VERSION = "glasswing-local-v4-venture-quality"
+MODEL_VERSION = "glasswing-local-v5-refined-buckets"
 CLASSIFICATION_DATABASE_ENV_VARS = (
     "CLASSIFICATION_DATABASE_URL",
     "DATABASE_URL",

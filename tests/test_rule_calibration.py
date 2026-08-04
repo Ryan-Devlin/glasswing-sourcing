@@ -120,6 +120,20 @@ class RuleCalibrationTests(unittest.TestCase):
         self.assertGreaterEqual(len(evidence), 2)
         self.assertFalse(generic)
 
+    def test_generic_governance_terms_do_not_fake_high_conviction(self):
+        matched, _ = high_conviction_fit_assessment(
+            "Enterprise observability, guardrails, and governance for AI."
+        )
+        self.assertFalse(matched)
+
+    def test_vertical_visual_ai_bundle_is_high_conviction(self):
+        matched, evidence = high_conviction_fit_assessment(
+            "Visual AI agents provide continuous vision for production line "
+            "monitoring and expert-guided root cause analysis."
+        )
+        self.assertTrue(matched)
+        self.assertGreaterEqual(len(evidence), 3)
+
     def test_domain_sales_pitch_is_hard_rejection_evidence(self):
         text = (
             "3DScanner.AI & 3DScans.AI Domain Pair For Sale. "
@@ -208,6 +222,43 @@ class RuleCalibrationTests(unittest.TestCase):
         self.assertEqual(bucket, "priority")
         self.assertEqual(reason, "venture_quality_investable")
 
+    def test_trusted_high_conviction_fit_is_not_ignored_by_router(self):
+        bucket, reason = route_company(
+            is_parked=False,
+            is_coming=False,
+            is_agency=False,
+            is_consumer_junk=False,
+            page_error="",
+            page_status=200,
+            location_status="UNKNOWN",
+            maturity_risk=0,
+            qualified_for_llm=False,
+            score=18,
+            potential_glasswing_fit=False,
+            high_conviction_fit=True,
+            substantive_no_fit_evidence=True,
+        )
+        self.assertEqual(bucket, "priority")
+        self.assertEqual(reason, "trusted_high_conviction_product_fit")
+
+    def test_high_conviction_never_overrides_explicit_disqualifier(self):
+        bucket, reason = route_company(
+            is_parked=False,
+            is_coming=False,
+            is_agency=True,
+            is_consumer_junk=False,
+            page_error="",
+            page_status=200,
+            location_status="UNKNOWN",
+            maturity_risk=0,
+            qualified_for_llm=False,
+            score=90,
+            potential_glasswing_fit=True,
+            high_conviction_fit=True,
+        )
+        self.assertEqual(bucket, "reject")
+        self.assertEqual(reason, "agency_or_consultancy")
+
     def test_venture_quality_requires_wedge_and_moat_for_investable(self):
         text = (
             "Purpose-built cybersecurity platform for security teams. "
@@ -228,6 +279,44 @@ class RuleCalibrationTests(unittest.TestCase):
         self.assertTrue(profile["wedge_present"])
         self.assertTrue(profile["moat_present"])
         self.assertTrue(profile["investable_ready"])
+
+    def test_frontier_technical_moat_can_substitute_for_wedge_copy(self):
+        text = (
+            "Agent security protocol for enterprise security teams. "
+            "Our deployed platform uses MPC co-signing and programmable "
+            "guardrails to enforce policies for autonomous agents on every "
+            "wallet and chain. Open protocol, API documentation, and demo."
+        )
+        _, pillar, _, counts = score_text(text)
+        from filter import glasswing_dimensions
+
+        profile = venture_quality_assessment(
+            text,
+            pillar=pillar,
+            counts=counts,
+            dimensions=glasswing_dimensions(text),
+        )
+        self.assertTrue(profile["moat_present"])
+        self.assertTrue(profile["frontier_technical_wedge"])
+        self.assertTrue(profile["investable_ready"])
+
+    def test_generic_enterprise_positioning_does_not_consume_review(self):
+        text = (
+            "Enterprise AI operations platform for financial services. "
+            "Our software provides data insights and workflow automation "
+            "for advisors, asset managers, and operations teams. Book a demo."
+        )
+        _, pillar, _, counts = score_text(text)
+        from filter import glasswing_dimensions
+
+        profile = venture_quality_assessment(
+            text,
+            pillar=pillar,
+            counts=counts,
+            dimensions=glasswing_dimensions(text),
+        )
+        self.assertFalse(profile["moat_present"])
+        self.assertFalse(profile["reviewable"])
 
     def test_generic_ai_slop_does_not_enter_review(self):
         text = (

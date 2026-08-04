@@ -1766,63 +1766,86 @@ def high_conviction_fit_assessment(text: str) -> tuple[bool, list[str]]:
     platform, API, security, workflow, or AI agent never qualify on their own.
     """
     leading = clean(text).lower()[:3000]
+    # Every bundle has an anchor phrase plus a minimum number of total hits.
+    # Requiring the anchor prevents generic combinations such as
+    # "observability + guardrails + governance" from becoming Investable.
     bundles = [
         (
+            ["functional safety"],
             ["functional safety", "certifiable safety"],
             2,
         ),
         (
+            ["evaluation infrastructure"],
             ["evaluation infrastructure", "continuous evals",
              "reproducible evaluation"],
             2,
         ),
         (
+            ["satellite and aerial imagery", "structured world models"],
             ["satellite and aerial imagery", "structured world models",
              "geospatial intelligence"],
             2,
         ),
         (
+            ["physics-driven ai", "pcb layout"],
             ["physics-driven ai", "pcb layout", "fabrication-ready"],
             2,
         ),
         (
+            ["ai gateway"],
             ["ai gateway", "observability", "guardrails",
              "prompt management", "governance"],
             3,
         ),
         (
+            ["ai infrastructure and workloads", "ai factories"],
             ["ai infrastructure and workloads", "reliability",
              "ai factories", "gpus", "accelerators", "uptime",
              "utilization"],
             3,
         ),
         (
-            ["distill", "private", "purpose-built models",
-             "own environment"],
+            ["distill", "distills", "model distillation"],
+            ["distill", "distills", "model distillation", "private",
+             "purpose-built models", "own environment"],
             3,
         ),
         (
+            ["ai agents build", "prompt your ideas"],
             ["build websites", "web apps", "end-to-end software",
              "prompt your ideas", "ai agents build"],
             3,
         ),
         (
+            ["engagement intelligence"],
             ["engagement intelligence", "recognition and rewards",
              "goals and reviews", "hris", "performance"],
             3,
         ),
         (
+            ["recipe formulation"],
             ["recipe formulation", "food innovation",
              "product development", "r&d teams", "consumer acceptance"],
             3,
         ),
         (
+            ["delivery management"],
             ["delivery management", "dispatching", "delivery dispatch",
              "reputation management", "customer experience"],
             3,
         ),
+        (
+            ["production line monitoring", "visual ai agents"],
+            ["production line monitoring", "visual ai agents",
+             "root cause analysis", "overall equipment effectiveness",
+             "continuous vision", "quality inspection"],
+            3,
+        ),
     ]
-    for terms, minimum in bundles:
+    for anchors, terms, minimum in bundles:
+        if not phrase_occurrences(leading, anchors):
+            continue
         hits = phrase_occurrences(leading, terms)
         if len(hits) >= minimum:
             return True, hits
@@ -1945,10 +1968,20 @@ def venture_quality_assessment(
         + moat_score * 0.25
         + founder_score * 0.10
     )
+    # Frontier companies often explain the technical edge in detail while
+    # omitting the marketing language that our generic wedge detector expects.
+    # A demonstrated moat can substitute for that wording, but only for a real
+    # product in a frontier pillar with a strong combined quality score.
+    frontier_technical_wedge = bool(
+        frontier_pillar
+        and moat_present
+        and technical_count >= 1
+        and overall_score >= 48
+    )
     investable_ready = bool(
         thesis_fit
         and product_real
-        and wedge_present
+        and (wedge_present or frontier_technical_wedge)
         and (
             moat_present
             or high_conviction_fit
@@ -1961,16 +1994,28 @@ def venture_quality_assessment(
         and overall_score >= 48
         and not slop_risk
     )
+    # Review is expensive human attention. A product must show more than a
+    # thesis keyword and generic enterprise positioning: preserve candidates
+    # with a moat/founder signal, a curated learned-positive pattern, or a
+    # concrete wedge supported by an additional technical/problem signal.
+    review_quality_signal = bool(
+        high_conviction_fit
+        or moat_present
+        or founder_strength
+        or (
+            wedge_present
+            and (
+                technical_count >= 2
+                or defensibility_count >= 1
+                or problem_count >= 1
+            )
+        )
+    )
     reviewable = bool(
         thesis_fit
         and product_real
         and not slop_risk
-        and (
-            wedge_score >= 25
-            or moat_present
-            or founder_strength
-            or high_conviction_fit
-        )
+        and review_quality_signal
     )
 
     return {
@@ -1988,6 +2033,8 @@ def venture_quality_assessment(
         "slop_risk": slop_risk,
         "investable_ready": investable_ready,
         "reviewable": reviewable,
+        "frontier_technical_wedge": frontier_technical_wedge,
+        "review_quality_signal": review_quality_signal,
         "product_evidence": product_evidence[:10],
         "wedge_evidence": wedge_evidence[:10],
         "moat_evidence": list(dict.fromkeys(
@@ -2868,12 +2915,18 @@ def route_company(
         return "reject", "investor_or_venture_studio"
     if is_commodity_wrapper:
         return "reject", "commodity_ai_wrapper_or_service"
-    if substantive_no_fit_evidence:
-        return "insufficient", "substantive_site_no_glasswing_fit_signals"
-
     # A legitimate founder-controlled minimal site is preserved separately.
     if is_coming:
         return "coming_soon", "verified_prelaunch_watch"
+
+    # These narrow, multi-phrase product bundles come from trusted human Yes
+    # examples. Explicit exclusions above still win, but once a clean site
+    # matches one of them the router should not discard the signal.
+    if high_conviction_fit:
+        return "priority", "trusted_high_conviction_product_fit"
+
+    if substantive_no_fit_evidence:
+        return "insufficient", "substantive_site_no_glasswing_fit_signals"
 
     # Investable requires a credible product, wedge, and moat/technical edge.
     if strong_multidimensional_fit and score >= 45:
@@ -3457,6 +3510,12 @@ async def process(
         "venture_founder_score": venture_quality["founder_score"],
         "venture_investable_ready": venture_quality["investable_ready"],
         "venture_reviewable": venture_quality["reviewable"],
+        "venture_frontier_technical_wedge": venture_quality[
+            "frontier_technical_wedge"
+        ],
+        "venture_review_quality_signal": venture_quality[
+            "review_quality_signal"
+        ],
         "venture_wedge_present": venture_quality["wedge_present"],
         "venture_moat_present": venture_quality["moat_present"],
         "venture_founder_strength": venture_quality["founder_strength"],
