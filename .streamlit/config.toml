@@ -1,3 +1,13 @@
+[client]
+# main.py uses st.navigation(..., position="top"), but Streamlit's classic
+# auto-sidebar-from-pages-directory behavior (this option's default) still
+# applies whenever a pages/ directory exists -- on a direct/fresh URL load
+# (not client-side routed from within the app), the client hydrates with
+# that default sidebar before/instead of the custom top nav taking over,
+# and it doesn't self-correct for the rest of that session. Force it off
+# so the top nav is the only navigation, unconditionally.
+showSidebarNavigation = false
+
 [theme]
 base = "light"
 
