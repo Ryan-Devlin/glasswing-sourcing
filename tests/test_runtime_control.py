@@ -1,8 +1,28 @@
+import os
 import subprocess
 import sys
 
+import pytest
+
 import runtime_control
 from common import atomic_write_json
+
+
+def _live_postgres_url() -> str | None:
+    """Same opt-in pattern as test_classification_store.py: skip unless a
+    reachable TEST_DATABASE_URL is set, so the normal run never depends on a
+    live database."""
+    url = os.getenv("TEST_DATABASE_URL", "").strip()
+    if not url:
+        return None
+    try:
+        import psycopg
+
+        with psycopg.connect(url, connect_timeout=5):
+            pass
+    except Exception:
+        return None
+    return url
 
 
 def _spawn_detached_process(seconds: int = 30) -> int:
@@ -68,12 +88,70 @@ def test_cloud_runtime_rejects_local_process_mutation(
     )
     monkeypatch.setattr(runtime_control, "RUNTIME_MODE", "cloud")
 
+    monkeypatch.delenv(
+        runtime_control.RUNTIME_CONTROL_DATABASE_ENV_VAR, raising=False
+    )
     try:
         runtime_control.request_services({"pipeline": True})
     except RuntimeError as exc:
-        assert "delegated" in str(exc)
+        assert "shared control store" in str(exc)
     else:
         raise AssertionError("cloud mode accepted a local process mutation")
+
+
+@pytest.mark.skipif(
+    _live_postgres_url() is None,
+    reason="set TEST_DATABASE_URL to a reachable Postgres to run this",
+)
+def test_postgres_control_store_persists_and_merges_across_connections(
+    monkeypatch,
+):
+    """Opt-in parity check: the shared cloud control store behaves like the
+    local JSON file -- persists desired state, merges rather than clobbers,
+    and is readable from a fresh connection (standing in for a second
+    service process). Cleans up its own row before and after."""
+    url = _live_postgres_url()
+    monkeypatch.setenv(runtime_control.RUNTIME_CONTROL_DATABASE_ENV_VAR, url)
+    monkeypatch.setattr(runtime_control, "RUNTIME_MODE", "cloud")
+
+    def _cleanup() -> None:
+        conn = runtime_control._connect_runtime_control()
+        try:
+            conn.execute(
+                "DELETE FROM worker_control WHERE service IN (?, ?, ?)",
+                runtime_control.SERVICES,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    _cleanup()
+    try:
+        assert runtime_control.control_backend_available() is True
+        initial = runtime_control.read_control()
+        assert initial["desired"] == {
+            "pipeline": False,
+            "ai_crawler": False,
+            "zone_crawler": False,
+        }
+
+        runtime_control.request_services(
+            {"ai_crawler": True},
+            requested_by="unit_test_postgres",
+        )
+        updated = runtime_control.request_services(
+            {"pipeline": True},
+            requested_by="unit_test_postgres",
+        )
+        assert updated["desired"]["ai_crawler"] is True
+        assert updated["desired"]["pipeline"] is True
+        assert updated["desired"]["zone_crawler"] is False
+        assert updated["requested_by"] == "unit_test_postgres"
+
+        reread = runtime_control.read_control()
+        assert reread["desired"] == updated["desired"]
+    finally:
+        _cleanup()
 
 
 def test_runtime_status_does_not_trust_stale_supervisor_state(

@@ -22,10 +22,18 @@ from common import (
     STREAM_STOP,
     atomic_write_json,
 )
+from db_backend import connect_postgres, using_postgres
 
 
 RUNTIME_MODE = os.getenv("GLASSWING_RUNTIME_MODE", "local").strip().lower()
 CONTROL_PATH = DATA / "runtime_control.json"
+# Deliberately its own env var, not any subsystem's *_DATABASE_URL -- worker
+# desired-state isn't "a subsystem", it's cross-cutting ops coordination that
+# every service (web + however many worker services) needs to reach the same
+# copy of. On Railway's single-Postgres-instance setup this can be the exact
+# same connection string as the others, just its own schema, same as every
+# other Postgres-backed piece in this app.
+RUNTIME_CONTROL_DATABASE_ENV_VAR = "RUNTIME_CONTROL_DATABASE_URL"
 SUPERVISOR_PID = LOGS / "worker_supervisor.pid"
 SUPERVISOR_STATUS = LOGS / "worker_supervisor_status.json"
 SUPERVISOR_LOG = LOGS / "worker_supervisor.log"
@@ -93,7 +101,72 @@ def service_pid(service: str) -> int:
     return pid_from_file(path)
 
 
+def _connect_runtime_control():
+    # A fresh Postgres control store gets the modern schema directly -- there
+    # is no pre-existing local installation to carry forward, unlike the
+    # SQLite/JSON path. Own "runtime" schema so it can't collide with
+    # classification_store/pipeline/ai_search/zone_universe, which all
+    # likely share the same physical Postgres instance on Railway today.
+    conn = connect_postgres(env_var=RUNTIME_CONTROL_DATABASE_ENV_VAR)
+    conn.execute("CREATE SCHEMA IF NOT EXISTS runtime")
+    conn.commit()
+    conn.execute("SET search_path TO runtime, public")
+    # Defense in depth, same as every other Postgres-backed subsystem here
+    # (see continuous_pipeline._connect_db_postgres): the lock is free when
+    # uncontended, so there's no reason to skip it even though this store is
+    # currently only touched by one caller (System Health) at a time.
+    conn.execute("SELECT pg_advisory_lock(hashtext(?))", ("runtime_control_migration",))
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS worker_control (
+                service TEXT PRIMARY KEY,
+                desired BOOLEAN NOT NULL DEFAULT FALSE,
+                updated_at TEXT NOT NULL DEFAULT '',
+                requested_by TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        conn.commit()
+    finally:
+        conn.execute(
+            "SELECT pg_advisory_unlock(hashtext(?))", ("runtime_control_migration",)
+        )
+    return conn
+
+
+def control_backend_available() -> bool:
+    """Whether *setting* desired state is possible right now.
+
+    Local mode always can (a local JSON file needs no setup). Cloud mode
+    can only if a shared store every service can reach is configured --
+    the old local-file store doesn't cross a Railway service boundary."""
+    return RUNTIME_MODE == "local" or using_postgres(RUNTIME_CONTROL_DATABASE_ENV_VAR)
+
+
 def read_control() -> dict[str, object]:
+    if using_postgres(RUNTIME_CONTROL_DATABASE_ENV_VAR):
+        conn = _connect_runtime_control()
+        try:
+            rows = conn.execute(
+                "SELECT service, desired, updated_at, requested_by FROM worker_control"
+            ).fetchall()
+        finally:
+            conn.close()
+        by_service = {row["service"]: row for row in rows}
+        latest = max(rows, key=lambda row: row["updated_at"], default=None)
+        return {
+            "schema_version": 1,
+            "runtime_mode": RUNTIME_MODE,
+            "desired": {
+                service: bool(by_service[service]["desired"])
+                if service in by_service
+                else False
+                for service in SERVICES
+            },
+            "updated_at": latest["updated_at"] if latest else "",
+            "requested_by": latest["requested_by"] if latest else "",
+        }
     try:
         payload = json.loads(CONTROL_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -118,21 +191,43 @@ def request_services(
     *,
     requested_by: str = "system_health",
 ) -> dict[str, object]:
-    if RUNTIME_MODE != "local":
+    if not control_backend_available():
         raise RuntimeError(
-            "Process controls are delegated to the cloud runtime."
+            "No shared control store is configured for cloud mode -- set "
+            f"{RUNTIME_CONTROL_DATABASE_ENV_VAR}."
         )
+    for service in desired:
+        if service not in SERVICES:
+            raise ValueError(f"Unknown service: {service}")
+    now = datetime.now(timezone.utc).isoformat()
+    if using_postgres(RUNTIME_CONTROL_DATABASE_ENV_VAR):
+        conn = _connect_runtime_control()
+        try:
+            for service, value in desired.items():
+                conn.execute(
+                    """
+                    INSERT INTO worker_control (service, desired, updated_at, requested_by)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT (service) DO UPDATE SET
+                        desired = EXCLUDED.desired,
+                        updated_at = EXCLUDED.updated_at,
+                        requested_by = EXCLUDED.requested_by
+                    """,
+                    (service, bool(value), now, requested_by),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        return read_control()
     current = read_control()
     merged = dict(current["desired"])
     for service, value in desired.items():
-        if service not in SERVICES:
-            raise ValueError(f"Unknown service: {service}")
         merged[service] = bool(value)
     payload = {
         "schema_version": 1,
         "runtime_mode": RUNTIME_MODE,
         "desired": merged,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": now,
         "requested_by": requested_by,
     }
     atomic_write_json(CONTROL_PATH, payload)
