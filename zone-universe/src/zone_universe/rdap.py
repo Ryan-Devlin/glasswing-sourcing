@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Callable
 
 from .config import DATABASE
-from .database import connect, utc_now
+from .database import PostgresConnection, connect, utc_now
 
 
 DOMAIN = re.compile(
@@ -221,6 +221,25 @@ def queue_registrations(
     now = utc_now()
     queued = 0
     with connect(database) as conn:
+        # SQLite's max() is a scalar function when given 2+ args; Postgres's
+        # max() is aggregate-only and has no such overload -- GREATEST() is
+        # its scalar equivalent. Never reached until now: this path only
+        # runs once the crawl loop's registration backfill actually fires.
+        greatest = "GREATEST" if isinstance(conn, PostgresConnection) else "max"
+        upsert_sql = f"""
+            INSERT INTO registration_queue(
+                domain,tld,priority,status,attempts,next_attempt_at,
+                last_error,queued_at,updated_at
+            ) VALUES (?,?,?,'pending',0,'','',?,?)
+            ON CONFLICT(domain) DO UPDATE SET
+                priority={greatest}(registration_queue.priority,excluded.priority),
+                status=CASE
+                    WHEN registration_queue.status='complete'
+                    THEN registration_queue.status
+                    ELSE 'pending'
+                END,
+                updated_at=excluded.updated_at
+            """
         for domain in normalized:
             cached = conn.execute(
                 """
@@ -236,20 +255,7 @@ def queue_registrations(
                 (domain,),
             ).fetchone()
             cursor = conn.execute(
-                """
-                INSERT INTO registration_queue(
-                    domain,tld,priority,status,attempts,next_attempt_at,
-                    last_error,queued_at,updated_at
-                ) VALUES (?,?,?,'pending',0,'','',?,?)
-                ON CONFLICT(domain) DO UPDATE SET
-                    priority=max(registration_queue.priority,excluded.priority),
-                    status=CASE
-                        WHEN registration_queue.status='complete'
-                        THEN registration_queue.status
-                        ELSE 'pending'
-                    END,
-                    updated_at=excluded.updated_at
-                """,
+                upsert_sql,
                 (
                     domain,
                     domain.rsplit(".", 1)[-1],
