@@ -257,21 +257,33 @@ def health_report(*, include_integrity: bool = False) -> dict[str, object]:
         "Status": "Healthy" if free_gb >= 20 else "Warning",
         "Detail": f"{free_gb:.1f} GB free",
     })
-    pipeline_running = bool(
-        runtime.get("services", {}).get("pipeline", {}).get("running", False)
-    )
-    processing_is_healthy = (
-        counts["pipeline_processing"] == 0 or pipeline_running
-    )
-    checks.append({
-        "Check": "Stuck pipeline claims",
-        "Status": "Healthy" if processing_is_healthy else "Warning",
-        "Detail": (
-            f"{counts['pipeline_processing']:,} actively processing"
-            if pipeline_running
-            else f"{counts['pipeline_processing']:,} left processing"
-        ),
-    })
+    pipeline_running_raw = runtime.get("services", {}).get("pipeline", {}).get("running")
+    if pipeline_running_raw is None:
+        # Cloud mode: no local PID to check, so we can't tell "actively
+        # processing" from "stuck" this way. Don't turn a normal nonzero
+        # claim count into a permanent false Warning -- see runtime_status().
+        checks.append({
+            "Check": "Stuck pipeline claims",
+            "Status": "Healthy",
+            "Detail": (
+                f"{counts['pipeline_processing']:,} in progress "
+                "(cloud-managed, liveness unknown)"
+            ),
+        })
+    else:
+        pipeline_running = bool(pipeline_running_raw)
+        processing_is_healthy = (
+            counts["pipeline_processing"] == 0 or pipeline_running
+        )
+        checks.append({
+            "Check": "Stuck pipeline claims",
+            "Status": "Healthy" if processing_is_healthy else "Warning",
+            "Detail": (
+                f"{counts['pipeline_processing']:,} actively processing"
+                if pipeline_running
+                else f"{counts['pipeline_processing']:,} left processing"
+            ),
+        })
     valid_snapshots = sum(row["valid"] for row in snapshots)
     checks.append({
         "Check": "Manual truth backup",
