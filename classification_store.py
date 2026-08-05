@@ -1414,11 +1414,22 @@ _CRAWLED_CORPUS_CACHE_SECONDS = 10.0
 _crawled_corpus_cache: dict[str, tuple[float, list[str]]] = {}
 
 
-def _crawled_corpus_domains(search_db: Path) -> list[str]:
+def _crawled_corpus_domains(
+    search_db: Path,
+    *,
+    connect_fn=None,
+) -> list[str]:
     """Domains with crawl evidence in a corpus DB (.AI search / Zone Universe).
 
-    Those corpora stay on SQLite in every deployment mode for now, so this is
-    a plain sqlite3 read regardless of which backend classifications live in.
+    Those corpora predate a shared classification backend and used to always
+    stay on SQLite regardless of it -- that stopped being true once ai_search
+    and zone_universe each got their own optional Postgres backend, but nothing
+    here was updated to match. In production both moved to Postgres and their
+    local SQLite files were correctly identified as unused and removed, which
+    made this silently return nothing (not error) -- "Bucketed records: 0"
+    despite thousands actually screened. Callers that are Postgres-backed
+    should pass their own subsystem's ``connect()`` (already Postgres-aware);
+    callers still purely on SQLite can omit it for the original behavior.
 
     A single page render can call this several times over (once per bucket
     tab, since Streamlit executes every ``st.tabs()`` block on each rerun) --
@@ -1430,13 +1441,25 @@ def _crawled_corpus_domains(search_db: Path) -> list[str]:
     now = time.monotonic()
     if cached is not None and now - cached[0] < _CRAWLED_CORPUS_CACHE_SECONDS:
         return cached[1]
-    with sqlite3.connect(f"file:{search_db}?mode=ro", uri=True, timeout=30) as conn:
-        domains = [
-            str(row[0])
-            for row in conn.execute(
-                "SELECT domain FROM domains WHERE last_crawled_at IS NOT NULL"
-            )
-        ]
+    if connect_fn is not None:
+        conn = connect_fn(search_db, read_only=True)
+        try:
+            domains = [
+                str(row["domain"])
+                for row in conn.execute(
+                    "SELECT domain FROM domains WHERE last_crawled_at IS NOT NULL"
+                )
+            ]
+        finally:
+            conn.close()
+    else:
+        with sqlite3.connect(f"file:{search_db}?mode=ro", uri=True, timeout=30) as conn:
+            domains = [
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT domain FROM domains WHERE last_crawled_at IS NOT NULL"
+                )
+            ]
     _crawled_corpus_cache[cache_key] = (now, domains)
     return domains
 
@@ -1444,13 +1467,15 @@ def _crawled_corpus_domains(search_db: Path) -> list[str]:
 def corpus_bucket_counts(
     search_db: Path,
     path: Path | str = CLASSIFICATION_DB,
+    *,
+    connect_fn=None,
 ) -> dict[str, int]:
     if not using_classification_postgres() and not Path(path).exists():
         return {}
-    if not search_db.exists():
+    if connect_fn is None and not search_db.exists():
         return {}
     if using_classification_postgres():
-        domains = set(_crawled_corpus_domains(search_db))
+        domains = set(_crawled_corpus_domains(search_db, connect_fn=connect_fn))
         if not domains:
             return {}
         counts: dict[str, int] = {}
@@ -1489,9 +1514,10 @@ def query_corpus_classifications(
     offset: int = 0,
     sort: str = "Priority: high to low",
     path: Path | str = CLASSIFICATION_DB,
+    connect_fn=None,
 ) -> list[dict[str, object]]:
     bucket_values = list(dict.fromkeys(str(bucket) for bucket in buckets))
-    if not bucket_values or not search_db.exists():
+    if not bucket_values or (connect_fn is None and not search_db.exists()):
         return []
     if not using_classification_postgres() and not Path(path).exists():
         return []
@@ -1505,7 +1531,7 @@ def query_corpus_classifications(
     bounded_limit = max(1, min(int(limit), 250))
     bounded_offset = max(0, int(offset))
     if using_classification_postgres():
-        domains = set(_crawled_corpus_domains(search_db))
+        domains = set(_crawled_corpus_domains(search_db, connect_fn=connect_fn))
         if not domains:
             return []
         # Filter by the (small) bucket list in SQL, then by domain membership

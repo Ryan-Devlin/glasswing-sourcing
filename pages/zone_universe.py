@@ -700,7 +700,7 @@ with tabs[1]:
         crawled_only=True,
         search_db_env_var=ZONE_UNIVERSE_DATABASE_ENV_VAR,
     )
-    raw_bucket_counts = corpus_bucket_counts(DATABASE)
+    raw_bucket_counts = corpus_bucket_counts(DATABASE, connect_fn=connect)
     bucket_counts = {
         "Investable": raw_bucket_counts.get("priority", 0),
         "Coming Soon": raw_bucket_counts.get("coming_soon", 0),
@@ -813,6 +813,7 @@ with tabs[1]:
                 limit=int(page_size),
                 offset=(current_page - 1) * int(page_size),
                 sort=sort_choice,
+                connect_fn=connect,
             )
             selected_bucket = pd.DataFrame(rows)
             if selected_bucket.empty:

@@ -640,3 +640,78 @@ def test_query_corpus_classifications_uses_one_query_regardless_of_corpus_size(
 
     assert len(fake_conn.queries) == 1
     assert [row["domain"] for row in rows] == ["crawled-0.ai"]
+
+
+class _FakeCorpusPostgresConnection:
+    """Fakes the ai_search/zone_universe connect()'s Postgres return value:
+    a connection whose rows support dict-style access and that must be
+    closed explicitly (unlike the classification store's context-managed
+    connect_store)."""
+
+    def __init__(self, rows):
+        self._rows = rows
+        self.closed = False
+
+    def execute(self, _sql):
+        return self._rows
+
+    def close(self):
+        self.closed = True
+
+
+def test_crawled_corpus_domains_uses_connect_fn_when_local_file_is_absent(
+    tmp_path, monkeypatch
+):
+    # Reproduces the exact production bug: ai_search/zone_universe moved to
+    # their own Postgres backend, and the local SQLite corpus file was
+    # correctly identified as unused and deleted -- but corpus_bucket_counts
+    # and query_corpus_classifications still assumed a local file and
+    # silently returned nothing ("Bucketed records: 0") instead of erroring.
+    classification_store._crawled_corpus_cache.clear()
+    missing_corpus_db = tmp_path / "does-not-exist.sqlite3"
+    assert not missing_corpus_db.exists()
+
+    fake_corpus_conn = _FakeCorpusPostgresConnection([
+        {"domain": "crawled-0.ai"},
+        {"domain": "crawled-1.ai"},
+    ])
+    connect_calls = []
+
+    def fake_connect_fn(path, *, read_only=False):
+        connect_calls.append((path, read_only))
+        return fake_corpus_conn
+
+    domains = classification_store._crawled_corpus_domains(
+        missing_corpus_db, connect_fn=fake_connect_fn
+    )
+
+    assert domains == ["crawled-0.ai", "crawled-1.ai"]
+    assert connect_calls == [(missing_corpus_db, True)]
+    assert fake_corpus_conn.closed is True
+
+
+def test_corpus_bucket_counts_works_via_connect_fn_without_a_local_file(
+    tmp_path, monkeypatch
+):
+    classification_store._crawled_corpus_cache.clear()
+    missing_corpus_db = tmp_path / "does-not-exist.sqlite3"
+
+    fake_corpus_conn = _FakeCorpusPostgresConnection([
+        {"domain": "crawled-0.ai"},
+    ])
+    fake_classification_conn = _RecordingPostgresConnection([
+        {"domain": "crawled-0.ai", "routing_bucket": "priority"},
+        {"domain": "not-crawled.ai", "routing_bucket": "priority"},
+    ])
+    monkeypatch.setattr(
+        classification_store, "using_classification_postgres", lambda: True
+    )
+    monkeypatch.setattr(
+        classification_store, "connect_store", lambda *a, **k: fake_classification_conn
+    )
+
+    counts = classification_store.corpus_bucket_counts(
+        missing_corpus_db, connect_fn=lambda path, **k: fake_corpus_conn
+    )
+
+    assert counts == {"priority": 1}

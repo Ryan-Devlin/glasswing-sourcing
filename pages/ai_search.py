@@ -26,6 +26,7 @@ if str(SEARCH_SRC) not in sys.path:
     sys.path.insert(0, str(SEARCH_SRC))
 
 from ai_search.database import AI_SEARCH_DATABASE_ENV_VAR
+from ai_search.database import connect as ai_search_connect
 from ai_search.og_bridge import (
     crawler_state,
     enqueue_for_screening,
@@ -332,7 +333,7 @@ with tabs[1]:
     pipeline = pipeline_status_for_corpus(
         SEARCH_DB, QUEUE_DB, crawled_only=True
     )
-    raw_bucket_counts = corpus_bucket_counts(SEARCH_DB)
+    raw_bucket_counts = corpus_bucket_counts(SEARCH_DB, connect_fn=ai_search_connect)
     bucket_counts = {
         "Investable": raw_bucket_counts.get("priority", 0),
         "Coming Soon": raw_bucket_counts.get("coming_soon", 0),
@@ -432,6 +433,7 @@ with tabs[1]:
                     limit=int(bucket_page_size),
                     offset=(current_page - 1) * int(bucket_page_size),
                     sort=sort_choice,
+                    connect_fn=ai_search_connect,
                 )
                 selected_bucket = pd.DataFrame(selected_rows)
                 if (
