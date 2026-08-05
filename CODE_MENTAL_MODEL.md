@@ -173,5 +173,5 @@ ledger determines whether a row is trusted for default training.
 - Change trusted export format and split policy in `training_data.py`.
 - Add persistence invariants to `common.py`.
 
-Whenever routing changes, add a regression test under `tests/` and update
-`VERIFICATION.json`. Do not repair behavior by rewriting historical CSVs.
+Whenever routing changes, add a regression test under `tests/`. Do not
+repair behavior by rewriting historical CSVs.
