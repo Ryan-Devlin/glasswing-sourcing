@@ -274,9 +274,18 @@ def health_report(*, include_integrity: bool = False) -> dict[str, object]:
             ),
         })
 
+    disk_total_bytes = shutil.disk_usage(DATA).total
+    free_ratio = free_gb / (disk_total_bytes / (1024**3)) if disk_total_bytes else 0.0
+    # A flat "20 GB free" threshold assumed a local disk with hundreds of GB
+    # to spare -- on a cloud volume provisioned at 5 GB total, that bar can
+    # never be met even at 0% used, so it was a permanent false Warning.
+    # Treat either a large absolute cushion or a healthy fraction of a small
+    # volume as fine.
     checks.append({
         "Check": "Free disk reserve",
-        "Status": "Healthy" if free_gb >= 20 else "Warning",
+        "Status": (
+            "Healthy" if free_gb >= 20 or free_ratio >= 0.15 else "Warning"
+        ),
         "Detail": f"{free_gb:.1f} GB free",
     })
     pipeline_running_raw = runtime.get("services", {}).get("pipeline", {}).get("running")

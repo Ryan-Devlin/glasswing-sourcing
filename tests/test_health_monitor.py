@@ -104,3 +104,49 @@ def test_postgres_backed_subsystem_checks_ping_instead_of_checking_local_file(
     for name in ("Pipeline queue", ".AI search database", "Zone database"):
         assert by_name[name]["Status"] == "Healthy"
         assert by_name[name]["Detail"] == "Connected (Postgres)"
+
+
+def _disk_check(report: dict) -> dict:
+    return next(row for row in report["checks"] if row["Check"] == "Free disk reserve")
+
+
+class _FakeDiskUsage:
+    def __init__(self, free_bytes: int, total_bytes: int):
+        self.free = free_bytes
+        self.total = total_bytes
+
+
+def test_disk_reserve_healthy_on_a_small_volume_with_plenty_free(monkeypatch):
+    """A 5 GB cloud volume with 4.5 GB free is obviously fine, but a flat
+    "20 GB free" threshold used to flag it Warning forever -- that bar can
+    never be met even at 0% used on a volume this size."""
+    _patch_common(monkeypatch, pipeline_running=None)
+    monkeypatch.setattr(
+        health_monitor.shutil,
+        "disk_usage",
+        lambda path: _FakeDiskUsage(free_bytes=4.5 * 1024**3, total_bytes=5 * 1024**3),
+    )
+    report = health_monitor.health_report()
+    assert _disk_check(report)["Status"] == "Healthy"
+
+
+def test_disk_reserve_warning_when_a_small_volume_is_actually_nearly_full(monkeypatch):
+    _patch_common(monkeypatch, pipeline_running=None)
+    monkeypatch.setattr(
+        health_monitor.shutil,
+        "disk_usage",
+        lambda path: _FakeDiskUsage(free_bytes=0.2 * 1024**3, total_bytes=5 * 1024**3),
+    )
+    report = health_monitor.health_report()
+    assert _disk_check(report)["Status"] == "Warning"
+
+
+def test_disk_reserve_healthy_on_a_large_local_disk(monkeypatch):
+    _patch_common(monkeypatch, pipeline_running=None)
+    monkeypatch.setattr(
+        health_monitor.shutil,
+        "disk_usage",
+        lambda path: _FakeDiskUsage(free_bytes=25 * 1024**3, total_bytes=500 * 1024**3),
+    )
+    report = health_monitor.health_report()
+    assert _disk_check(report)["Status"] == "Healthy"
