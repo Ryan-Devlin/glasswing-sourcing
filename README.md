@@ -131,8 +131,8 @@ most.
 
 Company review and search tables include a persistent **Hide** checkbox. Hide
 is only a shared view preference: it never deletes a company, changes its
-classification, or creates training data. Use **Hidden companies** on the Home
-page—or reveal hidden rows in the current table—to restore a company.
+classification, or creates training data. Reveal hidden rows inline in the
+current table to restore a company; there is no separate hidden-company view.
 
 Every manual move creates a timestamped, checksummed, human-only snapshot under
 `data/manual/snapshots`. The **System Health** top tab validates and restores
@@ -247,8 +247,8 @@ ranked evidence page.
 
 The crawl itself is staged. Every reachable domain starts with one homepage:
 
-- obvious parked, for-sale, prelaunch, hosting-placeholder, explicit
-  non-English, and low-value sites stop after that one retained page;
+- obvious parked, for-sale, hosting-placeholder, and low-value sites stop at
+  the homepage preflight and do not enter searchable storage;
 - ambiguous but plausible companies receive one evidence-page request;
 - strong company, product, or technical signals receive up to two;
 - every retained homepage still flows through the normal Glasswing classifier,
@@ -265,10 +265,16 @@ contains only explicit human Yes/No decisions and verified Glasswing portfolio
 positives. Python and LLM classifications may suggest a bucket, but cannot
 label their own output as training truth.
 
-An automatically Hard Denied domain keeps only its immutable source-inventory
-entry and a minimal queue deduplication marker. Its classification, searchable
-page, HTML payload, retry/registration data, and CSV exports are deleted. Run
-the complete maintenance pass with:
+Every fully screened site receives a final `glasswing_rating`. Automated
+Ghost, Hard Denied, slop-risk, and sub-25 low-signal outcomes are removed from
+classification, crawler, search, retry, registration, and export storage.
+Investable, Coming Soon, Needs Review, Potential Comp, and score-25+ ambiguous
+companies remain. A tiny `automated_exclusions` tombstone keeps only domain,
+reason, rating, source, and timestamp so future corpus imports cannot pay to
+crawl the same junk again. Raw HTML archival is off by default; retained
+companies keep compact searchable text and evidence. Explicit Yes/No labels
+and verified portfolio companies are mirrored into shared Postgres and are
+never automatically purged. Run the complete maintenance pass with:
 
 ```bash
 .venv/bin/python data_maintenance.py clean-all

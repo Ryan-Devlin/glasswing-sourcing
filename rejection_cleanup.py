@@ -18,7 +18,11 @@ from typing import Iterable
 from ai_search.database import AI_SEARCH_DATABASE_ENV_VAR
 from ai_search.database import connect as connect_ai_search
 from ai_search.database import index_page as index_ai_search_page
-from classification_store import CLASSIFICATION_DB, connect_store
+from classification_store import (
+    CLASSIFICATION_DB,
+    connect_store,
+    using_classification_postgres,
+)
 from common import (
     AI_SEARCH_DB,
     DATA,
@@ -26,20 +30,21 @@ from common import (
     ZONE_UNIVERSE_DB,
     stable_domain,
 )
-from db_backend import begin_immediate, using_postgres
+from db_backend import begin_immediate, connect_postgres, using_postgres
 from training_truth import protected_training_domains
 from zone_universe.database import ZONE_UNIVERSE_DATABASE_ENV_VAR
 from zone_universe.database import connect as connect_zone_universe
 
 
 ZONE_DB = ZONE_UNIVERSE_DB
+PIPELINE_DATABASE_ENV_VAR = "PIPELINE_DATABASE_URL"
 
 
 def automated_rejected_domains(
     path: Path | str = CLASSIFICATION_DB,
 ) -> set[str]:
     database = Path(path)
-    if not using_postgres() and not database.exists():
+    if not using_classification_postgres() and not database.exists():
         return set()
     protected = protected_training_domains()
     with connect_store(database, read_only=True) as conn:
@@ -179,6 +184,23 @@ def _delete_where(
     return removed
 
 
+def _sqlite_has_column(
+    conn: sqlite3.Connection,
+    table: str,
+    column: str,
+) -> bool:
+    return column in {
+        str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")
+    }
+
+
+def _sqlite_has_table(conn: sqlite3.Connection, table: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    ).fetchone() is not None
+
+
 def _filter_csv(path: Path, domains: set[str]) -> int:
     if not path.exists() or path.stat().st_size == 0:
         return 0
@@ -261,13 +283,14 @@ def purge_automated_rejections(
         "ai_page_rows": 0,
         "zone_page_rows": 0,
         "zone_auxiliary_rows": 0,
+        "orphan_blob_rows": 0,
         "csv_rows": 0,
     }
     if not selected:
         return result
 
     classification_path = Path(classification_db)
-    if using_postgres() or classification_path.exists():
+    if using_classification_postgres() or classification_path.exists():
         with connect_store(classification_path) as conn:
             begin_immediate(conn)
             result["classification_rows"] += _delete_where(
@@ -282,12 +305,34 @@ def purge_automated_rejections(
             conn.commit()
             # Postgres autovacuums on its own and can't run VACUUM inside a
             # transaction block; this manual pass is SQLite-only maintenance.
-            if vacuum and not using_postgres():
+            if vacuum and not using_classification_postgres():
                 conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                 conn.execute("VACUUM")
 
     queue_path = Path(queue_db)
-    if queue_path.exists():
+    if using_postgres(PIPELINE_DATABASE_ENV_VAR):
+        conn = connect_postgres(env_var=PIPELINE_DATABASE_ENV_VAR)
+        try:
+            conn.execute("SET search_path TO pipeline, public")
+            for batch in _chunks(selected):
+                marks = ",".join("?" for _ in batch)
+                cursor = conn.execute(
+                    """
+                    UPDATE domains SET
+                        status='discarded',
+                        classification='',
+                        last_error='',
+                        next_attempt_at=NULL
+                    WHERE domain IN (""" + marks + ")",
+                    batch,
+                )
+                result["queue_payloads_scrubbed"] += max(
+                    0, int(cursor.rowcount)
+                )
+            conn.commit()
+        finally:
+            conn.close()
+    elif queue_path.exists():
         with sqlite3.connect(queue_path, timeout=30) as conn:
             for batch in _chunks(selected):
                 marks = ",".join("?" for _ in batch)
@@ -307,7 +352,42 @@ def purge_automated_rejections(
             conn.commit()
 
     ai_path = Path(ai_search_db)
-    if ai_path.exists():
+    if using_postgres(AI_SEARCH_DATABASE_ENV_VAR):
+        conn = connect_ai_search("")
+        try:
+            for batch in _chunks(selected):
+                marks = ",".join("?" for _ in batch)
+                page_rows = conn.execute(
+                    "SELECT p.raw_html_hash FROM pages p "
+                    "JOIN domains d ON d.id=p.domain_id "
+                    f"WHERE d.domain IN ({marks})",
+                    batch,
+                ).fetchall()
+                hashes = sorted({
+                    str(row["raw_html_hash"])
+                    for row in page_rows
+                    if str(row["raw_html_hash"] or "")
+                })
+                result["ai_page_rows"] += len(page_rows)
+                cursor = conn.execute(
+                    f"DELETE FROM domains WHERE domain IN ({marks})",
+                    batch,
+                )
+                result["ai_domain_rows"] += max(0, int(cursor.rowcount))
+                for hash_batch in _chunks(hashes):
+                    hash_marks = ",".join("?" for _ in hash_batch)
+                    cursor = conn.execute(
+                        "DELETE FROM html_blobs "
+                        f"WHERE raw_html_hash IN ({hash_marks}) "
+                        "AND NOT EXISTS (SELECT 1 FROM pages "
+                        "WHERE pages.raw_html_hash=html_blobs.raw_html_hash)",
+                        hash_batch,
+                    )
+                    result["orphan_blob_rows"] += max(0, int(cursor.rowcount))
+            conn.commit()
+        finally:
+            conn.close()
+    elif ai_path.exists():
         with sqlite3.connect(ai_path, timeout=30) as conn:
             conn.execute("PRAGMA foreign_keys=ON")
             for batch in _chunks(selected):
@@ -320,6 +400,17 @@ def purge_automated_rejections(
                         batch,
                     )
                 ]
+                hashes = []
+                if _sqlite_has_column(conn, "pages", "raw_html_hash"):
+                    hashes = [
+                        str(row[0])
+                        for row in conn.execute(
+                            "SELECT raw_html_hash FROM pages WHERE domain_id IN "
+                            f"(SELECT id FROM domains WHERE domain IN ({marks}))",
+                            batch,
+                        )
+                        if str(row[0] or "")
+                    ]
                 result["ai_page_rows"] += len(page_ids)
                 for id_batch in _chunks(page_ids):
                     id_marks = ",".join("?" for _ in id_batch)
@@ -333,13 +424,63 @@ def purge_automated_rejections(
                     batch,
                 )
                 result["ai_domain_rows"] += max(0, int(cursor.rowcount))
+                for hash_batch in (
+                    _chunks(hashes)
+                    if _sqlite_has_table(conn, "html_blobs") else ()
+                ):
+                    hash_marks = ",".join("?" for _ in hash_batch)
+                    cursor = conn.execute(
+                        "DELETE FROM html_blobs "
+                        f"WHERE raw_html_hash IN ({hash_marks}) "
+                        "AND NOT EXISTS (SELECT 1 FROM pages "
+                        "WHERE pages.raw_html_hash=html_blobs.raw_html_hash)",
+                        hash_batch,
+                    )
+                    result["orphan_blob_rows"] += max(0, int(cursor.rowcount))
             conn.commit()
             if vacuum:
                 conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                 conn.execute("VACUUM")
 
     zone_path = Path(zone_db)
-    if zone_path.exists():
+    if using_postgres(ZONE_UNIVERSE_DATABASE_ENV_VAR):
+        conn = connect_zone_universe("")
+        try:
+            for batch in _chunks(selected):
+                marks = ",".join("?" for _ in batch)
+                page_rows = conn.execute(
+                    "SELECT raw_html_hash FROM pages "
+                    f"WHERE domain IN ({marks})",
+                    batch,
+                ).fetchall()
+                hashes = sorted({
+                    str(row["raw_html_hash"])
+                    for row in page_rows
+                    if str(row["raw_html_hash"] or "")
+                })
+                result["zone_page_rows"] += _delete_where(
+                    conn, "pages", "domain", batch
+                )
+                for table in (
+                    "crawl_retries", "registration_queue", "domain_registration"
+                ):
+                    result["zone_auxiliary_rows"] += _delete_where(
+                        conn, table, "domain", batch
+                    )
+                for hash_batch in _chunks(hashes):
+                    hash_marks = ",".join("?" for _ in hash_batch)
+                    cursor = conn.execute(
+                        "DELETE FROM html_blobs "
+                        f"WHERE raw_html_hash IN ({hash_marks}) "
+                        "AND NOT EXISTS (SELECT 1 FROM pages "
+                        "WHERE pages.raw_html_hash=html_blobs.raw_html_hash)",
+                        hash_batch,
+                    )
+                    result["orphan_blob_rows"] += max(0, int(cursor.rowcount))
+            conn.commit()
+        finally:
+            conn.close()
+    elif zone_path.exists():
         with sqlite3.connect(zone_path, timeout=30) as conn:
             for batch in _chunks(selected):
                 marks = ",".join("?" for _ in batch)
@@ -350,6 +491,17 @@ def purge_automated_rejections(
                         batch,
                     )
                 ]
+                hashes = []
+                if _sqlite_has_column(conn, "pages", "raw_html_hash"):
+                    hashes = [
+                        str(row[0])
+                        for row in conn.execute(
+                            f"SELECT raw_html_hash FROM pages "
+                            f"WHERE domain IN ({marks})",
+                            batch,
+                        )
+                        if str(row[0] or "")
+                    ]
                 for id_batch in _chunks(page_ids):
                     id_marks = ",".join("?" for _ in id_batch)
                     conn.execute(
@@ -367,6 +519,19 @@ def purge_automated_rejections(
                     result["zone_auxiliary_rows"] += _delete_where(
                         conn, table, "domain", batch
                     )
+                for hash_batch in (
+                    _chunks(hashes)
+                    if _sqlite_has_table(conn, "html_blobs") else ()
+                ):
+                    hash_marks = ",".join("?" for _ in hash_batch)
+                    cursor = conn.execute(
+                        "DELETE FROM html_blobs "
+                        f"WHERE raw_html_hash IN ({hash_marks}) "
+                        "AND NOT EXISTS (SELECT 1 FROM pages "
+                        "WHERE pages.raw_html_hash=html_blobs.raw_html_hash)",
+                        hash_batch,
+                    )
+                    result["orphan_blob_rows"] += max(0, int(cursor.rowcount))
             conn.commit()
             if vacuum:
                 conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")

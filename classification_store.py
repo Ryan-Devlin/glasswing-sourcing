@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Iterable
 
 import pandas as pd
+from psycopg import Error as PostgresError
 
 from common import DATA, FILTERED, atomic_write_csv, clean, stable_domain
 from db_backend import (
@@ -209,6 +210,28 @@ def migrate(conn: sqlite3.Connection | PostgresConnection) -> None:
             domain TEXT PRIMARY KEY,
             hidden_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS automated_exclusions (
+            domain TEXT PRIMARY KEY,
+            bucket TEXT NOT NULL DEFAULT '',
+            reason TEXT NOT NULL DEFAULT '',
+            glasswing_rating INTEGER NOT NULL DEFAULT 0,
+            content_source TEXT NOT NULL DEFAULT '',
+            excluded_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_automated_exclusions_reason
+            ON automated_exclusions(reason, excluded_at DESC);
+
+        CREATE TABLE IF NOT EXISTS training_labels (
+            domain TEXT PRIMARY KEY,
+            label TEXT NOT NULL,
+            rating INTEGER NOT NULL DEFAULT 0,
+            source TEXT NOT NULL DEFAULT 'human',
+            reason TEXT NOT NULL DEFAULT '',
+            labeled_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_training_labels_source
+            ON training_labels(source, labeled_at DESC);
         """
     )
     if postgres:
@@ -392,8 +415,11 @@ def normalized_record(record: dict[str, object]) -> dict[str, object]:
             100,
             _integer(
                 plain.get(
-                    "diligence_rank_score",
-                    plain.get("rule_score", 0),
+                    "glasswing_rating",
+                    plain.get(
+                        "diligence_rank_score",
+                        plain.get("rule_score", 0),
+                    ),
                 )
             ),
         ),
@@ -669,6 +695,162 @@ def query_classifications_by_domains(
                 batch,
             ).fetchall())
     return [dict(row) for row in rows]
+
+
+def record_automated_exclusions(
+    records: Iterable[dict[str, object]],
+    *,
+    path: Path | str = CLASSIFICATION_DB,
+) -> int:
+    """Keep only the tiny facts required to avoid recrawling deleted junk."""
+    now = utc_now()
+    normalized: dict[str, tuple[object, ...]] = {}
+    for record in records:
+        domain = stable_domain(record.get("domain", ""))
+        if not domain:
+            continue
+        normalized[domain] = (
+            domain,
+            clean(record.get("routing_bucket", record.get("bucket", ""))),
+            clean(record.get("routing_reason", record.get("reason", ""))),
+            max(0, min(100, _integer(record.get(
+                "glasswing_rating",
+                record.get("diligence_rank_score", record.get("rule_score", 0)),
+            )))),
+            clean(record.get("content_source", "")),
+            now,
+        )
+    if not normalized:
+        return 0
+    with connect_store(path) as conn:
+        begin_immediate(conn)
+        conn.executemany(
+            """
+            INSERT INTO automated_exclusions(
+                domain,bucket,reason,glasswing_rating,content_source,excluded_at
+            ) VALUES (?,?,?,?,?,?)
+            ON CONFLICT(domain) DO UPDATE SET
+                bucket=excluded.bucket,
+                reason=excluded.reason,
+                glasswing_rating=excluded.glasswing_rating,
+                content_source=excluded.content_source,
+                excluded_at=excluded.excluded_at
+            """,
+            list(normalized.values()),
+        )
+        conn.commit()
+    return len(normalized)
+
+
+def excluded_domain_set(
+    domains: Iterable[str],
+    *,
+    path: Path | str = CLASSIFICATION_DB,
+) -> set[str]:
+    """Return automated tombstones, except domains later labeled by a human."""
+    normalized = list(dict.fromkeys(
+        stable_domain(domain)
+        for domain in domains
+        if stable_domain(domain)
+    ))
+    if not normalized or (
+        not using_classification_postgres() and not Path(path).exists()
+    ):
+        return set()
+    found: set[str] = set()
+    try:
+        with connect_store(path, read_only=True) as conn:
+            for start in range(0, len(normalized), 800):
+                batch = normalized[start:start + 800]
+                marks = ",".join("?" for _ in batch)
+                found.update(
+                    stable_domain(row["domain"])
+                    for row in conn.execute(
+                        "SELECT domain FROM automated_exclusions "
+                        f"WHERE domain IN ({marks})",
+                        batch,
+                    ).fetchall()
+                )
+    except (sqlite3.OperationalError, PostgresError):
+        # Safe during a rolling deployment before the migration has run.
+        return set()
+    if not found:
+        return set()
+    from training_truth import protected_training_domains
+
+    return found - protected_training_domains()
+
+
+def upsert_training_labels(
+    records: Iterable[dict[str, object]],
+    *,
+    path: Path | str = CLASSIFICATION_DB,
+) -> int:
+    """Mirror human Yes/No truth into the cross-service canonical store."""
+    normalized: dict[str, tuple[object, ...]] = {}
+    now = utc_now()
+    for record in records:
+        domain = stable_domain(record.get("domain", record.get("domain_url", "")))
+        label = clean(record.get("label", "")).lower()
+        if not domain or label not in {"yes", "no"}:
+            continue
+        normalized[domain] = (
+            domain,
+            label,
+            max(0, min(100, _integer(record.get("rating", 0)))),
+            clean(record.get("source", "human")).lower() or "human",
+            clean(record.get("reason", "")),
+            clean(record.get("labeled_at", "")) or now,
+        )
+    if not normalized:
+        return 0
+    with connect_store(path) as conn:
+        begin_immediate(conn)
+        conn.executemany(
+            """
+            INSERT INTO training_labels(
+                domain,label,rating,source,reason,labeled_at
+            ) VALUES (?,?,?,?,?,?)
+            ON CONFLICT(domain) DO UPDATE SET
+                label=excluded.label,
+                rating=excluded.rating,
+                source=excluded.source,
+                reason=excluded.reason,
+                labeled_at=excluded.labeled_at
+            """,
+            list(normalized.values()),
+        )
+        conn.commit()
+    return len(normalized)
+
+
+def remove_training_labels(
+    domains: Iterable[str],
+    *,
+    path: Path | str = CLASSIFICATION_DB,
+) -> int:
+    normalized = list(dict.fromkeys(
+        stable_domain(domain)
+        for domain in domains
+        if stable_domain(domain)
+    ))
+    if not normalized or (
+        not using_classification_postgres() and not Path(path).exists()
+    ):
+        return 0
+    removed = 0
+    with connect_store(path) as conn:
+        begin_immediate(conn)
+        for start in range(0, len(normalized), 800):
+            batch = normalized[start:start + 800]
+            marks = ",".join("?" for _ in batch)
+            cursor = conn.execute(
+                f"DELETE FROM training_labels WHERE domain IN ({marks})",
+                batch,
+            )
+            removed += max(0, int(cursor.rowcount))
+        conn.commit()
+    return removed
 
 
 def hide_domains(

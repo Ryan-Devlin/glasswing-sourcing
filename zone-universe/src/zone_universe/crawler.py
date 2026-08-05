@@ -975,6 +975,27 @@ async def crawl_once(
         bypass=bool(shard is not None and int(shard["priority"]) == 0),
     )
     skipped_low_priority = len(quarantined_domains)
+    from classification_store import excluded_domain_set
+
+    storage_excluded = await asyncio.to_thread(
+        excluded_domain_set,
+        list(dict.fromkeys(retry_domains + new_domains)),
+    )
+    if storage_excluded:
+        retry_domains = [
+            domain for domain in retry_domains if domain not in storage_excluded
+        ]
+        new_domains = [
+            domain for domain in new_domains if domain not in storage_excluded
+        ]
+        for start in range(0, len(storage_excluded), 700):
+            batch = sorted(storage_excluded)[start:start + 700]
+            marks = ",".join("?" for _ in batch)
+            conn.execute(
+                f"DELETE FROM crawl_retries WHERE domain IN ({marks})",
+                batch,
+            )
+        conn.commit()
     domains = list(dict.fromkeys(retry_domains + new_domains))
     if not domains:
         if shard is not None and claimed_domains:
@@ -998,10 +1019,13 @@ async def crawl_once(
                 ),
             )
             conn.commit()
-            return {
+            result = {
                 "skipped_existing": skipped_existing,
                 "skipped_low_priority": skipped_low_priority,
             }
+            if storage_excluded:
+                result["storage_excluded"] = len(storage_excluded)
+            return result
         return {}
     timeout = aiohttp.ClientTimeout(
         total=settings.timeout_seconds,
@@ -1075,6 +1099,36 @@ async def crawl_once(
             for outcome in preflight_outcomes
             if outcome.status != "preflight_promising"
         ]
+        if stopped_at_gate:
+            from classification_store import record_automated_exclusions
+
+            try:
+                await asyncio.to_thread(
+                    record_automated_exclusions,
+                    [
+                        {
+                            "domain": outcome.domain,
+                            "routing_bucket": "screened_out",
+                            "routing_reason": (
+                                outcome.preflight_reason
+                                or "homepage_preflight_rejected"
+                            ),
+                            "glasswing_rating": min(
+                                int(outcome.preflight_score or 0), 24
+                            ),
+                            "content_source": "zone_universe_preflight",
+                        }
+                        for outcome in stopped_at_gate
+                    ],
+                )
+            except Exception as exc:
+                # The crawl gate already prevented expensive storage. A
+                # tombstone write outage must not crash the whole shard.
+                set_state(
+                    conn,
+                    "last_storage_gate_error",
+                    f"{type(exc).__name__}: {exc}"[:500],
+                )
         set_state(conn, "crawler_phase", "full_crawl_promising_sites")
 
         async def guarded_crawl(preflight: CrawlOutcome) -> CrawlOutcome:
@@ -1125,6 +1179,7 @@ async def crawl_once(
         outcome.response_bytes for outcome in preflight_outcomes
     )
     counts["skipped_low_priority"] = skipped_low_priority
+    counts["storage_excluded"] = len(storage_excluded)
     if not isinstance(conn, PostgresConnection):
         conn.execute("BEGIN IMMEDIATE")
     for outcome in outcomes:

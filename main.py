@@ -6,6 +6,7 @@ from pathlib import Path
 
 import streamlit as st
 
+from common import sync_training_labels_to_shared
 from ui_theme import inject_custom_css, render_brand_header
 
 st.set_page_config(
@@ -16,6 +17,20 @@ st.set_page_config(
 )
 inject_custom_css()
 render_brand_header()
+
+
+@st.cache_resource(show_spinner=False)
+def sync_shared_training_truth_once() -> int:
+    return sync_training_labels_to_shared()
+
+
+try:
+    sync_shared_training_truth_once()
+except Exception as exc:
+    st.warning(
+        "Human training labels are safe locally, but their worker sync is "
+        f"temporarily unavailable: {type(exc).__name__}."
+    )
 
 navigation = st.navigation(
     [

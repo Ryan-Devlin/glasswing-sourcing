@@ -25,6 +25,7 @@ from classification_store import (
     bootstrap_from_csv,
     count_classifications,
     export_all_screened_csv,
+    record_automated_exclusions,
     upsert_classifications,
 )
 
@@ -3495,6 +3496,7 @@ async def process(
         "crawl_status": page.crawl_status,
         "crawler_crawled_at": page.crawled_at,
         "rule_score": score,
+        "glasswing_rating": rank_score,
         "diligence_rank_score": rank_score,
         "score_eligibility_caps": "; ".join(score_eligibility_caps),
         "score_defensibility_signals": counts.get("defensibility", 0),
@@ -4054,6 +4056,43 @@ def apply_persistent_overrides(output: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+def retention_minimum_rating() -> int:
+    """Minimum final Glasswing rating worth retaining as searchable data."""
+    try:
+        configured = int(os.getenv("GLASSWING_RETENTION_MIN_SCORE", "25"))
+    except ValueError:
+        configured = 25
+    return max(0, min(configured, 100))
+
+
+def automated_discard_mask(output: pd.DataFrame) -> pd.Series:
+    """Select disposable model outcomes while preserving useful ambiguity."""
+    buckets = output.get(
+        "routing_bucket", pd.Series("", index=output.index)
+    ).astype(str).str.lower()
+    ratings = pd.to_numeric(
+        output.get(
+            "glasswing_rating",
+            output.get(
+                "diligence_rank_score",
+                output.get("rule_score", pd.Series(0, index=output.index)),
+            ),
+        ),
+        errors="coerce",
+    ).fillna(0)
+    slop = output.get(
+        "venture_slop_risk", pd.Series(False, index=output.index)
+    ).astype(str).str.lower().isin({"true", "1", "yes"})
+    protected_buckets = buckets.isin(
+        {"priority", "coming_soon", "review", "comp"}
+    )
+    return (
+        buckets.isin({"reject", "ghost"})
+        | slop
+        | ((ratings < retention_minimum_rating()) & ~protected_buckets)
+    )
+
+
 def persist_screening_output(output: pd.DataFrame) -> dict[str, int]:
     """Persist one in-process screening batch to all master datasets."""
     output = apply_run_preferences(output, load_run_preferences())
@@ -4068,48 +4107,64 @@ def persist_screening_output(output: pd.DataFrame) -> dict[str, int]:
             ("manual_override_", "human_training_")
         )
     )
+    manual_basket = output.get(
+        "training_basket", pd.Series("", index=output.index)
+    ).astype(str).str.lower().isin({"yes", "no"})
+    from training_truth import protected_training_domains
+
+    protected_domains = protected_training_domains()
+    shared_training_truth = output.get(
+        "domain", pd.Series("", index=output.index)
+    ).map(stable_domain).isin(protected_domains)
+    manually_protected = (
+        manual_override | manual_reason | manual_basket | shared_training_truth
+    )
     denied_mask = output["routing_bucket"].eq("reject")
-    manual_denied = output[denied_mask & (manual_override | manual_reason)].copy()
-    automated_denied = output[
-        denied_mask & ~(manual_override | manual_reason)
-    ].copy()
+    manual_denied = output[denied_mask & manually_protected].copy()
+    disposable = automated_discard_mask(output) & ~manually_protected
+    automated_discarded = output[disposable].copy()
     persistable_output = output.loc[
-        ~output.index.isin(automated_denied.index)
+        ~output.index.isin(automated_discarded.index)
     ].copy()
     if count_classifications() == 0:
         bootstrap_from_csv()
     upsert_classifications(persistable_output)
 
-    if not automated_denied.empty:
-        # Keep only a minimal queue dedupe marker. All derived content and
-        # classification payloads are deleted immediately.
+    if not automated_discarded.empty:
+        # Keep only a minimal cross-crawler tombstone. All website text,
+        # search rows, retry data, and full classification payloads go away.
         from rejection_cleanup import purge_automated_rejections
 
+        record_automated_exclusions(
+            automated_discarded.to_dict(orient="records")
+        )
         purge_automated_rejections(
-            automated_denied["domain"],
+            automated_discarded["domain"],
             clean_csv=False,
         )
 
-    approved = output[
-        output["routing_bucket"].isin(["priority", "coming_soon"])
+    approved = persistable_output[
+        persistable_output["routing_bucket"].isin(["priority", "coming_soon"])
     ].copy()
-    denied = output[output["routing_bucket"] == "reject"].copy()
-    coming_soon = output[
-        output["routing_bucket"] == "coming_soon"
+    denied = persistable_output[
+        persistable_output["routing_bucket"] == "reject"
     ].copy()
-    candidates = output[
-        output["routing_bucket"] == "priority"
+    coming_soon = persistable_output[
+        persistable_output["routing_bucket"] == "coming_soon"
     ].copy()
-    screened_out = output[
-        output["routing_bucket"].isin(
+    candidates = persistable_output[
+        persistable_output["routing_bucket"] == "priority"
+    ].copy()
+    screened_out = persistable_output[
+        persistable_output["routing_bucket"].isin(
             ["screened_out", "review", "comp", "insufficient"]
         )
     ].copy()
-    ghost = output[
-        output["routing_bucket"] == "ghost"
+    ghost = persistable_output[
+        persistable_output["routing_bucket"] == "ghost"
     ].copy()
-    insufficient = output[
-        output["routing_bucket"] == "insufficient"
+    insufficient = persistable_output[
+        persistable_output["routing_bucket"] == "insufficient"
     ].copy()
 
     shortlist_master = upsert_csv(
@@ -4191,10 +4246,15 @@ def persist_screening_output(output: pd.DataFrame) -> dict[str, int]:
         "batch_total": len(output),
         "investable": len(candidates),
         "coming_soon": len(coming_soon),
-        "hard_denied": len(denied),
-        "insufficient_evidence": len(insufficient) + len(ghost),
-        "screened_out": len(screened_out),
-        "ghost": len(ghost),
+        "hard_denied": int(denied_mask.sum()),
+        "insufficient_evidence": int(
+            output["routing_bucket"].isin(["insufficient", "ghost"]).sum()
+        ),
+        "screened_out": int(output["routing_bucket"].isin(
+            ["screened_out", "review", "comp", "insufficient"]
+        ).sum()),
+        "ghost": int(output["routing_bucket"].eq("ghost").sum()),
+        "storage_discarded": len(automated_discarded),
         "shortlist_master": len(shortlist_master),
         "approved_master": len(approved_master),
         "denied_master": len(denied_master),

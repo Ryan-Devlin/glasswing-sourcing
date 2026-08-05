@@ -223,6 +223,21 @@ def read_label_metadata() -> pd.DataFrame:
     return frame[columns].drop_duplicates("domain", keep="last")
 
 
+def sync_training_labels_to_shared() -> int:
+    """Mirror local labels to the database visible to every cloud worker."""
+    from classification_store import (
+        upsert_training_labels,
+        using_classification_postgres,
+    )
+
+    if not using_classification_postgres():
+        return 0
+    metadata = read_label_metadata()
+    if metadata.empty:
+        return 0
+    return upsert_training_labels(metadata.to_dict(orient="records"))
+
+
 def save_label_metadata(
     domain_url: str,
     label: str,
@@ -328,6 +343,7 @@ def save_basket_entries(
     ])
     metadata = pd.concat([metadata, metadata_rows], ignore_index=True)
     atomic_write_csv(label_metadata_path(), metadata)
+    sync_training_labels_to_shared()
     if (
         normalized_label_source(source) == "human"
         and YES_BASKET_DATA.parent.resolve() == MANUAL.resolve()
@@ -373,6 +389,7 @@ def seed_yes_basket(domain_urls: object, rating: int = 100) -> int:
                 row["domain_url"], "yes", row["rating"],
                 source="glasswing_portfolio", reason="verified_portfolio_company",
             )
+        sync_training_labels_to_shared()
     return len(additions)
 
 
@@ -411,6 +428,7 @@ def seed_no_basket(domain_urls: object, rating: int = 0) -> int:
                 row["domain_url"], "no", row["rating"],
                 source="weak_rule", reason="automatic_hard_denial",
             )
+        sync_training_labels_to_shared()
     return len(additions)
 
 
@@ -487,6 +505,7 @@ def seed_scored_basket(
             row["domain_url"], normalized_basket, row["rating"],
             source=source, reason=reason,
         )
+    sync_training_labels_to_shared()
     return len(additions)
 
 
@@ -503,6 +522,13 @@ def remove_basket_entry(domain_url: str) -> None:
     metadata = read_label_metadata()
     metadata = metadata[~metadata["domain"].eq(domain)].copy()
     atomic_write_csv(label_metadata_path(), metadata)
+    from classification_store import (
+        remove_training_labels,
+        using_classification_postgres,
+    )
+
+    if using_classification_postgres():
+        remove_training_labels([domain])
     if YES_BASKET_DATA.parent.resolve() == MANUAL.resolve():
         from manual_truth_backup import create_manual_snapshot
 

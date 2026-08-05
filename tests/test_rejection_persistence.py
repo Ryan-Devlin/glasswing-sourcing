@@ -7,6 +7,28 @@ import filter as screening_filter
 
 
 class RejectionPersistenceTests(unittest.TestCase):
+    def test_storage_gate_keeps_credible_ambiguity_and_drops_junk(self):
+        frame = pd.DataFrame([
+            {"routing_bucket": "priority", "glasswing_rating": 10},
+            {"routing_bucket": "coming_soon", "glasswing_rating": 0},
+            {"routing_bucket": "review", "glasswing_rating": 20},
+            {"routing_bucket": "comp", "glasswing_rating": 10},
+            {"routing_bucket": "insufficient", "glasswing_rating": 24},
+            {"routing_bucket": "insufficient", "glasswing_rating": 25},
+            {"routing_bucket": "screened_out", "glasswing_rating": 5},
+            {"routing_bucket": "ghost", "glasswing_rating": 90},
+            {"routing_bucket": "reject", "glasswing_rating": 90},
+            {
+                "routing_bucket": "priority",
+                "glasswing_rating": 80,
+                "venture_slop_risk": True,
+            },
+        ])
+        self.assertEqual(
+            screening_filter.automated_discard_mask(frame).tolist(),
+            [False, False, False, False, True, False, True, True, True, True],
+        )
+
     def test_only_manual_denial_is_persisted(self):
         output = pd.DataFrame([
             {
@@ -38,6 +60,10 @@ class RejectionPersistenceTests(unittest.TestCase):
                 side_effect=lambda frame: frame,
             ),
             patch.object(screening_filter, "load_run_preferences", return_value={}),
+            patch(
+                "training_truth.protected_training_domains",
+                return_value=set(),
+            ),
             patch.object(screening_filter, "count_classifications", return_value=1),
             patch.object(
                 screening_filter, "upsert_classifications",
@@ -56,6 +82,11 @@ class RejectionPersistenceTests(unittest.TestCase):
                 "rejection_cleanup.purge_automated_rejections",
                 return_value={"purged_domains": 1},
             ) as purge,
+            patch.object(
+                screening_filter,
+                "record_automated_exclusions",
+                return_value=1,
+            ) as tombstone,
         ):
             screening_filter.persist_screening_output(output)
 
@@ -65,8 +96,8 @@ class RejectionPersistenceTests(unittest.TestCase):
             ["automatic.ai"],
         )
         self.assertFalse(purge.call_args.kwargs["clean_csv"])
+        tombstone.assert_called_once()
 
 
 if __name__ == "__main__":
     unittest.main()
-

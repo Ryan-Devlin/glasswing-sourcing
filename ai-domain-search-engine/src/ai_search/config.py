@@ -48,7 +48,7 @@ def load_settings() -> Settings:
         html_archive=html_archive,
         retain_raw_html=os.getenv(
             "AI_SEARCH_RETAIN_RAW_HTML",
-            "1",
+            "0",
         ).strip().lower() not in {"0", "false", "no"},
         concurrency=max(1, int(os.getenv("AI_SEARCH_CONCURRENCY", "12"))),
         timeout_seconds=max(

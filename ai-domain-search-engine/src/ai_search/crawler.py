@@ -374,6 +374,27 @@ async def crawl_pending(conn: Any, settings: Settings, limit: int) -> dict[str, 
             last_crawled_at IS NULL OR next_crawl_at <= ?
         ) ORDER BY last_crawled_at IS NOT NULL, first_seen_at LIMIT ?
     """, (utc_now(), limit)).fetchall()
+    # A later corpus import can rediscover a domain whose expensive payload was
+    # intentionally purged. Consult the tiny canonical tombstone before making
+    # another network request, then remove that reimported inventory row.
+    from classification_store import excluded_domain_set
+
+    excluded = await asyncio.to_thread(
+        excluded_domain_set,
+        [str(row["domain"]) for row in rows],
+    )
+    if excluded:
+        for start in range(0, len(excluded), 700):
+            batch = sorted(excluded)[start:start + 700]
+            marks = ",".join("?" for _ in batch)
+            conn.execute(
+                f"DELETE FROM domains WHERE domain IN ({marks})",
+                batch,
+            )
+        conn.commit()
+        rows = [row for row in rows if str(row["domain"]) not in excluded]
+    if not rows:
+        return {"storage_excluded": len(excluded)} if excluded else {}
     timeout = aiohttp.ClientTimeout(total=settings.timeout_seconds)
     connector = aiohttp.TCPConnector(
         limit=settings.concurrency, ssl=ssl.create_default_context()
@@ -383,7 +404,7 @@ async def crawl_pending(conn: Any, settings: Settings, limit: int) -> dict[str, 
         "Accept": "text/html,application/xhtml+xml",
         "Accept-Language": "en-US,en;q=0.8",
     }
-    counts: dict[str, int] = {}
+    counts: dict[str, int] = {"storage_excluded": len(excluded)} if excluded else {}
     semaphore = asyncio.Semaphore(settings.concurrency)
     async with aiohttp.ClientSession(
         timeout=timeout, connector=connector, headers=headers

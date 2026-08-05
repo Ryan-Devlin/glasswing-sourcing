@@ -127,7 +127,7 @@ def load_settings() -> Settings:
         ),
         retain_raw_html=os.getenv(
             "ZONE_UNIVERSE_RETAIN_RAW_HTML",
-            "1",
+            "0",
         ).strip().lower() not in {"0", "false", "no"},
         html_archive=Path(
             os.getenv("ZONE_UNIVERSE_HTML_ARCHIVE", str(HTML_ARCHIVE))

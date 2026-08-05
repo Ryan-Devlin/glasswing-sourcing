@@ -15,6 +15,10 @@ from classification_store import (
     list_hidden_domains,
     query_classifications,
     query_classifications_by_domains,
+    record_automated_exclusions,
+    excluded_domain_set,
+    remove_training_labels,
+    upsert_training_labels,
     record_manual_move,
     import_private_sqlite_into_shared,
     unhide_domains,
@@ -72,6 +76,76 @@ def test_master_bucket_queries_are_paged_and_source_labeled(tmp_path):
         path=database,
     )
     assert [row["domain"] for row in domain_rows] == ["zone.app"]
+
+
+def test_automated_exclusion_is_tiny_and_human_truth_overrides_it(
+    tmp_path,
+    monkeypatch,
+):
+    database = tmp_path / "classifications.sqlite3"
+    assert record_automated_exclusions(
+        [
+            {
+                "domain": "junk.ai",
+                "routing_bucket": "ghost",
+                "routing_reason": "no_content",
+                "glasswing_rating": 0,
+                "homepage_excerpt": "must never be stored in tombstone",
+            },
+            {
+                "domain": "human.ai",
+                "routing_bucket": "reject",
+                "glasswing_rating": 3,
+            },
+        ],
+        path=database,
+    ) == 2
+    monkeypatch.setattr(
+        "training_truth.protected_training_domains",
+        lambda: {"human.ai"},
+    )
+    assert excluded_domain_set(
+        ["junk.ai", "human.ai", "unknown.ai"],
+        path=database,
+    ) == {"junk.ai"}
+    with connect_store(database, read_only=True) as conn:
+        row = conn.execute(
+            "SELECT * FROM automated_exclusions WHERE domain='junk.ai'"
+        ).fetchone()
+    assert set(row.keys()) == {
+        "domain", "bucket", "reason", "glasswing_rating",
+        "content_source", "excluded_at",
+    }
+
+
+def test_shared_training_labels_are_exclusive_and_removable(tmp_path):
+    database = tmp_path / "classifications.sqlite3"
+    assert upsert_training_labels(
+        [{
+            "domain": "labeled.ai",
+            "label": "yes",
+            "rating": 91,
+            "source": "human",
+            "reason": "manual review",
+        }],
+        path=database,
+    ) == 1
+    assert upsert_training_labels(
+        [{
+            "domain": "labeled.ai",
+            "label": "no",
+            "rating": 2,
+            "source": "human",
+        }],
+        path=database,
+    ) == 1
+    with connect_store(database, read_only=True) as conn:
+        row = conn.execute(
+            "SELECT label,rating FROM training_labels WHERE domain=?",
+            ("labeled.ai",),
+        ).fetchone()
+    assert (row["label"], row["rating"]) == ("no", 2)
+    assert remove_training_labels(["labeled.ai"], path=database) == 1
 
 
 def test_pipeline_database_url_is_cloud_fallback(monkeypatch):

@@ -2,6 +2,7 @@ import asyncio
 from dataclasses import replace
 from pathlib import Path
 
+import classification_store
 from ai_search.extract import extract_page
 from zone_universe import crawler
 from zone_universe.config import load_settings
@@ -60,6 +61,17 @@ def test_rejected_preflight_advances_checkpoint_without_storing_html(
         )
 
     monkeypatch.setattr(crawler, "preflight_domain", rejected)
+    recorded = []
+    monkeypatch.setattr(
+        classification_store,
+        "excluded_domain_set",
+        lambda _domains: set(),
+    )
+    monkeypatch.setattr(
+        classification_store,
+        "record_automated_exclusions",
+        lambda records: recorded.extend(records) or len(records),
+    )
     counts = asyncio.run(crawler.crawl_once(conn, settings, tld="com"))
 
     assert counts["preflight_checked"] == 1
@@ -71,6 +83,29 @@ def test_rejected_preflight_advances_checkpoint_without_storing_html(
     assert shard["preflight_response_bytes"] == 4096
     assert shard["byte_offset"] == shard_path.stat().st_size
     assert diagnostics(conn)["preflight_rejected"] == 1
+    assert recorded[0]["domain"] == "candidateai.com"
+    assert recorded[0]["glasswing_rating"] < 25
+    conn.close()
+
+
+def test_tombstoned_domain_skips_even_the_homepage_preflight(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    conn, settings, shard_path = prepared_database(tmp_path)
+    monkeypatch.setattr(
+        classification_store,
+        "excluded_domain_set",
+        lambda _domains: {"candidateai.com"},
+    )
+
+    counts = asyncio.run(crawler.crawl_once(conn, settings, tld="com"))
+
+    assert counts["storage_excluded"] == 1
+    assert conn.execute("SELECT count(*) FROM pages").fetchone()[0] == 0
+    assert conn.execute("SELECT byte_offset FROM shards").fetchone()[0] == (
+        shard_path.stat().st_size
+    )
     conn.close()
 
 
@@ -113,6 +148,11 @@ def test_promising_preflight_is_the_only_path_to_html_storage(
         )
 
     monkeypatch.setattr(crawler, "preflight_domain", promising)
+    monkeypatch.setattr(
+        classification_store,
+        "excluded_domain_set",
+        lambda _domains: set(),
+    )
     monkeypatch.setattr(crawler, "crawl_domain", full_crawl)
     counts = asyncio.run(crawler.crawl_once(conn, settings, tld="com"))
 
@@ -140,6 +180,11 @@ def test_pause_after_quick_check_does_not_lose_queue_position(
         )
 
     monkeypatch.setattr(crawler, "preflight_domain", promising)
+    monkeypatch.setattr(
+        classification_store,
+        "excluded_domain_set",
+        lambda _domains: set(),
+    )
     counts = asyncio.run(crawler.crawl_once(
         conn,
         settings,
