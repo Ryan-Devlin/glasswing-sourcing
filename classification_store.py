@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
@@ -1409,19 +1410,35 @@ def recent_movements(
     return [dict(row) for row in rows]
 
 
+_CRAWLED_CORPUS_CACHE_SECONDS = 10.0
+_crawled_corpus_cache: dict[str, tuple[float, list[str]]] = {}
+
+
 def _crawled_corpus_domains(search_db: Path) -> list[str]:
     """Domains with crawl evidence in a corpus DB (.AI search / Zone Universe).
 
     Those corpora stay on SQLite in every deployment mode for now, so this is
     a plain sqlite3 read regardless of which backend classifications live in.
+
+    A single page render can call this several times over (once per bucket
+    tab, since Streamlit executes every ``st.tabs()`` block on each rerun) --
+    each a full table scan. Cache briefly per-path so a page load costs one
+    scan, not one per caller, without risking staleness beyond a few seconds.
     """
+    cache_key = str(search_db)
+    cached = _crawled_corpus_cache.get(cache_key)
+    now = time.monotonic()
+    if cached is not None and now - cached[0] < _CRAWLED_CORPUS_CACHE_SECONDS:
+        return cached[1]
     with sqlite3.connect(f"file:{search_db}?mode=ro", uri=True, timeout=30) as conn:
-        return [
+        domains = [
             str(row[0])
             for row in conn.execute(
                 "SELECT domain FROM domains WHERE last_crawled_at IS NOT NULL"
             )
         ]
+    _crawled_corpus_cache[cache_key] = (now, domains)
+    return domains
 
 
 def corpus_bucket_counts(
@@ -1433,23 +1450,22 @@ def corpus_bucket_counts(
     if not search_db.exists():
         return {}
     if using_classification_postgres():
-        domains = _crawled_corpus_domains(search_db)
+        domains = set(_crawled_corpus_domains(search_db))
         if not domains:
             return {}
         counts: dict[str, int] = {}
+        # Filter by domain in Python against a single unfiltered fetch rather
+        # than chunking the (potentially tens-of-thousands-long) domain list
+        # into repeated IN (...) round trips -- with a large crawled corpus,
+        # that turned one page load into 20+ sequential Postgres queries.
         with connect_store(path) as conn:
-            for start in range(0, len(domains), 800):
-                batch = domains[start : start + 800]
-                marks = ",".join("?" for _ in batch)
-                for row in conn.execute(
-                    "SELECT routing_bucket, count(*) AS total "
-                    "FROM classifications "
-                    f"WHERE domain IN ({marks}) "
-                    "GROUP BY routing_bucket",
-                    batch,
-                ).fetchall():
-                    bucket = str(row["routing_bucket"])
-                    counts[bucket] = counts.get(bucket, 0) + int(row["total"])
+            for row in conn.execute(
+                "SELECT domain, routing_bucket FROM classifications"
+            ).fetchall():
+                if str(row["domain"]) not in domains:
+                    continue
+                bucket = str(row["routing_bucket"])
+                counts[bucket] = counts.get(bucket, 0) + 1
         return counts
     with connect_store(path) as conn:
         conn.execute("ATTACH DATABASE ? AS corpus", (str(search_db),))
@@ -1492,22 +1508,19 @@ def query_corpus_classifications(
         domains = set(_crawled_corpus_domains(search_db))
         if not domains:
             return []
-        rows = []
+        # Filter by the (small) bucket list in SQL, then by domain membership
+        # in Python -- the reverse used to chunk the crawled-domain list
+        # (which can be tens of thousands long) into repeated IN (...) round
+        # trips per bucket tab; with six bucket tabs re-executed on every
+        # Streamlit rerun, that alone accounted for most of a page load.
+        bucket_marks = ",".join("?" for _ in bucket_values)
         with connect_store(path) as conn:
-            for start in range(0, len(bucket_values), 800):
-                bucket_batch = bucket_values[start : start + 800]
-                bucket_marks = ",".join("?" for _ in bucket_batch)
-                for domain_start in range(0, len(domains), 800):
-                    domain_batch = list(domains)[domain_start : domain_start + 800]
-                    domain_marks = ",".join("?" for _ in domain_batch)
-                    rows.extend(
-                        conn.execute(
-                            "SELECT * FROM classifications "
-                            f"WHERE domain IN ({domain_marks}) "
-                            f"AND routing_bucket IN ({bucket_marks})",
-                            domain_batch + bucket_batch,
-                        ).fetchall()
-                    )
+            fetched = conn.execute(
+                "SELECT * FROM classifications "
+                f"WHERE routing_bucket IN ({bucket_marks})",
+                bucket_values,
+            ).fetchall()
+        rows = [row for row in fetched if str(row["domain"]) in domains]
         rows.sort(key=lambda row: row["domain"])
         # Sorting/paging across a chunked, batch-fetched result set happens in
         # Python rather than SQL here -- the corpus is a separate SQLite file,

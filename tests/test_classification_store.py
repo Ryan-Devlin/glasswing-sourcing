@@ -10,11 +10,13 @@ from classification_store import (
     classification_map,
     classification_source_label,
     connect_store,
+    corpus_bucket_counts,
     hidden_domain_set,
     hide_domains,
     list_hidden_domains,
     query_classifications,
     query_classifications_by_domains,
+    query_corpus_classifications,
     record_automated_exclusions,
     excluded_domain_set,
     remove_training_labels,
@@ -531,3 +533,110 @@ def test_postgres_backend_matches_sqlite_behavior(monkeypatch):
                 f"DELETE FROM hidden_domains WHERE domain IN ({marks})", test_domains
             )
             conn.commit()
+
+
+def _make_corpus_db(tmp_path, crawled_domains):
+    import sqlite3
+
+    path = tmp_path / "corpus.sqlite3"
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE domains(domain TEXT PRIMARY KEY, last_crawled_at TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO domains(domain, last_crawled_at) VALUES (?, ?)",
+            [(domain, "2026-08-01T00:00:00Z") for domain in crawled_domains],
+        )
+    return path
+
+
+class _RecordingPostgresConnection:
+    """Fakes just enough of the Postgres connection surface to assert how
+    many round trips the corpus-scoped queries make and with what SQL."""
+
+    def __init__(self, rows):
+        self._rows = rows
+        self.queries: list[tuple[str, list]] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
+
+    def execute(self, sql, params=()):
+        self.queries.append((sql, list(params)))
+
+        class Result:
+            def __init__(self, rows):
+                self._rows = rows
+
+            def fetchall(self):
+                return self._rows
+
+        return Result(self._rows)
+
+
+def test_corpus_bucket_counts_uses_one_query_regardless_of_corpus_size(
+    tmp_path, monkeypatch
+):
+    # A large crawled corpus used to force one Postgres round trip per 800
+    # domains (chunked IN (...) batches) -- confirm it now costs exactly one
+    # query no matter how many crawled domains there are.
+    crawled = [f"crawled-{i}.ai" for i in range(2000)]
+    corpus_db = _make_corpus_db(tmp_path, crawled)
+    classification_store._crawled_corpus_cache.clear()
+
+    fake_conn = _RecordingPostgresConnection([
+        {"domain": "crawled-0.ai", "routing_bucket": "priority"},
+        {"domain": "crawled-1.ai", "routing_bucket": "priority"},
+        {"domain": "crawled-2.ai", "routing_bucket": "review"},
+        {"domain": "not-crawled.ai", "routing_bucket": "priority"},
+    ])
+    monkeypatch.setattr(
+        classification_store, "using_classification_postgres", lambda: True
+    )
+    monkeypatch.setattr(
+        classification_store, "connect_store", lambda *a, **k: fake_conn
+    )
+
+    counts = corpus_bucket_counts(corpus_db)
+
+    assert len(fake_conn.queries) == 1
+    assert counts == {"priority": 2, "review": 1}
+
+
+def test_query_corpus_classifications_uses_one_query_regardless_of_corpus_size(
+    tmp_path, monkeypatch
+):
+    crawled = [f"crawled-{i}.ai" for i in range(2000)]
+    corpus_db = _make_corpus_db(tmp_path, crawled)
+    classification_store._crawled_corpus_cache.clear()
+
+    fake_conn = _RecordingPostgresConnection([
+        {
+            "domain": "crawled-0.ai",
+            "routing_bucket": "priority",
+            "fit_score": 90,
+            "priority_score": 90,
+            "record_json": "{}",
+        },
+        {
+            "domain": "not-crawled.ai",
+            "routing_bucket": "priority",
+            "fit_score": 99,
+            "priority_score": 99,
+            "record_json": "{}",
+        },
+    ])
+    monkeypatch.setattr(
+        classification_store, "using_classification_postgres", lambda: True
+    )
+    monkeypatch.setattr(
+        classification_store, "connect_store", lambda *a, **k: fake_conn
+    )
+
+    rows = query_corpus_classifications(corpus_db, ["priority"])
+
+    assert len(fake_conn.queries) == 1
+    assert [row["domain"] for row in rows] == ["crawled-0.ai"]
