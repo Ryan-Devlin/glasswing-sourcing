@@ -14,6 +14,7 @@ import hashlib
 import json
 import sys
 import zlib
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -117,12 +118,28 @@ def _rows(conn: Any, subsystem: str) -> list[Any]:
     ).fetchall()
 
 
+def _store_verified(key: str, payload: bytes, verify: bool) -> str:
+    outcome = "reused"
+    if not exists(key):
+        write_bytes(key, payload)
+        outcome = "uploaded"
+    if verify and read_bytes(key) != payload:
+        raise RuntimeError(f"Object verification failed: {key}")
+    return outcome
+
+
+def _row_batches(rows: list[Any], size: int = 100):
+    for start in range(0, len(rows), size):
+        yield rows[start : start + size]
+
+
 def migrate_subsystem(
     subsystem: str,
     *,
     dry_run: bool = False,
     limit: int = 0,
     verify_uploads: bool = True,
+    workers: int = 16,
 ) -> dict[str, int]:
     if subsystem == "ai":
         conn = connect_ai_search("")
@@ -146,94 +163,112 @@ def migrate_subsystem(
         if limit > 0:
             rows = rows[:limit]
         result["candidates"] = len(rows)
-        checked_keys: set[str] = set()
-        for position, row in enumerate(rows, start=1):
-            raw_hash = str(row["raw_html_hash"] or "")
-            try:
-                payload = read_legacy_block(
-                    row["html_archive_path"],
-                    archive_root=archive_root,
-                    offset=int(row["html_archive_offset"] or 0),
-                    length=int(row["html_archive_length"] or 0),
-                    codec=str(row["html_archive_codec"] or ""),
-                    raw_hash=raw_hash,
-                )
-            except FileNotFoundError:
-                result["unavailable_pages"] += 1
-                if not dry_run:
-                    # The source pack is already absent. Keep extracted text
-                    # searchable while removing a permanently dead pointer.
+        with ThreadPoolExecutor(max_workers=max(1, min(workers, 32))) as pool:
+            for row_batch in _row_batches(rows):
+                entries: list[dict[str, Any]] = []
+                for row in row_batch:
+                    raw_hash = str(row["raw_html_hash"] or "")
+                    try:
+                        payload = read_legacy_block(
+                            row["html_archive_path"],
+                            archive_root=archive_root,
+                            offset=int(row["html_archive_offset"] or 0),
+                            length=int(row["html_archive_length"] or 0),
+                            codec=str(row["html_archive_codec"] or ""),
+                            raw_hash=raw_hash,
+                        )
+                    except FileNotFoundError:
+                        result["unavailable_pages"] += 1
+                        if not dry_run:
+                            conn.execute(
+                                """
+                                UPDATE pages SET html_archive_path='',
+                                    html_archive_offset=0,
+                                    html_archive_length=0,
+                                    html_archive_codec='',
+                                    compressed_html_bytes=0
+                                WHERE id=?
+                                """,
+                                (int(row["id"]),),
+                            )
+                        continue
+                    raw_bytes = int(row["raw_html_bytes"] or 0)
+                    if not raw_hash:
+                        raw_hash, reconstructed_bytes = raw_payload_identity(
+                            payload,
+                            str(row["html_archive_codec"] or ""),
+                        )
+                        raw_bytes = raw_bytes or reconstructed_bytes
+                    tld = (
+                        str(row["tld"] or "unknown")
+                        if subsystem == "zone" else "ai"
+                    )
+                    key = (
+                        f"{OBJECT_PREFIX}/{subsystem}/{tld}/"
+                        f"{raw_hash[:2]}/{raw_hash}.zlib"
+                    )
+                    result["bytes"] += len(payload)
+                    entries.append({
+                        "row": row,
+                        "payload": payload,
+                        "raw_hash": raw_hash,
+                        "raw_bytes": raw_bytes,
+                        "key": key,
+                    })
+                if dry_run:
+                    continue
+                unique_payloads = {
+                    entry["key"]: entry["payload"] for entry in entries
+                }
+                outcomes = list(pool.map(
+                    lambda item: _store_verified(
+                        item[0], item[1], verify_uploads
+                    ),
+                    unique_payloads.items(),
+                ))
+                result["uploaded_objects"] += outcomes.count("uploaded")
+                result["reused_objects"] += outcomes.count("reused")
+                for entry in entries:
+                    row = entry["row"]
                     conn.execute(
                         """
-                        UPDATE pages SET html_archive_path='',
-                            html_archive_offset=0,html_archive_length=0,
-                            html_archive_codec='',compressed_html_bytes=0
+                        UPDATE pages SET raw_html_hash=?,raw_html_bytes=?,
+                            html_archive_path=?,html_archive_offset=0,
+                            html_archive_length=?,compressed_html_bytes=?
                         WHERE id=?
                         """,
-                        (int(row["id"]),),
+                        (
+                            entry["raw_hash"],
+                            entry["raw_bytes"],
+                            entry["key"],
+                            len(entry["payload"]),
+                            len(entry["payload"]),
+                            int(row["id"]),
+                        ),
                     )
-                continue
-            raw_bytes = int(row["raw_html_bytes"] or 0)
-            if not raw_hash:
-                raw_hash, reconstructed_bytes = raw_payload_identity(
-                    payload,
-                    str(row["html_archive_codec"] or ""),
-                )
-                raw_bytes = raw_bytes or reconstructed_bytes
-            tld = str(row["tld"] or "unknown") if subsystem == "zone" else "ai"
-            key = f"{OBJECT_PREFIX}/{subsystem}/{tld}/{raw_hash[:2]}/{raw_hash}.zlib"
-            result["bytes"] += len(payload)
-            if dry_run:
-                continue
-            if key not in checked_keys:
-                if exists(key):
-                    result["reused_objects"] += 1
-                else:
-                    write_bytes(key, payload)
-                    result["uploaded_objects"] += 1
-                if verify_uploads and read_bytes(key) != payload:
-                    raise RuntimeError(f"Object verification failed: {key}")
-                checked_keys.add(key)
-            conn.execute(
-                """
-                UPDATE pages SET raw_html_hash=?,raw_html_bytes=?,
-                    html_archive_path=?,html_archive_offset=0,
-                    html_archive_length=?,compressed_html_bytes=?
-                WHERE id=?
-                """,
-                (
-                    raw_hash,
-                    raw_bytes,
-                    key,
-                    len(payload),
-                    len(payload),
-                    int(row["id"]),
-                ),
-            )
-            conn.execute(
-                """
-                INSERT INTO html_blobs(
-                    raw_html_hash,archive_path,archive_offset,archive_length,
-                    archive_codec,raw_bytes,created_at
-                ) VALUES (?,?,0,?,?,?,?)
-                ON CONFLICT(raw_html_hash) DO UPDATE SET
-                    archive_path=excluded.archive_path,
-                    archive_offset=0,
-                    archive_length=excluded.archive_length,
-                    archive_codec=excluded.archive_codec,
-                    raw_bytes=excluded.raw_bytes
-                """,
-                (
-                    raw_hash,
-                    key,
-                    len(payload),
-                    str(row["html_archive_codec"] or ""),
-                    raw_bytes,
-                    datetime.now(timezone.utc).isoformat(),
-                ),
-            )
-            result["migrated_pages"] += 1
-            if position % 100 == 0:
+                    conn.execute(
+                        """
+                        INSERT INTO html_blobs(
+                            raw_html_hash,archive_path,archive_offset,
+                            archive_length,archive_codec,raw_bytes,created_at
+                        ) VALUES (?,?,0,?,?,?,?)
+                        ON CONFLICT(raw_html_hash) DO UPDATE SET
+                            archive_path=excluded.archive_path,
+                            archive_offset=0,
+                            archive_length=excluded.archive_length,
+                            archive_codec=excluded.archive_codec,
+                            raw_bytes=excluded.raw_bytes
+                        """,
+                        (
+                            entry["raw_hash"],
+                            entry["key"],
+                            len(entry["payload"]),
+                            str(row["html_archive_codec"] or ""),
+                            entry["raw_bytes"],
+                            datetime.now(timezone.utc).isoformat(),
+                        ),
+                    )
+                    result["migrated_pages"] += 1
                 conn.commit()
         if not dry_run:
             conn.commit()
@@ -254,6 +289,7 @@ def main() -> None:
         "--subsystem", choices=("all", "ai", "zone"), default="all"
     )
     parser.add_argument("--no-verify", action="store_true")
+    parser.add_argument("--workers", type=int, default=16)
     args = parser.parse_args()
     if not using_object_storage():
         raise SystemExit("S3_BUCKET is not configured; refusing migration.")
@@ -266,6 +302,7 @@ def main() -> None:
             dry_run=args.dry_run,
             limit=max(0, args.limit),
             verify_uploads=not args.no_verify,
+            workers=max(1, args.workers),
         )
         for subsystem in subsystems
     }
