@@ -67,6 +67,21 @@ class GlasswingFitScoringTests(unittest.TestCase):
         self.assertGreaterEqual(score, 60)
         self.assertEqual(pillar, "intelligent_enterprise_defense")
 
+    def test_video_security_company_gets_defense_not_physical_ai_pillar(self):
+        # "physical security"/"video security" used to appear in both
+        # physical_ai's and intelligent_enterprise_defense's term lists --
+        # a camera-monitoring security vendor always won a tied vote toward
+        # physical_ai (defined first in THESIS), even though a surveillance
+        # SaaS is a security-defense product, not a robotics/autonomous-
+        # systems one. This was a real, visible skew: 3 of the top 4
+        # "Investable" companies by priority score were tagged Physical AI.
+        _, pillar, _, _ = score_text(
+            "Cloud video security platform for physical security teams. "
+            "AI-powered CCTV monitoring, alerts, and threat detection for "
+            "enterprise security operations."
+        )
+        self.assertEqual(pillar, "intelligent_enterprise_defense")
+
     def test_usable_html_gets_low_nonzero_coverage_score(self):
         score = self.score(
             "A neighborhood bakery publishing its menu, opening hours, "

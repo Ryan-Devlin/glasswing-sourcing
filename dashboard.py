@@ -17,7 +17,6 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 from classification_store import (
-    classification_bucket_counts,
     classification_source_label,
     frame_from_store,
 )
@@ -161,11 +160,6 @@ def read_screened_classifications() -> pd.DataFrame:
     """Read the canonical cross-service store, not a container-local CSV."""
     return frame_from_store()
 
-
-@st.cache_data(show_spinner=False, ttl=10, max_entries=4)
-def read_bucket_counts(run_id: str = "") -> dict[str, int]:
-    """Fast live summary that does not load every stored website excerpt."""
-    return classification_bucket_counts(run_id=run_id)
 
 def read_status() -> dict:
     if not RUN_STATUS.exists():
@@ -1719,54 +1713,6 @@ with run_id_col:
             st.caption("No active or recently completed run is selected.")
     else:
         st.caption("Showing the latest saved result for every known domain.")
-
-summary_run_id = current_run_id if result_scope == "Current Run" else ""
-summary_raw_counts = read_bucket_counts(summary_run_id)
-summary_specs = [
-    ("Investable", ("priority",)),
-    ("Coming Soon", ("coming_soon",)),
-    ("Needs Review", ("review",)),
-    ("Potential Comp", ("comp",)),
-    ("Insufficient Evidence", ("insufficient", "ghost", "screened_out")),
-    ("Hard Denied", ("reject",)),
-]
-summary_counts = {
-    label: sum(int(summary_raw_counts.get(bucket, 0)) for bucket in buckets)
-    for label, buckets in summary_specs
-}
-st.markdown("#### Live classification buckets")
-summary_columns = st.columns(len(summary_specs))
-for column, (label, _) in zip(summary_columns, summary_specs):
-    column.metric(label, f"{summary_counts[label]:,}")
-summary_chart = pd.DataFrame({
-    "Bucket": list(summary_counts),
-    "Companies": list(summary_counts.values()),
-})
-st.bar_chart(
-    summary_chart,
-    x="Bucket",
-    y="Companies",
-    x_label="",
-    y_label="Companies",
-    height=230,
-)
-summary_total = sum(summary_counts.values())
-if result_scope == "Current Run":
-    st.caption(
-        f"{summary_total:,} saved bucket outcomes for run "
-        f"{current_run_id or '(not available)'}. This summary reads directly "
-        "from the shared classification database."
-    )
-    if current_run_id and summary_total == 0 and int(
-        stream_status.get("screened", 0) or 0
-    ):
-        st.warning(
-            "The worker reports classified websites, but no rows for this run "
-            "are visible in the shared classification database yet. Use All "
-            "History below while the shared records catch up."
-        )
-else:
-    st.caption(f"{summary_total:,} saved outcomes across all sources and runs.")
 
 approved_all = read_csv_safely(LLM / "llm_approved_master.csv")
 verified_leads = (

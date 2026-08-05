@@ -59,6 +59,13 @@ div[data-testid="stMetricLabel"] {
    density of widgets; tighten it slightly toward an app-like feel. */
 div[data-testid="stVerticalBlock"] { gap: 0.6rem; }
 
+/* Streamlit dims every element to ~60% opacity while a rerun is pending
+   (its own [data-stale="true"] attribute), which on a data-heavy page reads
+   as the whole app greying out on every click. The content is still
+   correct while stale -- suppress the fade rather than the (useful)
+   top-right "running" spinner, which is untouched. */
+[data-stale="true"] { opacity: 1 !important; transition: none !important; }
+
 /* Top navigation: give the active page real visual weight instead of the
    default thin underline-only distinction. */
 div[data-testid="stTabs"] button[aria-selected="true"] p {

@@ -144,8 +144,7 @@ THESIS = {
         "autonomous system", "autonomous systems", "sensor fusion",
         "predictive maintenance", "industrial automation", "digital twin",
         "edge ai", "robot perception", "real-world environment",
-        "telemetry", "physical security",
-        "video security", "emergency response", "physical engineering",
+        "telemetry", "emergency response", "physical engineering",
         "application-layer robotics", "robotics evaluation",
         "self-propelled vehicle", "satellite imagery", "aerial imagery",
         "geospatial intelligence", "autonomous reliability",
@@ -173,8 +172,8 @@ THESIS = {
         "dynamic masking", "security proxy", "protocol-aware",
         "ai security", "agent security", "security and compliance",
         "attack corpus", "audit-ready", "physical security",
-        "agent security protocol", "programmable guardrails",
-        "mpc co-signing",
+        "video security", "agent security protocol",
+        "programmable guardrails", "mpc co-signing",
     ],
     "collaborative_intelligence": [
         "collaborative intelligence", "ai teammate", "copilot",
@@ -1380,7 +1379,9 @@ def media_newsletter_assessment(text: str) -> tuple[bool, list[str]]:
             ["webinar", "live webinar", "on-demand webinar", "virtual event",
              "free webinar"],
             ["register", "rsvp", "save your seat", "reserve your seat",
-             "agenda", "speakers", "sign up to attend"],
+             "agenda", "speakers", "sign up to attend",
+             "watch now", "watch on demand", "webinar recording",
+             "hosted by", "save the date"],
         ),
     )
     for identity_terms, confirming_terms in education_patterns:
@@ -1390,6 +1391,12 @@ def media_newsletter_assessment(text: str) -> tuple[bool, list[str]]:
         ]
         if identity and confirming:
             education_identity_hits.extend(identity + confirming[:2])
+    # Invite copy just as often reads "Join <company> for a live webinar" as
+    # it does "Register now" -- a reported case used only this phrasing and
+    # slipped through undetected since it shares no words with the flat
+    # confirming-term list above.
+    if re.search(r"\bjoin\b[^.]{0,60}\bwebinar\b", leading_copy):
+        education_identity_hits.append("join ... for a webinar")
 
     directory_identity_hits: list[str] = []
     directory_identity = [

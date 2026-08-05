@@ -88,6 +88,18 @@ class RuleCalibrationTests(unittest.TestCase):
         )
         self.assertTrue(webinar)
 
+    def test_webinar_invite_without_register_rsvp_language_is_still_caught(self):
+        # Reported case: this invite copy scored 98 because it shares no
+        # words with the "register/RSVP/agenda/speakers" confirming list --
+        # only "Join <company> for a ... webinar" identifies it as an event.
+        webinar, evidence = media_newsletter_assessment(
+            "Join Flux for a live webinar on engineering intelligence. Learn "
+            "how to measure AI development, improve visibility, reduce risk, "
+            "and prove engineering ROI."
+        )
+        self.assertTrue(webinar)
+        self.assertIn("join ... for a webinar", evidence)
+
     def test_personal_portfolio_site_is_non_product_content(self):
         personal, _ = media_newsletter_assessment(
             "Welcome to my personal website. This is my portfolio "
