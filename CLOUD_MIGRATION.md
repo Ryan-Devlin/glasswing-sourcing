@@ -84,6 +84,14 @@ See `.env.example` for every variable and its default (unset = local mode).
   a separate, deliberate, explicitly-confirmed action, not something to run
   opportunistically. It isn't necessary for R2 to be "live": new crawls
   already land there.
+- **Cloud workers do not write bulk compatibility CSV mirrors by default.**
+  PostgreSQL is the live source for all-screened and screened-out records;
+  retaining the same full payloads as CSV on a worker volume duplicated
+  hundreds of megabytes and forced periodic full rewrites. Local SQLite mode
+  keeps those exports, and `GLASSWING_BULK_CSV_EXPORTS=1` can opt a legacy
+  cloud consumer back in. `migrate_legacy_html_to_object_storage.py` safely
+  moves still-live pre-R2 HTML-pack blocks into deterministic verified objects
+  before their old local archive directory is retired.
 - **`.AI` search (ai_search subproject) has a tested Postgres dual-backend**,
   gated on its own `AI_SEARCH_DATABASE_URL` (never the classification
   store's `DATABASE_URL`). Covers the full schema (domains/pages/

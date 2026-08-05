@@ -27,6 +27,7 @@ from classification_store import (
     export_all_screened_csv,
     record_automated_exclusions,
     upsert_classifications,
+    using_classification_postgres,
 )
 
 from common import (
@@ -4065,6 +4066,14 @@ def retention_minimum_rating() -> int:
     return max(0, min(configured, 100))
 
 
+def bulk_compatibility_exports_enabled() -> bool:
+    """Keep enormous CSV mirrors out of cloud worker volumes by default."""
+    configured = os.getenv("GLASSWING_BULK_CSV_EXPORTS", "").strip().lower()
+    if configured:
+        return configured not in {"0", "false", "no", "off"}
+    return not using_classification_postgres()
+
+
 def automated_discard_mask(output: pd.DataFrame) -> pd.Series:
     """Select disposable model outcomes while preserving useful ambiguity."""
     buckets = output.get(
@@ -4206,25 +4215,27 @@ def persist_screening_output(output: pd.DataFrame) -> dict[str, int]:
         candidates,
         key="domain",
     )
-    upsert_csv(
-        FILTERED / "screened_out_master.csv",
-        screened_out,
-        key="domain",
-    )
-    upsert_csv(
-        FILTERED / "ghost_inaccessible_master.csv",
-        ghost,
-        key="domain",
-    )
-    # SQLite is canonical. The legacy CSV is refreshed at a controlled cadence
-    # for older scripts instead of rereading and rewriting 60+ MB every batch.
-    exported_master = export_all_screened_csv(
-        minimum_interval_seconds=300,
-    )
-    if exported_master is not None:
-        crawled_view_counts = persist_crawled_corpus_views(
-            exported_master
+    if bulk_compatibility_exports_enabled():
+        upsert_csv(
+            FILTERED / "screened_out_master.csv",
+            screened_out,
+            key="domain",
         )
+        upsert_csv(
+            FILTERED / "ghost_inaccessible_master.csv",
+            ghost,
+            key="domain",
+        )
+        # Local SQLite mode retains compatibility exports for old scripts.
+        exported_master = export_all_screened_csv(
+            minimum_interval_seconds=300,
+        )
+        if exported_master is not None:
+            crawled_view_counts = persist_crawled_corpus_views(
+                exported_master
+            )
+        else:
+            crawled_view_counts = {}
     else:
         crawled_view_counts = {}
     classification_total = count_classifications()
