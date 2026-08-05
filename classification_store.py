@@ -232,6 +232,29 @@ def migrate(conn: sqlite3.Connection | PostgresConnection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_training_labels_source
             ON training_labels(source, labeled_at DESC);
+
+        CREATE TABLE IF NOT EXISTS daily_digest_runs (
+            run_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            completed_at TEXT NOT NULL DEFAULT '',
+            candidate_count INTEGER NOT NULL DEFAULT 0,
+            sent_count INTEGER NOT NULL DEFAULT 0,
+            recipient_count INTEGER NOT NULL DEFAULT 0,
+            error TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_daily_digest_runs_started
+            ON daily_digest_runs(started_at DESC);
+
+        CREATE TABLE IF NOT EXISTS daily_digest_items (
+            recipient TEXT NOT NULL,
+            domain TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            sent_at TEXT NOT NULL,
+            PRIMARY KEY (recipient, domain)
+        );
+        CREATE INDEX IF NOT EXISTS idx_daily_digest_items_sent
+            ON daily_digest_items(sent_at DESC);
         """
     )
     if postgres:

@@ -36,6 +36,12 @@ from zone_universe.search import search_pages
 
 st.title("Glasswing Sourcing")
 
+# Email digests deep-link to `/?q=domain.ai`. Preserve a user's in-page search
+# after the first load, while making the emailed Review link immediately useful.
+deep_link_query = str(st.query_params.get("q", "")).strip()
+if deep_link_query and not st.session_state.get("overview_query"):
+    st.session_state["overview_query"] = deep_link_query
+
 
 @st.cache_data(show_spinner=False, ttl=15)
 def cached_health():
