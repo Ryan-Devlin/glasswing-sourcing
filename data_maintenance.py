@@ -10,6 +10,7 @@ from archive_gc import compact_html_archive
 from rejection_cleanup import (
     AI_SEARCH_DB,
     ZONE_DB,
+    automated_rejected_domains,
     purge_automated_rejections,
     rebuild_full_text_indexes,
 )
@@ -29,6 +30,11 @@ def main() -> None:
         help="Remove derived payloads for non-manual hard denials.",
     )
     purge.add_argument("--vacuum", action="store_true")
+    purge.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Count protected automatic discards without deleting anything.",
+    )
     commands.add_parser(
         "clean-all",
         help="Rebuild ground truth, purge automatic denials, and export training data.",
@@ -48,7 +54,14 @@ def main() -> None:
         _, _, manifest = write_training_exports()
         result["training_export"] = manifest
     elif args.command == "purge-python-rejections":
-        result = purge_automated_rejections(vacuum=args.vacuum)
+        if args.dry_run:
+            domains = automated_rejected_domains()
+            result = {
+                "dry_run": True,
+                "purge_candidates": len(domains),
+            }
+        else:
+            result = purge_automated_rejections(vacuum=args.vacuum)
     elif args.command == "compact-html":
         result = {
             "ai": compact_html_archive(

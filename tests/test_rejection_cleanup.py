@@ -8,12 +8,62 @@ import pandas as pd
 
 from classification_store import connect_store, upsert_classifications
 from rejection_cleanup import (
+    automated_rejected_domains,
     purge_automated_rejections,
     rebuild_full_text_indexes,
 )
 
 
 class RejectionCleanupTests(unittest.TestCase):
+    def test_historical_selector_matches_live_storage_gate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "classifications.sqlite3"
+            upsert_classifications(
+                pd.DataFrame([
+                    {
+                        "domain": "denied.ai",
+                        "routing_bucket": "reject",
+                        "glasswing_rating": 90,
+                    },
+                    {
+                        "domain": "ghost.ai",
+                        "routing_bucket": "ghost",
+                        "glasswing_rating": 90,
+                    },
+                    {
+                        "domain": "weak.ai",
+                        "routing_bucket": "insufficient",
+                        "glasswing_rating": 24,
+                    },
+                    {
+                        "domain": "borderline.ai",
+                        "routing_bucket": "insufficient",
+                        "glasswing_rating": 25,
+                    },
+                    {
+                        "domain": "review.ai",
+                        "routing_bucket": "review",
+                        "glasswing_rating": 1,
+                    },
+                    {
+                        "domain": "slop.ai",
+                        "routing_bucket": "priority",
+                        "glasswing_rating": 80,
+                        "venture_slop_risk": True,
+                    },
+                ]),
+                database,
+            )
+            with patch(
+                "rejection_cleanup.protected_training_domains",
+                return_value=set(),
+            ):
+                selected = automated_rejected_domains(database)
+            self.assertEqual(
+                selected,
+                {"denied.ai", "ghost.ai", "weak.ai", "slop.ai"},
+            )
+
     def test_full_text_rebuild_drops_orphans(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

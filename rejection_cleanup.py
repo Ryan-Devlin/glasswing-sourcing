@@ -21,6 +21,7 @@ from ai_search.database import index_page as index_ai_search_page
 from classification_store import (
     CLASSIFICATION_DB,
     connect_store,
+    record_automated_exclusions,
     using_classification_postgres,
 )
 from common import (
@@ -40,24 +41,75 @@ ZONE_DB = ZONE_UNIVERSE_DB
 PIPELINE_DATABASE_ENV_VAR = "PIPELINE_DATABASE_URL"
 
 
-def automated_rejected_domains(
+def automated_discard_records(
+    path: Path | str = CLASSIFICATION_DB,
+) -> list[dict[str, object]]:
+    """Return historical model outcomes covered by the live retention gate."""
+    database = Path(path)
+    if not using_classification_postgres() and not database.exists():
+        return []
+    protected = protected_training_domains()
+    with connect_store(database, read_only=True) as conn:
+        rows = [
+            {
+                "domain": stable_domain(row["domain"]),
+                "routing_bucket": str(row["routing_bucket"] or ""),
+                "routing_reason": str(row["routing_reason"] or ""),
+                "glasswing_rating": int(row["fit_score"] or 0),
+                "content_source": str(row["content_source"] or ""),
+            }
+            for row in conn.execute(
+                """
+                SELECT domain,routing_bucket,routing_reason,fit_score,
+                       content_source
+                FROM classifications
+                WHERE routing_bucket IN ('reject','ghost')
+                   OR (
+                       fit_score < 25
+                       AND routing_bucket NOT IN (
+                           'priority','coming_soon','review','comp'
+                       )
+                   )
+                   OR record_json LIKE '%"venture_slop_risk":true%'
+                   OR record_json LIKE '%"venture_slop_risk":"true"%'
+                """
+            )
+        ]
+    return [
+        row for row in rows
+        if row["domain"] and row["domain"] not in protected
+    ]
+
+
+def automated_excluded_domains(
     path: Path | str = CLASSIFICATION_DB,
 ) -> set[str]:
     database = Path(path)
     if not using_classification_postgres() and not database.exists():
         return set()
     protected = protected_training_domains()
-    with connect_store(database, read_only=True) as conn:
-        domains = {
-            stable_domain(row["domain"])
-            for row in conn.execute(
-                """
-                SELECT domain FROM classifications
-                WHERE routing_bucket='reject'
-                """
-            )
-        }
+    try:
+        with connect_store(database, read_only=True) as conn:
+            domains = {
+                stable_domain(row["domain"])
+                for row in conn.execute(
+                    "SELECT domain FROM automated_exclusions"
+                )
+            }
+    except Exception as exc:
+        if "automated_exclusions" in str(exc):
+            return set()
+        raise
     return {domain for domain in domains if domain and domain not in protected}
+
+
+def automated_rejected_domains(
+    path: Path | str = CLASSIFICATION_DB,
+) -> set[str]:
+    """Compatibility name for every automatic storage-discard outcome."""
+    return {
+        str(row["domain"]) for row in automated_discard_records(path)
+    } | automated_excluded_domains(path)
 
 
 def _rebuild_ai_search_index_postgres() -> int:
@@ -261,15 +313,22 @@ def purge_automated_rejections(
     clean_csv: bool = True,
 ) -> dict[str, int]:
     """Remove every derived payload while protecting explicit human labels."""
-    requested = (
-        automated_rejected_domains(classification_db)
-        if domains is None
-        else {
+    if domains is None:
+        discard_records = automated_discard_records(classification_db)
+        if discard_records:
+            record_automated_exclusions(
+                discard_records,
+                path=classification_db,
+            )
+        requested = {
+            str(record["domain"]) for record in discard_records
+        } | automated_excluded_domains(classification_db)
+    else:
+        requested = {
             stable_domain(domain)
             for domain in domains
             if stable_domain(domain)
         }
-    )
     protected = protected_training_domains()
     selected = sorted(requested - protected)
     result = {
