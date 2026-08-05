@@ -14,6 +14,7 @@ import hashlib
 import json
 import sys
 import zlib
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -89,6 +90,16 @@ def read_legacy_block(
     return payload
 
 
+def raw_payload_identity(payload: bytes, codec: str) -> tuple[str, int]:
+    """Return the canonical raw-content hash and size for an archive block."""
+    if codec != "zlib":
+        raise RuntimeError(
+            f"Cannot reconstruct a missing hash for archive codec: {codec}"
+        )
+    raw = zlib.decompress(payload)
+    return hashlib.sha256(raw).hexdigest(), len(raw)
+
+
 def _rows(conn: Any, subsystem: str) -> list[Any]:
     fields = "id,raw_html_hash,html_archive_path,html_archive_offset,html_archive_length,html_archive_codec,raw_html_bytes"
     if subsystem == "zone":
@@ -134,8 +145,6 @@ def migrate_subsystem(
         checked_keys: set[str] = set()
         for position, row in enumerate(rows, start=1):
             raw_hash = str(row["raw_html_hash"] or "")
-            if not raw_hash:
-                raise RuntimeError(f"Page {row['id']} has no raw HTML hash")
             payload = read_legacy_block(
                 row["html_archive_path"],
                 archive_root=archive_root,
@@ -144,6 +153,13 @@ def migrate_subsystem(
                 codec=str(row["html_archive_codec"] or ""),
                 raw_hash=raw_hash,
             )
+            raw_bytes = int(row["raw_html_bytes"] or 0)
+            if not raw_hash:
+                raw_hash, reconstructed_bytes = raw_payload_identity(
+                    payload,
+                    str(row["html_archive_codec"] or ""),
+                )
+                raw_bytes = raw_bytes or reconstructed_bytes
             tld = str(row["tld"] or "unknown") if subsystem == "zone" else "ai"
             key = f"{OBJECT_PREFIX}/{subsystem}/{tld}/{raw_hash[:2]}/{raw_hash}.zlib"
             result["bytes"] += len(payload)
@@ -160,19 +176,41 @@ def migrate_subsystem(
                 checked_keys.add(key)
             conn.execute(
                 """
-                UPDATE pages SET html_archive_path=?,html_archive_offset=0,
+                UPDATE pages SET raw_html_hash=?,raw_html_bytes=?,
+                    html_archive_path=?,html_archive_offset=0,
                     html_archive_length=?,compressed_html_bytes=?
                 WHERE id=?
                 """,
-                (key, len(payload), len(payload), int(row["id"])),
+                (
+                    raw_hash,
+                    raw_bytes,
+                    key,
+                    len(payload),
+                    len(payload),
+                    int(row["id"]),
+                ),
             )
             conn.execute(
                 """
-                UPDATE html_blobs SET archive_path=?,archive_offset=0,
-                    archive_length=?
-                WHERE raw_html_hash=?
+                INSERT INTO html_blobs(
+                    raw_html_hash,archive_path,archive_offset,archive_length,
+                    archive_codec,raw_bytes,created_at
+                ) VALUES (?,?,0,?,?,?,?)
+                ON CONFLICT(raw_html_hash) DO UPDATE SET
+                    archive_path=excluded.archive_path,
+                    archive_offset=0,
+                    archive_length=excluded.archive_length,
+                    archive_codec=excluded.archive_codec,
+                    raw_bytes=excluded.raw_bytes
                 """,
-                (key, len(payload), raw_hash),
+                (
+                    raw_hash,
+                    key,
+                    len(payload),
+                    str(row["html_archive_codec"] or ""),
+                    raw_bytes,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
             )
             result["migrated_pages"] += 1
             if position % 100 == 0:

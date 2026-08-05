@@ -8,6 +8,7 @@ import pytest
 
 from migrate_legacy_html_to_object_storage import (
     is_object_key,
+    raw_payload_identity,
     read_legacy_block,
     resolve_legacy_path,
 )
@@ -59,3 +60,11 @@ def test_read_legacy_block_rejects_bad_hash(tmp_path: Path):
 def test_object_key_detection():
     assert is_object_key("html-archive/migrated/ai/a/a.zlib") is True
     assert is_object_key("/data/html/001.htmlpack") is False
+
+
+def test_raw_payload_identity_reconstructs_legacy_missing_hash():
+    raw = b"<html>legacy page without database hash</html>"
+    assert raw_payload_identity(zlib.compress(raw), "zlib") == (
+        hashlib.sha256(raw).hexdigest(),
+        len(raw),
+    )
