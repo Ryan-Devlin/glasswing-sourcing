@@ -25,6 +25,7 @@ if str(ROOT) not in sys.path:
 if str(SEARCH_SRC) not in sys.path:
     sys.path.insert(0, str(SEARCH_SRC))
 
+from ai_search.database import AI_SEARCH_DATABASE_ENV_VAR
 from ai_search.og_bridge import (
     crawler_state,
     enqueue_for_screening,
@@ -32,6 +33,7 @@ from ai_search.og_bridge import (
     search_companies,
     search_stats,
 )
+from db_backend import using_postgres
 from classification_store import (
     bootstrap_from_csv,
     classification_map as store_classification_map,
@@ -121,7 +123,7 @@ def apply_actions(edited: pd.DataFrame) -> dict[str, int]:
 
 st.title(".AI Company Search")
 
-if not SEARCH_DB.exists():
+if not using_postgres(AI_SEARCH_DATABASE_ENV_VAR) and not SEARCH_DB.exists():
     st.error(f"Search database not found: {SEARCH_DB}")
     st.stop()
 

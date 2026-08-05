@@ -106,3 +106,19 @@ class PageSmokeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AiSearchPagePostgresGuardTests(unittest.TestCase):
+    """The page's top-level "database not found" guard used to check only
+    the local SQLite file's existence, regardless of the Postgres backend.
+    In production, AI_SEARCH_DATABASE_URL is set and that local file was
+    correctly cleaned up as unused -- but the guard didn't know that, and
+    hard-stopped the entire page with a red error for every visitor."""
+
+    def test_missing_file_guard_is_skipped_when_using_postgres(self):
+        source = (ROOT / "pages" / "ai_search.py").read_text(encoding="utf-8")
+        self.assertIn(
+            "if not using_postgres(AI_SEARCH_DATABASE_ENV_VAR) "
+            "and not SEARCH_DB.exists():",
+            source,
+        )
