@@ -14,13 +14,23 @@ class StreamReconnectTests(unittest.TestCase):
         self.assertIn("ping_timeout=None", self.pipeline)
 
     def test_successful_reconnect_clears_active_error(self):
-        self.assertIn('stage="listening",\n                    connected=True', self.pipeline)
+        self.assertIn('stream_connection_state="connected"', self.pipeline)
         self.assertIn('last_error=""', self.pipeline)
         self.assertIn("stream_reconnect_count", self.pipeline)
         self.assertIn("last_stream_disconnect", self.pipeline)
 
+    def test_listener_does_not_own_processing_stage(self):
+        listener = self.pipeline.split("async def listener(", 1)[1].split(
+            "def read_status", 1
+        )[0]
+        self.assertNotIn('stage="listening"', listener)
+        self.assertNotIn('stage="reconnecting"', listener)
+
     def test_reconnect_is_not_presented_as_pipeline_crash(self):
-        self.assertIn('if stream_stage == "reconnecting":', self.dashboard)
+        self.assertIn(
+            'connection_state in {"connecting", "reconnecting"}',
+            self.dashboard,
+        )
         self.assertIn("reconnecting automatically", self.dashboard)
 
 

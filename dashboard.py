@@ -1649,7 +1649,10 @@ if running:
 
 if stream_status.get("last_error"):
     stream_stage = str(stream_status.get("stage", "")).lower()
-    if stream_stage == "reconnecting":
+    connection_state = str(
+        stream_status.get("stream_connection_state", stream_stage)
+    ).lower()
+    if connection_state in {"connecting", "reconnecting"}:
         st.warning(
             "CertStream connection was interrupted. The pipeline is "
             f"reconnecting automatically: {stream_status['last_error']}"

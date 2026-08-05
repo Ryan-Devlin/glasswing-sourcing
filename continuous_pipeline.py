@@ -110,7 +110,7 @@ def write_status(**updates: object) -> None:
                 current = {}
         urgent = any(
             key in updates and updates[key] != current.get(key)
-            for key in ("running", "stage", "last_error")
+            for key in ("running", "stage", "connected", "last_error")
         )
         current.update(updates)
         atomic_write_json(STREAM_STATUS, current)
@@ -1080,7 +1080,14 @@ async def listener(
 
     while not stop.is_set():
         try:
-            write_status(stage="listening", connected=False)
+            # Connection state and processing state are independent. The
+            # listener must never overwrite an active worker-owned
+            # ``screening``/``paused`` stage merely because it connects,
+            # receives an event, or retries the websocket.
+            write_status(
+                connected=False,
+                stream_connection_state="connecting",
+            )
             async with websockets.connect(
                 url,
                 ping_interval=20,
@@ -1093,8 +1100,8 @@ async def listener(
                 ping_timeout=None,
             ) as websocket:
                 write_status(
-                    stage="listening",
                     connected=True,
+                    stream_connection_state="connected",
                     last_error="",
                     updated_at=utc_now(),
                 )
@@ -1216,7 +1223,7 @@ async def listener(
             )[:500]
             write_status(
                 connected=False,
-                stage="reconnecting",
+                stream_connection_state="reconnecting",
                 last_error=disconnect_detail,
                 last_stream_disconnect=disconnect_detail,
                 last_stream_disconnect_at=utc_now(),
@@ -1233,6 +1240,14 @@ def read_status() -> dict[str, object]:
         return json.loads(STREAM_STATUS.read_text(encoding="utf-8"))
     except Exception:
         return {}
+
+
+def pipeline_idle_stage(
+    status: dict[str, object] | None = None,
+) -> str:
+    """Describe an idle worker without clobbering active batch state."""
+    snapshot = status if status is not None else read_status()
+    return "listening" if bool(snapshot.get("connected")) else "reconnecting"
 
 
 def adaptive_screening_profile(
@@ -1429,7 +1444,7 @@ async def worker_loop(
             write_status(
                 queue=counts_before,
                 queue_by_extension=extension_counts(conn),
-                stage="listening",
+                stage=pipeline_idle_stage(),
                 backlog_mode=profile["mode"],
                 **rates,
                 updated_at=utc_now(),
@@ -1545,7 +1560,7 @@ async def worker_loop(
                 current_batch=[],
                 queue=queue_counts(conn),
                 queue_by_extension=extension_counts(conn),
-                stage="listening",
+                stage=pipeline_idle_stage(),
                 last_error="",
                 backlog_mode=profile["mode"],
                 last_batch_seconds=round(batch_seconds, 2),
@@ -1588,7 +1603,7 @@ async def worker_loop(
                 claude_calls=automatic_total + manual_total,
                 queue=queue_counts(conn),
                 queue_by_extension=extension_counts(conn),
-                stage="listening",
+                stage=pipeline_idle_stage(),
                 updated_at=utc_now(),
             )
         except Exception as exc:
@@ -1606,7 +1621,7 @@ async def worker_loop(
             write_status(
                 failed_this_run=failed_this_run,
                 current_batch=[],
-                stage="listening",
+                stage=pipeline_idle_stage(),
                 last_error=(
                     f"{type(exc).__name__}: {exc}"
                 )[:500],

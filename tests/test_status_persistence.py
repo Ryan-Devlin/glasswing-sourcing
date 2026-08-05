@@ -10,6 +10,43 @@ import continuous_pipeline
 
 
 class StatusPersistenceTests(unittest.TestCase):
+    def test_listener_connectivity_does_not_clobber_active_screening_stage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            status = Path(directory) / "continuous_status.json"
+            with patch.object(
+                continuous_pipeline, "STREAM_STATUS", status
+            ), patch.object(
+                continuous_pipeline,
+                "shared_pipeline_backend_available",
+                return_value=False,
+            ):
+                continuous_pipeline.write_status(
+                    running=True,
+                    stage="screening",
+                    current_batch=["active.ai"],
+                )
+                continuous_pipeline.write_status(
+                    connected=False,
+                    stream_connection_state="reconnecting",
+                )
+
+            snapshot = json.loads(status.read_text(encoding="utf-8"))
+            self.assertEqual(snapshot["stage"], "screening")
+            self.assertFalse(snapshot["connected"])
+            self.assertEqual(
+                snapshot["stream_connection_state"], "reconnecting"
+            )
+
+    def test_idle_stage_reflects_connection_without_mutating_status(self):
+        self.assertEqual(
+            continuous_pipeline.pipeline_idle_stage({"connected": True}),
+            "listening",
+        )
+        self.assertEqual(
+            continuous_pipeline.pipeline_idle_stage({"connected": False}),
+            "reconnecting",
+        )
+
     def test_status_snapshot_is_published_to_shared_cloud_store(self):
         with tempfile.TemporaryDirectory() as directory:
             status = Path(directory) / "continuous_status.json"
