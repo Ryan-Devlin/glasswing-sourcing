@@ -70,9 +70,13 @@ def automated_discard_records(
                            'priority','coming_soon','review','comp'
                        )
                    )
-                   OR record_json LIKE '%"venture_slop_risk":true%'
-                   OR record_json LIKE '%"venture_slop_risk":"true"%'
-                """
+                   OR record_json LIKE ?
+                   OR record_json LIKE ?
+                """,
+                (
+                    '%"venture_slop_risk":true%',
+                    '%"venture_slop_risk":"true"%',
+                ),
             )
         ]
     return [
