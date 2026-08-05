@@ -5,6 +5,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
+from pathlib import Path
+
+# Maintenance runs as a standalone command in its own Railway container, so
+# the two crawler packages are not installed into site-packages. Keep their
+# source roots importable exactly as the continuous worker does; otherwise a
+# production cleanup fails before it can inspect or protect any records.
+_PROJECT_ROOT = Path(__file__).resolve().parent
+for _source_root in (
+    _PROJECT_ROOT / "ai-domain-search-engine" / "src",
+    _PROJECT_ROOT / "zone-universe" / "src",
+):
+    if str(_source_root) not in sys.path:
+        sys.path.insert(0, str(_source_root))
 
 from archive_gc import compact_html_archive
 from rejection_cleanup import (
