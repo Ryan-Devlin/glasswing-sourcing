@@ -42,6 +42,120 @@ deep_link_query = str(st.query_params.get("q", "")).strip()
 if deep_link_query and not st.session_state.get("overview_query"):
     st.session_state["overview_query"] = deep_link_query
 
+with st.form("overview_search"):
+    search_input_col, search_button_col = st.columns([6, 1])
+    query_input = search_input_col.text_input(
+        "Search everything",
+        value=st.session_state.get("overview_query", ""),
+        placeholder="e.g. fintech, acme.ai, payments api",
+        label_visibility="collapsed",
+    )
+    submitted = search_button_col.form_submit_button(
+        "🔍 Search", type="primary", width="stretch"
+    )
+st.caption(
+    "Searches tracked companies plus everything the .AI and .COM/.APP "
+    "crawlers have indexed, all in one place."
+)
+if submitted:
+    st.session_state["overview_query"] = query_input.strip()
+active_query = st.session_state.get("overview_query", "")
+
+_LINK_COLUMN = st.column_config.LinkColumn(
+    "Domain",
+    display_text=r"https?://(?:www\.)?([^/]+).*",
+)
+
+
+def _clean_snippet(value: str, limit: int = 150) -> str:
+    text = (value or "").replace("<mark>", "").replace("</mark>", "")
+    return text if len(text) <= limit else text[:limit].rsplit(" ", 1)[0] + "…"
+
+
+def _company_blurb(row: dict) -> str | None:
+    """What the company actually does, not its own domain repeated back."""
+    for field in ("description", "excerpt"):
+        text = (row.get(field) or "").strip()
+        if text:
+            return _clean_snippet(text, limit=160)
+    name = (row.get("company_name") or "").strip()
+    if name and name.lower() != row["domain"].lower():
+        return name
+    return None
+
+
+if active_query:
+    company_rows = search_classifications(active_query, limit=25)
+    ai_rows = search_companies(AI_SEARCH_DB, active_query, limit=25)
+    zone_rows = search_pages(active_query, limit=25, database=ZONE_UNIVERSE_DB)
+
+    combined_rows = [
+        {
+            "_domain": row["domain"],
+            "Domain": row.get("final_url") or f"https://{row['domain']}",
+            "Source": classification_source_label(
+                row.get("content_source", "")
+            ),
+            "Title / match": _company_blurb(row) or "",
+            "Score": row["fit_score"],
+            "Updated": (row["updated_at"] or "")[:10],
+        }
+        for row in company_rows
+    ] + [
+        {
+            "_domain": row["domain"],
+            "Domain": row.get("final_url") or f"https://{row['domain']}",
+            "Source": ".AI page",
+            "Title / match": (
+                f"{row['title'] or '(no title)'} — "
+                f"{_clean_snippet(row['snippet'])}"
+            ),
+            "Score": "",
+            "Updated": (row["crawled_at"] or "")[:10],
+        }
+        for row in ai_rows
+    ] + [
+        {
+            "_domain": row["domain"],
+            "Domain": row.get("final_url") or f"https://{row['domain']}",
+            "Source": f"{row['tld']} page",
+            "Title / match": (
+                f"{row['title'] or '(no title)'} — "
+                f"{_clean_snippet(row['snippet'])}"
+            ),
+            "Score": "",
+            "Updated": (row["crawled_at"] or "")[:10],
+        }
+        for row in zone_rows
+    ]
+
+    st.subheader(f"Search results · {len(combined_rows):,}")
+    if combined_rows:
+        frame = pd.DataFrame(
+            combined_rows,
+            columns=["_domain", "Domain", "Source", "Title / match", "Score", "Updated"],
+        )
+        render_hideable_table(
+            frame,
+            domain_column="_domain",
+            visible_columns=["Domain", "Source", "Title / match", "Score", "Updated"],
+            key="overview_search_table",
+            column_config={"Domain": _LINK_COLUMN},
+        )
+        open_cols = st.columns(2)
+        if ai_rows and open_cols[0].button("Open full results in .AI Search"):
+            st.session_state["ai_page_query"] = active_query
+            st.session_state["ai_page_number"] = 1
+            st.switch_page("pages/ai_search.py")
+        if zone_rows and open_cols[1].button("Open full results in Zone Universe"):
+            st.session_state["zone_query"] = active_query
+            st.session_state["zone_page"] = 1
+            st.switch_page("pages/zone_universe.py")
+    else:
+        st.caption("No matches across tracked companies or either crawler's corpus.")
+
+st.divider()
+
 
 @st.cache_data(show_spinner=False, ttl=15)
 def cached_health():
@@ -80,11 +194,6 @@ with st.expander("Worker detail"):
 st.page_link("pages/system_health.py", label="Full system health", icon="🩺")
 
 st.divider()
-
-_LINK_COLUMN = st.column_config.LinkColumn(
-    "Domain",
-    display_text=r"https?://(?:www\.)?([^/]+).*",
-)
 
 st.subheader("Master company review")
 st.caption(
@@ -304,131 +413,3 @@ if master_next.button(
     st.session_state[master_page_key] = master_page + 1
     st.rerun()
 
-st.divider()
-
-with st.form("overview_search"):
-    query_input = st.text_input(
-        "Search companies and crawled pages",
-        value=st.session_state.get("overview_query", ""),
-        placeholder="e.g. fintech, acme.ai, payments api",
-    )
-    submitted = st.form_submit_button("Search", type="primary")
-
-if submitted:
-    st.session_state["overview_query"] = query_input.strip()
-
-active_query = st.session_state.get("overview_query", "")
-
-
-def _clean_snippet(value: str, limit: int = 150) -> str:
-    text = (value or "").replace("<mark>", "").replace("</mark>", "")
-    return text if len(text) <= limit else text[:limit].rsplit(" ", 1)[0] + "…"
-
-
-def _company_blurb(row: dict) -> str | None:
-    """What the company actually does, not its own domain repeated back."""
-    for field in ("description", "excerpt"):
-        text = (row.get(field) or "").strip()
-        if text:
-            return _clean_snippet(text, limit=160)
-    name = (row.get("company_name") or "").strip()
-    if name and name.lower() != row["domain"].lower():
-        return name
-    return None
-
-
-def _results_table(rows: list[dict], columns: list[str], *, key: str) -> None:
-    frame = pd.DataFrame(rows, columns=["_domain", *columns])
-    render_hideable_table(
-        frame,
-        domain_column="_domain",
-        visible_columns=columns,
-        key=key,
-        column_config={"Domain": _LINK_COLUMN},
-    )
-
-
-if active_query:
-    company_rows = search_classifications(active_query, limit=25)
-    st.subheader("Companies you're tracking")
-    if company_rows:
-        _results_table(
-            [
-                {
-                    "_domain": row["domain"],
-                    "Domain": row.get("final_url") or f"https://{row['domain']}",
-                    "Source": classification_source_label(
-                        row.get("content_source", "")
-                    ),
-                    "Description": _company_blurb(row) or "",
-                    "Thesis pillar": (
-                        row["thesis_pillar"].replace("_", " ").title()
-                        if row.get("thesis_pillar")
-                        else ""
-                    ),
-                    "Score": row["fit_score"],
-                    "Last updated": (row["updated_at"] or "")[:10],
-                }
-                for row in company_rows
-            ],
-            columns=[
-                "Domain",
-                "Source",
-                "Description",
-                "Thesis pillar",
-                "Score",
-                "Last updated",
-            ],
-            key="overview_companies_table",
-        )
-    else:
-        st.caption("No investable matches in your classification list.")
-
-    ai_rows = search_companies(AI_SEARCH_DB, active_query, limit=25)
-    st.subheader(".AI pages")
-    if ai_rows:
-        _results_table(
-            [
-                {
-                    "_domain": row["domain"],
-                    "Domain": row.get("final_url") or f"https://{row['domain']}",
-                    "Title": row["title"] or "(no title)",
-                    "Match": _clean_snippet(row["snippet"]),
-                    "Crawled": (row["crawled_at"] or "")[:10],
-                }
-                for row in ai_rows
-            ],
-            columns=["Domain", "Title", "Match", "Crawled"],
-            key="overview_ai_table",
-        )
-        if st.button("Open full results in .AI Search"):
-            st.session_state["ai_page_query"] = active_query
-            st.session_state["ai_page_number"] = 1
-            st.switch_page("pages/ai_search.py")
-    else:
-        st.caption("No matches in the .AI corpus.")
-
-    zone_rows = search_pages(active_query, limit=25, database=ZONE_UNIVERSE_DB)
-    st.subheader("Zone Universe pages (.com / .app)")
-    if zone_rows:
-        _results_table(
-            [
-                {
-                    "_domain": row["domain"],
-                    "Domain": row.get("final_url") or f"https://{row['domain']}",
-                    "TLD": row["tld"],
-                    "Title": row["title"] or "(no title)",
-                    "Match": _clean_snippet(row["snippet"]),
-                    "Crawled": (row["crawled_at"] or "")[:10],
-                }
-                for row in zone_rows
-            ],
-            columns=["Domain", "TLD", "Title", "Match", "Crawled"],
-            key="overview_zone_table",
-        )
-        if st.button("Open full results in Zone Universe"):
-            st.session_state["zone_query"] = active_query
-            st.session_state["zone_page"] = 1
-            st.switch_page("pages/zone_universe.py")
-    else:
-        st.caption("No matches in the .com/.app corpus.")
