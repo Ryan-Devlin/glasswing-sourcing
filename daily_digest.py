@@ -9,7 +9,9 @@ containers and deployments.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import html
+import json
 import os
 import smtplib
 import ssl
@@ -26,15 +28,19 @@ from classification_store import (
     CLASSIFICATION_DB,
     classification_source_label,
     connect_store,
+    upsert_claude_diligence,
 )
-from common import clean
+from common import clean, get_model
 from db_backend import begin_immediate
+from diligence_logic import DILIGENCE_VERSION
 
 
 DEFAULT_MIN_SCORE = 75
 DEFAULT_MIN_CONFIDENCE = 80
+DEFAULT_MIN_CLAUDE_SCORE = 70
 DEFAULT_LOOKBACK_HOURS = 24
-DEFAULT_MAX_COMPANIES = 20
+DEFAULT_MAX_COMPANIES = 5
+DEFAULT_CLAUDE_MAX_CALLS = 5
 
 
 def _integer_env(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -74,8 +80,11 @@ class DigestSettings:
     use_ssl: bool
     min_score: int
     min_confidence: int
+    min_claude_score: int
     lookback_hours: int
     max_companies: int
+    auto_claude: bool
+    claude_max_calls: int
     app_url: str
     timezone_name: str
 
@@ -100,11 +109,18 @@ class DigestSettings:
             min_confidence=_integer_env(
                 "DIGEST_MIN_CONFIDENCE", DEFAULT_MIN_CONFIDENCE, 0, 100
             ),
+            min_claude_score=_integer_env(
+                "DIGEST_MIN_CLAUDE_SCORE", DEFAULT_MIN_CLAUDE_SCORE, 0, 100
+            ),
             lookback_hours=_integer_env(
                 "DIGEST_LOOKBACK_HOURS", DEFAULT_LOOKBACK_HOURS, 1, 168
             ),
             max_companies=_integer_env(
-                "DIGEST_MAX_COMPANIES", DEFAULT_MAX_COMPANIES, 1, 100
+                "DIGEST_MAX_COMPANIES", DEFAULT_MAX_COMPANIES, 1, 5
+            ),
+            auto_claude=_boolean_env("DIGEST_AUTO_CLAUDE", True),
+            claude_max_calls=_integer_env(
+                "DIGEST_CLAUDE_MAX_CALLS", DEFAULT_CLAUDE_MAX_CALLS, 0, 5
             ),
             app_url=os.getenv("DIGEST_APP_URL", "").strip().rstrip("/"),
             timezone_name=os.getenv(
@@ -154,6 +170,9 @@ def qualified_candidates(
     params: list[object] = [
         settings.min_score,
         settings.min_confidence,
+        settings.min_claude_score,
+        DILIGENCE_VERSION,
+        since,
         since,
         *recipients,
         settings.max_companies,
@@ -164,12 +183,23 @@ def qualified_candidates(
             SELECT c.domain,c.company_name,c.final_url,c.description,c.excerpt,
                    c.routing_reason,c.fit_score,c.confidence_score,
                    c.priority_score,c.thesis_pillar,c.evidence,
-                   c.content_source,c.updated_at
+                   c.content_source,c.updated_at,
+                   cd.decision AS claude_decision,
+                   cd.fit_score AS claude_fit_score,
+                   cd.product_summary AS claude_summary,
+                   cd.reasoning AS claude_reasoning,
+                   cd.concerns AS claude_concerns,
+                   cd.diligence_sources AS claude_sources,
+                   cd.model AS claude_model
             FROM classifications c
+            JOIN claude_diligence cd ON cd.domain=c.domain
             WHERE c.routing_bucket='priority'
               AND c.fit_score>=?
               AND c.confidence_score>=?
-              AND c.updated_at>=?
+              AND cd.decision='KEEP'
+              AND cd.fit_score>=?
+              AND cd.diligence_version=?
+              AND (c.updated_at>=? OR cd.updated_at>=?)
               AND NOT EXISTS (
                   SELECT 1 FROM hidden_domains h WHERE h.domain=c.domain
               )
@@ -182,12 +212,125 @@ def qualified_candidates(
                   WHERE d.domain=c.domain
                     AND d.recipient IN ({recipient_marks})
               )
-            ORDER BY c.priority_score DESC,c.fit_score DESC,c.updated_at DESC
+            ORDER BY cd.fit_score DESC,c.priority_score DESC,
+                     c.fit_score DESC,c.updated_at DESC
             LIMIT ?
             """,
             params,
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def python_candidates_for_claude(
+    settings: DigestSettings,
+    *,
+    now: datetime | None = None,
+    database: Path | str = CLASSIFICATION_DB,
+) -> list[dict]:
+    """Select the strongest fresh Python results that still need Claude."""
+    if not settings.auto_claude or settings.claude_max_calls <= 0:
+        return []
+    current = now or utc_now()
+    since = _iso(current - timedelta(hours=settings.lookback_hours))
+    with connect_store(database, read_only=True) as conn:
+        rows = conn.execute(
+            """
+            SELECT c.*
+            FROM classifications c
+            LEFT JOIN claude_diligence cd ON cd.domain=c.domain
+            WHERE c.routing_bucket='priority'
+              AND c.fit_score>=?
+              AND c.confidence_score>=?
+              AND c.updated_at>=?
+              AND (cd.domain IS NULL OR cd.diligence_version<>?)
+              AND NOT EXISTS (
+                  SELECT 1 FROM hidden_domains h WHERE h.domain=c.domain
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM training_labels t
+                  WHERE t.domain=c.domain AND t.label='no'
+              )
+            ORDER BY c.priority_score DESC,c.fit_score DESC,c.updated_at DESC
+            LIMIT ?
+            """,
+            (
+                settings.min_score,
+                settings.min_confidence,
+                since,
+                DILIGENCE_VERSION,
+                settings.claude_max_calls,
+            ),
+        ).fetchall()
+    candidates = []
+    for result in rows:
+        row = dict(result)
+        try:
+            payload = json.loads(str(row.get("record_json") or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        payload.update({
+            "domain": row["domain"],
+            "final_url": row.get("final_url", ""),
+            "page_title": row.get("company_name", ""),
+            "meta_description": row.get("description", ""),
+            "homepage_excerpt": row.get("excerpt", ""),
+            "rule_score": row.get("fit_score", 0),
+            "diligence_rank_score": row.get("fit_score", 0),
+            "rule_thesis_pillar": row.get("thesis_pillar", ""),
+            "rule_evidence": row.get("evidence", ""),
+        })
+        candidates.append(payload)
+    return candidates
+
+
+async def _run_claude_diligence(
+    rows: list[dict], *, database: Path | str = CLASSIFICATION_DB
+) -> int:
+    """Run one-search Claude diligence and persist only completed results."""
+    if not rows:
+        return 0
+    from anthropic import AsyncAnthropic
+    from claude_classifier import classify
+
+    model = os.getenv("ANTHROPIC_DILIGENCE_MODEL", get_model()).strip()
+    client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY", "").strip())
+    semaphore = asyncio.Semaphore(min(2, len(rows)))
+    raw = await asyncio.gather(
+        *(classify(client, semaphore, row, model) for row in rows),
+        return_exceptions=True,
+    )
+    completed = []
+    for row, assessment in zip(rows, raw):
+        if isinstance(assessment, Exception):
+            continue
+        completed.append({
+            **row,
+            **{f"llm_{key}": value for key, value in assessment.items()},
+            "llm_model": model,
+        })
+    upsert_claude_diligence(completed, path=database)
+    return len(rows)
+
+
+def run_pending_claude_gate(
+    settings: DigestSettings,
+    *,
+    now: datetime | None = None,
+    database: Path | str = CLASSIFICATION_DB,
+) -> int:
+    """Diligence at most five fresh companies before selecting the email."""
+    if not os.getenv("ANTHROPIC_API_KEY", "").strip():
+        return 0
+    rows = python_candidates_for_claude(
+        settings, now=now, database=database
+    )
+    if not rows:
+        return 0
+    # The shared store path is selected from the same environment in the
+    # Claude helper. Local tests and production therefore persist identically.
+    return asyncio.run(_run_claude_diligence(rows, database=database))
 
 
 def _blurb(row: dict) -> str:
@@ -224,8 +367,7 @@ def render_plain_text(
         (
             f"{len(rows)} new high-confidence prospect"
             f"{'s' if len(rows) != 1 else ''} cleared the digest gate "
-            f"(score {settings.min_score}+, confidence "
-            f"{settings.min_confidence}+)."
+            f"after explicit Claude KEEP approval."
         ),
     ]
     for index, row in enumerate(rows, 1):
@@ -237,6 +379,11 @@ def render_plain_text(
                 f"{row['confidence_score']} | "
                 f"{classification_source_label(row.get('content_source', ''))}"
             ),
+            (
+                f"Claude: KEEP | Claude score {row['claude_fit_score']} | "
+                f"{clean(row.get('claude_summary'))}"
+            ),
+            f"Claude reasoning: {clean(row.get('claude_reasoning'))}",
             f"Category: {clean(row.get('thesis_pillar')).replace('_', ' ').title()}",
             f"Why surfaced: {clean(row.get('routing_reason')).replace('_', ' ')}",
             _blurb(row),
@@ -268,6 +415,8 @@ def render_html(
         source = html.escape(
             classification_source_label(row.get("content_source", ""))
         )
+        claude_summary = html.escape(clean(row.get("claude_summary")))
+        claude_reasoning = html.escape(clean(row.get("claude_reasoning")))
         review_link = _app_link(settings, row["domain"])
         review = (
             f' · <a href="{html.escape(review_link, quote=True)}">Review in Glasswing</a>'
@@ -282,6 +431,8 @@ def render_html(
           <div style="font-size:18px;font-weight:700">{name}</div>
           <div style="color:#6b7280;margin:3px 0 10px">{domain} · {source}</div>
           <div style="font-weight:600">Score {int(row['fit_score'])} · Confidence {int(row['confidence_score'])} · {category}</div>
+          <div style="font-weight:700;color:#166534;margin-top:6px">Claude KEEP · Score {int(row['claude_fit_score'])} · {claude_summary}</div>
+          <p style="margin:8px 0 0;color:#374151"><b>Claude reasoning:</b> {claude_reasoning}</p>
           <p style="margin:8px 0">{description}</p>
           <p style="margin:8px 0 0;color:#4b5563"><b>Why surfaced:</b> {reason}</p>
           {evidence_html}
@@ -293,7 +444,7 @@ def render_html(
   <h1 style="margin-bottom:4px">Glasswing daily sourcing digest</h1>
   <div style="color:#6b7280">{html.escape(date_label)}</div>
   <p><b>{len(rows)}</b> new high-confidence prospect{'s' if len(rows) != 1 else ''}
-  cleared the digest gate (score {settings.min_score}+, confidence {settings.min_confidence}+).</p>
+  received explicit Claude KEEP approval after clearing the Python gate.</p>
   {''.join(cards)}
   <p style="color:#6b7280;font-size:12px">A company appears once per recipient. Hidden and Mark No companies are excluded.</p>
 </body></html>"""
@@ -422,14 +573,16 @@ def run_digest(
     run_id = uuid.uuid4().hex
     started_at = _iso(current)
     ensure_digest_schema(database)
+    if not dry_run:
+        missing = settings.validate_for_delivery()
+        if missing:
+            raise RuntimeError("Missing digest configuration: " + ", ".join(missing))
+        run_pending_claude_gate(settings, now=current, database=database)
     rows = qualified_candidates(settings, now=current, database=database)
     date_label = _date_label(current, settings.timezone_name)
     preview = render_plain_text(rows, settings, date_label=date_label)
     if dry_run:
         return len(rows), preview
-    missing = settings.validate_for_delivery()
-    if missing:
-        raise RuntimeError("Missing digest configuration: " + ", ".join(missing))
     if not rows:
         record_run(
             run_id,

@@ -931,7 +931,12 @@ def claude_allowance(conn: sqlite3.Connection) -> int:
 
 def diligenced_domains() -> set[str]:
     """Return domains with persisted Claude output for the active prompt."""
-    domains: set[str] = set()
+    from classification_store import claude_diligenced_domains
+    from diligence_logic import DILIGENCE_VERSION
+
+    domains: set[str] = claude_diligenced_domains(
+        diligence_version=DILIGENCE_VERSION,
+    )
     for path in (LLM / "llm_approved_master.csv", LLM / "llm_denied_master.csv"):
         if not path.exists() or path.stat().st_size == 0:
             continue

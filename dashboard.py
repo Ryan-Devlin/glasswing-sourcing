@@ -1833,6 +1833,12 @@ if result_scope == "Current Run":
         )
 
 def latest_claude_results() -> pd.DataFrame:
+    from classification_store import query_claude_diligence
+
+    shared = pd.DataFrame(query_claude_diligence())
+    if not shared.empty:
+        return shared
+
     frames = []
     for path in (
         LLM / "llm_approved_master.csv",

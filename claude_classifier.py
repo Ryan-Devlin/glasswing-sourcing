@@ -19,6 +19,7 @@ from common import (
     FILTERED, LLM, clean, get_model, save_basket_entry, stable_domain,
     upsert_csv,
 )
+from classification_store import upsert_claude_diligence
 from diligence_logic import (
     DILIGENCE_VERSION,
     apply_hard_guards,
@@ -257,6 +258,21 @@ async def classify(
         assessment["decision"] = "MAYBE"
         assessment["fit_score"] = min(assessment["fit_score"], 55)
         assessment["concerns"] = "No external coverage"
+
+    # KEEP is a notification-grade approval, not merely a positive model
+    # impression. It requires Claude's external diligence to verify the U.S.
+    # location; unclear results remain MAYBE and can never enter email.
+    if (
+        assessment.get("decision") == "KEEP"
+        and assessment.get("us_based") != "yes"
+    ):
+        assessment["decision"] = "MAYBE"
+        assessment["fit_score"] = min(
+            to_int(assessment.get("fit_score", 0), 0), 69
+        )
+        assessment["concerns"] = (
+            clean(assessment.get("concerns")) or "U.S. status unverified"
+        )
 
     return assessment
 
@@ -549,6 +565,14 @@ async def run() -> None:
     ].clip(upper=69)
 
     denied = output[~output.index.isin(approved.index)].copy()
+
+    # Persist only after every post-response hard guard has run. In
+    # particular, an initially returned KEEP with unclear U.S. status is
+    # downgraded above and must never reach the email gate as a raw KEEP.
+    final_results = pd.concat(
+        [approved, denied], ignore_index=True, sort=False
+    )
+    upsert_claude_diligence(final_results.to_dict(orient="records"))
     approved_master, denied_master = reconcile_masters(approved, denied)
 
     # Only decisive Claude results become training labels. MAYBE remains an

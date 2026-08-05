@@ -19,6 +19,8 @@ from classification_store import (
     excluded_domain_set,
     remove_training_labels,
     upsert_training_labels,
+    upsert_claude_diligence,
+    query_claude_diligence,
     record_manual_move,
     import_private_sqlite_into_shared,
     unhide_domains,
@@ -76,6 +78,32 @@ def test_master_bucket_queries_are_paged_and_source_labeled(tmp_path):
         path=database,
     )
     assert [row["domain"] for row in domain_rows] == ["zone.app"]
+
+
+def test_claude_diligence_is_shared_and_upserted(tmp_path):
+    database = tmp_path / "classifications.sqlite3"
+    first = {
+        "domain": "company.ai",
+        "llm_decision": "MAYBE",
+        "llm_fit_score": 60,
+        "llm_product_summary": "Initial review",
+        "llm_diligence_version": "v1",
+        "llm_model": "claude-one",
+    }
+    second = {
+        **first,
+        "llm_decision": "KEEP",
+        "llm_fit_score": 88,
+        "llm_product_summary": "Approved company",
+    }
+    assert upsert_claude_diligence([first], path=database) == 1
+    assert upsert_claude_diligence([second], path=database) == 1
+    rows = query_claude_diligence(
+        ["company.ai"], diligence_version="v1", path=database
+    )
+    assert len(rows) == 1
+    assert rows[0]["llm_decision"] == "KEEP"
+    assert rows[0]["llm_fit_score"] == 88
 
 
 def test_automated_exclusion_is_tiny_and_human_truth_overrides_it(

@@ -255,6 +255,24 @@ def migrate(conn: sqlite3.Connection | PostgresConnection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_daily_digest_items_sent
             ON daily_digest_items(sent_at DESC);
+
+        CREATE TABLE IF NOT EXISTS claude_diligence (
+            domain TEXT PRIMARY KEY,
+            decision TEXT NOT NULL DEFAULT '',
+            fit_score INTEGER NOT NULL DEFAULT 0,
+            category TEXT NOT NULL DEFAULT '',
+            us_based TEXT NOT NULL DEFAULT '',
+            product_summary TEXT NOT NULL DEFAULT '',
+            reasoning TEXT NOT NULL DEFAULT '',
+            concerns TEXT NOT NULL DEFAULT '',
+            diligence_sources TEXT NOT NULL DEFAULT '',
+            diligence_version TEXT NOT NULL DEFAULT '',
+            model TEXT NOT NULL DEFAULT '',
+            result_json TEXT NOT NULL DEFAULT '{{}}',
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_claude_diligence_decision_score
+            ON claude_diligence(decision, fit_score DESC, updated_at DESC);
         """
     )
     if postgres:
@@ -606,6 +624,125 @@ def search_classifications(
             (needle, needle, limit),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def upsert_claude_diligence(
+    rows: Iterable[dict[str, object]],
+    *,
+    path: Path | str = CLASSIFICATION_DB,
+) -> int:
+    """Persist Claude results in the shared store used by every service."""
+    values = []
+    now = utc_now()
+    for original in rows:
+        row = {str(key): _plain(value) for key, value in original.items()}
+        domain = stable_domain(row.get("domain", ""))
+        if not domain:
+            continue
+        result = {
+            key.removeprefix("llm_"): value
+            for key, value in row.items()
+            if key.startswith("llm_")
+        }
+        decision = clean(result.get("decision", "")).upper()
+        if decision not in {"KEEP", "MAYBE", "REJECT"}:
+            continue
+        values.append((
+            domain,
+            decision,
+            max(0, min(100, _integer(result.get("fit_score", 0)))),
+            clean(result.get("category", "")),
+            clean(result.get("us_based", "")),
+            clean(result.get("product_summary", "")),
+            clean(result.get("reasoning", "")),
+            clean(result.get("concerns", "")),
+            clean(result.get("diligence_sources", "")),
+            clean(result.get("diligence_version", "")),
+            clean(result.get("model", row.get("llm_model", ""))),
+            json.dumps(result, ensure_ascii=False, separators=(",", ":")),
+            now,
+        ))
+    if not values:
+        return 0
+    with connect_store(path) as conn:
+        begin_immediate(conn)
+        conn.executemany(
+            """
+            INSERT INTO claude_diligence(
+                domain,decision,fit_score,category,us_based,product_summary,
+                reasoning,concerns,diligence_sources,diligence_version,model,
+                result_json,updated_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(domain) DO UPDATE SET
+                decision=excluded.decision,
+                fit_score=excluded.fit_score,
+                category=excluded.category,
+                us_based=excluded.us_based,
+                product_summary=excluded.product_summary,
+                reasoning=excluded.reasoning,
+                concerns=excluded.concerns,
+                diligence_sources=excluded.diligence_sources,
+                diligence_version=excluded.diligence_version,
+                model=excluded.model,
+                result_json=excluded.result_json,
+                updated_at=excluded.updated_at
+            """,
+            values,
+        )
+        conn.commit()
+    return len(values)
+
+
+def query_claude_diligence(
+    domains: Iterable[str] = (),
+    *,
+    diligence_version: str = "",
+    path: Path | str = CLASSIFICATION_DB,
+) -> list[dict[str, object]]:
+    """Read shared Claude results using the legacy UI column names."""
+    normalized = list(dict.fromkeys(
+        domain for value in domains if (domain := stable_domain(value))
+    ))
+    if not using_classification_postgres() and not Path(path).exists():
+        return []
+    clauses = []
+    params: list[object] = []
+    if normalized:
+        marks = ",".join("?" for _ in normalized)
+        clauses.append(f"domain IN ({marks})")
+        params.extend(normalized)
+    if clean(diligence_version):
+        clauses.append("diligence_version=?")
+        params.append(clean(diligence_version))
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    with connect_store(path, read_only=True) as conn:
+        rows = conn.execute(
+            """
+            SELECT domain,decision AS llm_decision,
+                   fit_score AS llm_fit_score,
+                   product_summary AS llm_product_summary,
+                   reasoning AS llm_reasoning,
+                   concerns AS llm_concerns,
+                   model AS llm_model,diligence_version,updated_at
+            FROM claude_diligence
+            """ + where + " ORDER BY updated_at DESC",
+            params,
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def claude_diligenced_domains(
+    *,
+    diligence_version: str = "",
+    path: Path | str = CLASSIFICATION_DB,
+) -> set[str]:
+    return {
+        str(row["domain"])
+        for row in query_claude_diligence(
+            diligence_version=diligence_version,
+            path=path,
+        )
+    }
 
 
 def classification_source_label(content_source: object) -> str:
