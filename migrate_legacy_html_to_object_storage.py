@@ -58,6 +58,9 @@ def resolve_legacy_path(pointer: object, archive_root: Path) -> Path:
         candidate = archive_root / relative
         if candidate.exists():
             return candidate
+        # A nested legacy pointer (notably html/app/...) must never fall back
+        # to a same-named root pack: those are different shard generations.
+        raise FileNotFoundError(f"Legacy HTML pack is unavailable: {value}")
     candidate = archive_root / path.name
     if candidate.exists():
         return candidate
@@ -135,6 +138,7 @@ def migrate_subsystem(
         "migrated_pages": 0,
         "uploaded_objects": 0,
         "reused_objects": 0,
+        "unavailable_pages": 0,
         "bytes": 0,
     }
     try:
@@ -145,14 +149,30 @@ def migrate_subsystem(
         checked_keys: set[str] = set()
         for position, row in enumerate(rows, start=1):
             raw_hash = str(row["raw_html_hash"] or "")
-            payload = read_legacy_block(
-                row["html_archive_path"],
-                archive_root=archive_root,
-                offset=int(row["html_archive_offset"] or 0),
-                length=int(row["html_archive_length"] or 0),
-                codec=str(row["html_archive_codec"] or ""),
-                raw_hash=raw_hash,
-            )
+            try:
+                payload = read_legacy_block(
+                    row["html_archive_path"],
+                    archive_root=archive_root,
+                    offset=int(row["html_archive_offset"] or 0),
+                    length=int(row["html_archive_length"] or 0),
+                    codec=str(row["html_archive_codec"] or ""),
+                    raw_hash=raw_hash,
+                )
+            except FileNotFoundError:
+                result["unavailable_pages"] += 1
+                if not dry_run:
+                    # The source pack is already absent. Keep extracted text
+                    # searchable while removing a permanently dead pointer.
+                    conn.execute(
+                        """
+                        UPDATE pages SET html_archive_path='',
+                            html_archive_offset=0,html_archive_length=0,
+                            html_archive_codec='',compressed_html_bytes=0
+                        WHERE id=?
+                        """,
+                        (int(row["id"]),),
+                    )
+                continue
             raw_bytes = int(row["raw_html_bytes"] or 0)
             if not raw_hash:
                 raw_hash, reconstructed_bytes = raw_payload_identity(

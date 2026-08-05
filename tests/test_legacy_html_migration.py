@@ -23,6 +23,17 @@ def test_resolve_legacy_path_maps_old_machine_root(tmp_path: Path):
     assert resolve_legacy_path(old, archive) == pack
 
 
+def test_resolve_nested_legacy_path_never_uses_wrong_root_pack(
+    tmp_path: Path,
+):
+    archive = tmp_path / "html"
+    archive.mkdir()
+    (archive / "007.htmlpack").write_bytes(b"different generation")
+    old = "/Users/someone/project/data/html/app/007.htmlpack"
+    with pytest.raises(FileNotFoundError, match="unavailable"):
+        resolve_legacy_path(old, archive)
+
+
 def test_read_legacy_block_verifies_compressed_payload(tmp_path: Path):
     archive = tmp_path / "html"
     archive.mkdir()
