@@ -1427,6 +1427,15 @@ def media_newsletter_assessment(text: str) -> tuple[bool, list[str]]:
         ))
     ):
         directory_identity_hits.append("provider-comparison article")
+    # A curated list of academic papers ("The best AI papers of 2025",
+    # citation counts, abstracts) is content, not a company -- a reported
+    # case (bestpapers.ai) scored 81 and reached Investable because none of
+    # the directory/comparison terms above are about research literature.
+    if (
+        re.search(r"\bbest\b.{0,40}\bpapers?\b", leading_copy)
+        and any(term in lower for term in ("citations", "arxiv", "abstract"))
+    ):
+        directory_identity_hits.append("curated research paper list")
 
     newsletter_identity = bool(
         any(term in leading_copy for term in (

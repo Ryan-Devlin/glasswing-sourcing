@@ -66,6 +66,20 @@ class RuleCalibrationTests(unittest.TestCase):
         self.assertTrue(directory)
         self.assertFalse(product)
 
+    def test_curated_research_paper_list_is_non_product_content(self):
+        # Reported case (bestpapers.ai): a curated list of academic papers
+        # with citation counts and abstracts scored 81 and reached
+        # Investable -- none of the directory/comparison terms above are
+        # about research literature, so it slipped through undetected.
+        papers, evidence = media_newsletter_assessment(
+            "The best AI papers of 2025. DeepSeek-R1: Incentivizing "
+            "Reasoning Capability in LLMs via Reinforcement Learning. "
+            "176 citations. Abstract: we introduce our first-generation "
+            "reasoning models."
+        )
+        self.assertTrue(papers)
+        self.assertIn("curated research paper list", evidence)
+
     def test_ai_newsletter_with_buzzwords_is_caught_despite_product_language(self):
         # An AI newsletter reporting on the industry naturally uses the same
         # buzzwords ("proprietary", "platform", "automation") a real product
