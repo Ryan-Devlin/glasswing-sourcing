@@ -2717,6 +2717,42 @@ def parse_html(html: str, final_url: str) -> tuple[Fetch, list[str]]:
     )
 
 
+_FETCH_MAX_RESPONSE_BYTES = 2_000_000
+
+
+async def _read_html_capped(
+    response: aiohttp.ClientResponse,
+    maximum_bytes: int,
+) -> str:
+    """Read at most maximum_bytes of a response body.
+
+    response.text() with no cap (the previous implementation) downloads and
+    decodes the entire body regardless of size, then hands all of it to
+    BeautifulSoup -- a synchronous, CPU-bound parse -- before the 45,000-char
+    truncation downstream ever applies. Confirmed live: a batch's outer
+    deadline fired 40s late (220.5s against a 180s ceiling), which
+    asyncio.wait_for can only do if the event loop itself was blocked by
+    synchronous work for that long. A single pathologically large or
+    slow-trickling page could stall BeautifulSoup's parse for many seconds,
+    blocking every other concurrent domain in the same batch along with it.
+    """
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in response.content.iter_chunked(32_768):
+        remaining = maximum_bytes - size
+        if remaining <= 0:
+            break
+        selected = chunk[:remaining]
+        chunks.append(selected)
+        size += len(selected)
+        if len(selected) < len(chunk) or size >= maximum_bytes:
+            break
+    return b"".join(chunks).decode(
+        response.charset or "utf-8",
+        errors="replace",
+    )
+
+
 async def fetch_html(
     session: aiohttp.ClientSession,
     url: str,
@@ -2737,7 +2773,7 @@ async def fetch_html(
                     error="non_html",
                 ), []
 
-            html = await response.text(errors="ignore")
+            html = await _read_html_capped(response, _FETCH_MAX_RESPONSE_BYTES)
             result, links = parse_html(html, str(response.url))
             result.status = response.status
             return result, links

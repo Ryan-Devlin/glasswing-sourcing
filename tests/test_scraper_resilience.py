@@ -156,6 +156,36 @@ class ScraperResilienceTests(unittest.TestCase):
         requirements = Path("requirements.txt").read_text(encoding="utf-8")
         self.assertIn("aiodns", requirements)
 
+    def test_read_html_capped_stops_at_the_byte_limit(self):
+        # Confirmed live: fetch_html previously used response.text() with no
+        # size cap at all -- a batch's outer deadline fired 40s late
+        # (220.5s against a 180s ceiling), which asyncio.wait_for can only
+        # do if the event loop was blocked by synchronous work that long.
+        # Downloading and then BeautifulSoup-parsing a pathologically large
+        # page (before the 45,000-char text truncation ever applies) is
+        # exactly that kind of blocking work.
+        class FakeContent:
+            async def iter_chunked(self, size):
+                for _ in range(20):
+                    yield b"x" * size
+
+        class FakeResponse:
+            content = FakeContent()
+            charset = "utf-8"
+
+        html = asyncio.run(
+            screening_filter._read_html_capped(FakeResponse(), maximum_bytes=100_000)
+        )
+        self.assertEqual(len(html), 100_000)
+
+    def test_fetch_html_uses_the_capped_reader_not_response_text(self):
+        source = Path("filter.py").read_text(encoding="utf-8")
+        fetch_html_body = source.split("async def fetch_html(", 1)[1].split(
+            "\nasync def ", 1
+        )[0]
+        self.assertIn("_read_html_capped(", fetch_html_body)
+        self.assertNotIn("response.text(", fetch_html_body)
+
 
 if __name__ == "__main__":
     unittest.main()
