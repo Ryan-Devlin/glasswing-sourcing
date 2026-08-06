@@ -4108,8 +4108,15 @@ def automated_discard_mask(output: pd.DataFrame) -> pd.Series:
     slop = output.get(
         "venture_slop_risk", pd.Series(False, index=output.index)
     ).astype(str).str.lower().isin({"true", "1", "yes"})
+    # "insufficient" is the primary catch-all for real, substantive sites
+    # that just don't have enough evidence yet (filter.py's scoring chain
+    # routes most ambiguous-but-real domains here, not to "review"). Leaving
+    # it out of protected_buckets meant almost everything that wasn't a
+    # priority/coming_soon/review/comp candidate got silently purged before
+    # ever reaching the Insufficient Evidence tab -- confirmed live: a
+    # 600-domain batch classified 162 and retained zero anywhere.
     protected_buckets = buckets.isin(
-        {"priority", "coming_soon", "review", "comp"}
+        {"priority", "coming_soon", "review", "comp", "insufficient"}
     )
     return (
         buckets.isin({"reject", "ghost"})

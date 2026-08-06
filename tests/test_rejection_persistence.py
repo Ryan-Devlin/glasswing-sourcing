@@ -24,9 +24,14 @@ class RejectionPersistenceTests(unittest.TestCase):
                 "venture_slop_risk": True,
             },
         ])
+        # "insufficient" is the primary catch-all for real, substantive
+        # sites that just lack enough evidence yet -- it must be protected
+        # like review/comp regardless of score, or almost every ambiguous
+        # domain silently vanishes before reaching the Insufficient
+        # Evidence tab (confirmed live: a 600-domain batch retained zero).
         self.assertEqual(
             screening_filter.automated_discard_mask(frame).tolist(),
-            [False, False, False, False, True, False, True, True, True, True],
+            [False, False, False, False, False, False, True, True, True, True],
         )
 
     def test_only_manual_denial_is_persisted(self):
