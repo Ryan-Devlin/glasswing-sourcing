@@ -4330,7 +4330,19 @@ async def screen_records(
             ttl_dns_cache=300,
         )
         client_timeout = aiohttp.ClientTimeout(
-            total=None,
+            # total=None was the real bug here (confirmed live: an entire
+            # 75-domain batch hung for 600+ seconds with zero exception,
+            # zero progress, until an outer deadline in continuous_pipeline
+            # finally force-failed it). connect/sock_connect/sock_read each
+            # only bound one phase -- sock_read in particular resets on
+            # every successful chunk, so a server that trickles bytes just
+            # under that interval (a slow-loris response, a chunked stream
+            # that never closes) can keep "making progress" forever without
+            # ever tripping any of them. Every request in the batch runs
+            # inside one asyncio.gather(), so a single pathological site
+            # stalled the whole batch, not just its own row. A real ceiling
+            # on the request as a whole is the only thing that bounds that.
+            total=selected_timeout * 2,
             connect=selected_timeout,
             sock_connect=selected_timeout,
             sock_read=selected_timeout,

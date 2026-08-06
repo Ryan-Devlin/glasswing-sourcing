@@ -96,6 +96,18 @@ class ScraperResilienceTests(unittest.TestCase):
                     persist=True,
                 ))
 
+    def test_client_timeout_bounds_the_whole_request_not_just_each_phase(self):
+        # Confirmed live: an entire 75-domain batch hung for 600+ seconds
+        # with zero exception and zero progress. total=None meant no ceiling
+        # bounded a request as a whole -- sock_read resets on every
+        # successful chunk, so a server trickling bytes just under that
+        # interval could "make progress" forever without ever tripping
+        # connect/sock_connect/sock_read, stalling the entire batch (every
+        # request runs inside one asyncio.gather()) on a single site.
+        source = Path("filter.py").read_text(encoding="utf-8")
+        self.assertNotIn("total=None,", source)
+        self.assertIn("total=selected_timeout * 2,", source)
+
 
 if __name__ == "__main__":
     unittest.main()
