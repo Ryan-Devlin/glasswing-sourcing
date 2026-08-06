@@ -9,6 +9,8 @@ import json
 import os
 import re
 import sqlite3
+import sys
+import time
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -3167,6 +3169,7 @@ async def process(
 
     combined = clean(f"{page.title} {page.description} {page.text}")
     lower = combined.lower()
+    _scoring_started = time.monotonic()
     scoring_copy = combined
 
     word_count = len(combined.split())
@@ -3528,6 +3531,24 @@ async def process(
         http_status=page.status,
         combined=combined,
     )
+
+    scoring_elapsed = time.monotonic() - _scoring_started
+    if scoring_elapsed > 2.0:
+        # Confirmed live: the outer batch deadline fired 40-79s late
+        # (259.0s against a 180s ceiling, and 220.5s against a separate
+        # 180s ceiling), which asyncio.wait_for can only do if the event
+        # loop itself was blocked by synchronous work that long. This
+        # synchronous scoring chain (score_text and the dozen+ regex-based
+        # *_assessment calls above) is the only CPU-bound, non-awaited work
+        # in the whole per-domain path -- logging any outlier here is the
+        # fastest way to find which domain/page text is pathological
+        # without another deploy-and-wait cycle.
+        print(
+            f"SLOW_SCORING domain={domain} seconds={scoring_elapsed:.2f} "
+            f"text_chars={len(combined)}",
+            file=sys.stderr,
+            flush=True,
+        )
 
     source_row = {
         key: value
