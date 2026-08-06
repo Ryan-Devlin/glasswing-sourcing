@@ -33,6 +33,20 @@ class StreamReconnectTests(unittest.TestCase):
         )
         self.assertIn("reconnecting automatically", self.dashboard)
 
+    def test_listener_refreshes_extensions_instead_of_caching_forever(self):
+        # listener() is created once per container lifetime (main() never
+        # restarts it) -- confirmed live: computing allowed_extensions only
+        # once at the top meant changing Extensions in the dashboard had
+        # zero effect until the whole container redeployed. It must be
+        # re-read periodically, not just once before the receive loop.
+        listener = self.pipeline.split("async def listener(", 1)[1].split(
+            "\nasync def ", 1
+        )[0]
+        self.assertIn("extensions_refreshed_at", listener)
+        self.assertGreaterEqual(
+            listener.count("selected_extensions()"), 2
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

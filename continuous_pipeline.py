@@ -1084,6 +1084,13 @@ async def listener(
     reconnect_count = int(
         listener_status.get("stream_reconnect_count", 0) or 0
     )
+    # This task is created once per container lifetime (main() never
+    # restarts it), so computing allowed_extensions only once above meant
+    # changing Extensions in the dashboard had zero effect until the whole
+    # container redeployed -- confirmed live. Re-read it periodically
+    # instead of caching it for the task's entire lifetime.
+    extensions_refresh_seconds = 5.0
+    extensions_refreshed_at = time.monotonic()
 
     while not stop.is_set():
         try:
@@ -1114,6 +1121,29 @@ async def listener(
                 )
 
                 while not stop.is_set():
+                    now_monotonic = time.monotonic()
+                    if (
+                        now_monotonic - extensions_refreshed_at
+                        >= extensions_refresh_seconds
+                    ):
+                        extensions_refreshed_at = now_monotonic
+                        refreshed = selected_extensions()
+                        if refreshed != allowed_extensions:
+                            allowed_extensions = refreshed
+                            for extension in allowed_extensions:
+                                received_by_extension.setdefault(
+                                    extension, 0
+                                )
+                                repeats_by_extension.setdefault(
+                                    extension, 0
+                                )
+                            write_status(
+                                selected_extensions=sorted(
+                                    allowed_extensions
+                                ),
+                                updated_at=utc_now(),
+                            )
+
                     try:
                         raw = await asyncio.wait_for(
                             websocket.recv(),
