@@ -397,7 +397,9 @@ async def crawl_pending(conn: Any, settings: Settings, limit: int) -> dict[str, 
         return {"storage_excluded": len(excluded)} if excluded else {}
     timeout = aiohttp.ClientTimeout(total=settings.timeout_seconds)
     connector = aiohttp.TCPConnector(
-        limit=settings.concurrency, ssl=ssl.create_default_context()
+        limit=settings.concurrency,
+        ssl=ssl.create_default_context(),
+        resolver=aiohttp.AsyncResolver(),
     )
     headers = {
         "User-Agent": settings.user_agent,

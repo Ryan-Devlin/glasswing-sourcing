@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import socket
 import shutil
 import sqlite3
 import time
@@ -12,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
+import aiodns
 import aiohttp
 from ai_search.extract import (
     ExtractedPage,
@@ -191,22 +191,39 @@ def classify_exception(exc: Exception) -> str:
     return "other_error"
 
 
+_dns_resolver: aiodns.DNSResolver | None = None
+
+
+def _shared_dns_resolver() -> aiodns.DNSResolver:
+    global _dns_resolver
+    if _dns_resolver is None:
+        _dns_resolver = aiodns.DNSResolver()
+    return _dns_resolver
+
+
 async def domain_resolves(domain: str, timeout_seconds: float = 3.0) -> bool:
-    """Return quickly when neither apex nor www has a web-address record."""
-    loop = asyncio.get_running_loop()
+    """Return quickly when neither apex nor www has a web-address record.
+
+    Deliberately not loop.getaddrinfo() -- confirmed live: that call runs
+    on the event loop's small default executor thread pool (~32-40 threads),
+    and cancelling the asyncio.wait_for around it does not stop the
+    underlying blocking getaddrinfo() once it's running. Against a queue
+    this size (100M+ mostly-unregistered .com names), enough slow/hanging
+    lookups pile up to exhaust that pool and throttle the whole crawler far
+    below its configured concurrency (confirmed live: 1.6 domains/sec
+    against 100 configured concurrent quick checks). aiodns resolves
+    natively on the event loop over non-blocking sockets, so a cancelled
+    lookup never ties up a scarce thread.
+    """
+    resolver = _shared_dns_resolver()
 
     async def resolve(host: str) -> bool:
         try:
             await asyncio.wait_for(
-                loop.getaddrinfo(
-                    host,
-                    443,
-                    type=socket.SOCK_STREAM,
-                ),
-                timeout=timeout_seconds,
+                resolver.query(host, "A"), timeout=timeout_seconds
             )
             return True
-        except (OSError, asyncio.TimeoutError):
+        except (aiodns.error.DNSError, asyncio.TimeoutError):
             return False
 
     apex, www = await asyncio.gather(
@@ -1036,6 +1053,7 @@ async def crawl_once(
     connector = aiohttp.TCPConnector(
         limit=max(settings.concurrency, settings.preflight_concurrency),
         ttl_dns_cache=600,
+        resolver=aiohttp.AsyncResolver(),
     )
     semaphore = asyncio.Semaphore(settings.concurrency)
     headers = {

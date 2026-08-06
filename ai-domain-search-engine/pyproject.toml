@@ -9,6 +9,7 @@ description = "Standalone content search engine for .ai websites"
 requires-python = ">=3.11"
 dependencies = [
   "aiohttp>=3.10,<4",
+  "aiodns>=3.2,<4",
   "beautifulsoup4>=4.12,<5",
   "python-dotenv>=1.0,<2",
   "streamlit>=1.46,<2",
