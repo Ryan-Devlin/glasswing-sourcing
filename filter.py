@@ -4496,8 +4496,9 @@ async def screen_records(
         )
 
     output = pd.DataFrame(results)
+    _persist_started = time.monotonic()
     stats = (
-        persist_screening_output(output)
+        await asyncio.to_thread(persist_screening_output, output)
         if persist
         else {
             "batch_total": len(output),
@@ -4517,6 +4518,22 @@ async def screen_records(
             ),
         }
     )
+    persist_elapsed = time.monotonic() - _persist_started
+    if persist_elapsed > 2.0:
+        # Confirmed live: the batch outer deadline fired 40-79s late twice
+        # in a row even after capping response size and confirming the
+        # per-domain scoring chain isn't the culprit (no SLOW_SCORING ever
+        # logged). persist_screening_output runs a batch's worth of
+        # Postgres writes (classifications upsert, CSV upserts, rejection
+        # purge) synchronously -- moved to a thread so it can no longer
+        # block the event loop and delay the outer deadline's own
+        # cancellation, and logged here so a genuinely slow persist step is
+        # now visible instead of just guessed at.
+        print(
+            f"SLOW_PERSIST rows={len(output)} seconds={persist_elapsed:.2f}",
+            file=sys.stderr,
+            flush=True,
+        )
     return output, stats
 
 

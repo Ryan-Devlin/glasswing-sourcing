@@ -81,6 +81,24 @@ class ScraperResilienceTests(unittest.TestCase):
         self.assertEqual(output.iloc[0]["http_status"], 200)
         self.assertEqual(output.iloc[0]["fetch_error"], "")
 
+    def test_persist_screening_output_does_not_block_the_event_loop(self):
+        # Confirmed live: the batch outer deadline fired 40-79s late twice
+        # in a row even after capping response size and ruling out slow
+        # per-domain scoring (no SLOW_SCORING was ever logged).
+        # persist_screening_output runs a batch's worth of synchronous
+        # Postgres writes -- calling it directly inside screen_records
+        # (an async function) blocks the whole event loop for however long
+        # that takes, which is exactly the kind of delay that would make
+        # asyncio.wait_for's own cancellation fire late.
+        source = Path("filter.py").read_text(encoding="utf-8")
+        section = source.split("output = pd.DataFrame(results)", 1)[1].split(
+            "\n\n", 1
+        )[0]
+        self.assertIn(
+            "await asyncio.to_thread(persist_screening_output, output)",
+            section,
+        )
+
     def test_systemic_timeout_batch_is_not_persisted(self):
         async def always_timeout(row, session, sem, timeout, homepage_only=False):
             return {"domain": row["registrable"], "fetch_error": "TimeoutError: "}
