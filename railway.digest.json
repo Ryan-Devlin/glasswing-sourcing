@@ -2,7 +2,7 @@
   "$schema": "https://railway.com/railway.schema.json",
   "deploy": {
     "startCommand": "python daily_digest.py",
-    "cronSchedule": "0 13 * * *",
+    "cronSchedule": "10 14 * * *",
     "restartPolicyType": "NEVER"
   }
 }
