@@ -502,6 +502,15 @@ def send_via_resend_api(
         headers={
             "Authorization": f"Bearer {settings.smtp_password}",
             "Content-Type": "application/json",
+            "Accept": "application/json",
+            # Reported failure: HTTP 403, body "error code: 1010" -- that's
+            # Cloudflare's own bot-protection signature, not a Resend error
+            # code (Resend's real error codes are named strings, e.g.
+            # "validation_error"). urllib's default User-Agent
+            # ("Python-urllib/3.x") is exactly the kind of generic scripting
+            # signature WAFs commonly block outright, before the request
+            # ever reaches Resend's API.
+            "User-Agent": "glasswing-sourcing-daily-digest/1.0",
         },
     )
     try:
