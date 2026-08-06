@@ -4,7 +4,12 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from db_backend import PostgresConnection, connect_postgres, using_postgres
+from db_backend import (
+    PostgresConnection,
+    acquire_advisory_lock_with_timeout,
+    connect_postgres,
+    using_postgres,
+)
 
 from .domains import normalize_domain
 
@@ -40,11 +45,15 @@ def connect(
             # -- without serializing here, several race to run this same
             # schema DDL at once and deadlock on conflicting locks. Confirmed
             # live the first time a real cloud worker actually started.
-            conn.execute("SELECT pg_advisory_lock(hashtext(?))", ("ai_search_migration",))
+            locked = acquire_advisory_lock_with_timeout(conn, "ai_search_migration")
             try:
                 migrate_postgres(conn)
             finally:
-                conn.execute("SELECT pg_advisory_unlock(hashtext(?))", ("ai_search_migration",))
+                if locked:
+                    conn.execute(
+                        "SELECT pg_advisory_unlock(hashtext(?))",
+                        ("ai_search_migration",),
+                    )
         return conn
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -16,6 +16,8 @@ copies of every query.
 from __future__ import annotations
 
 import os
+import sys
+import time
 from typing import Any, Iterable
 
 
@@ -150,6 +152,49 @@ def begin_immediate(conn) -> None:
         conn.execute("BEGIN")
     else:
         conn.execute("BEGIN IMMEDIATE")
+
+
+def acquire_advisory_lock_with_timeout(
+    conn,
+    key: str,
+    *,
+    timeout_seconds: float = 10.0,
+    poll_seconds: float = 0.5,
+) -> bool:
+    """pg_advisory_lock() blocks forever if never released -- and every
+    startup migration path in this app (continuous_pipeline, ai_search,
+    zone_universe, runtime_control) took exactly one of these, unconditionally,
+    with no timeout. A process killed abruptly (an interrupted deploy, an OOM,
+    a force-stopped container) while holding one leaves it stuck: Postgres
+    only releases a session-level advisory lock when that connection's own
+    socket closes, and a connection pooler in front of the database can keep
+    that socket alive well after the client process is gone. Every future
+    restart of that same service then hung forever waiting on a lock that
+    would never be released -- confirmed live: three different workers each
+    went silent immediately at startup after routine redeploys.
+
+    Polls pg_try_advisory_lock() instead of blocking. On timeout, proceeds
+    without the lock rather than hanging forever -- safe here because every
+    caller only uses this to guard `CREATE TABLE IF NOT EXISTS`-style DDL,
+    which is idempotent; the lock was always just uncontended-case race
+    protection for the very first deploy, never something correctness
+    actually depends on afterward.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        row = conn.execute(
+            "SELECT pg_try_advisory_lock(hashtext(?)) AS locked", (key,)
+        ).fetchone()
+        if bool(row["locked"]):
+            return True
+        time.sleep(poll_seconds)
+    print(
+        f"WARNING: advisory lock {key!r} still held after {timeout_seconds}s "
+        "-- proceeding without it (likely a stale lock from a killed "
+        "process; the guarded schema DDL is idempotent, so this is safe).",
+        file=sys.stderr,
+    )
+    return False
 
 
 def table_columns_postgres(conn: PostgresConnection, table: str) -> set[str]:

@@ -21,6 +21,7 @@ from psycopg import Error as PostgresError
 from common import DATA, FILTERED, atomic_write_csv, clean, stable_domain
 from db_backend import (
     PostgresConnection,
+    acquire_advisory_lock_with_timeout,
     begin_immediate,
     connect_postgres,
     table_columns_postgres,
@@ -108,11 +109,17 @@ def connect_store(
             # services independently connecting at once would otherwise
             # race to run this same schema DDL and deadlock on conflicting
             # locks (confirmed live for ai_search's identical pattern).
-            conn.execute("SELECT pg_advisory_lock(hashtext(?))", ("classification_store_migration",))
+            locked = acquire_advisory_lock_with_timeout(
+                conn, "classification_store_migration"
+            )
             try:
                 migrate(conn)
             finally:
-                conn.execute("SELECT pg_advisory_unlock(hashtext(?))", ("classification_store_migration",))
+                if locked:
+                    conn.execute(
+                        "SELECT pg_advisory_unlock(hashtext(?))",
+                        ("classification_store_migration",),
+                    )
         return conn
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

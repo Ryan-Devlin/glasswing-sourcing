@@ -42,7 +42,11 @@ from classification_store import (
     import_private_sqlite_into_shared,
     using_classification_postgres,
 )
-from db_backend import connect_postgres, using_postgres
+from db_backend import (
+    acquire_advisory_lock_with_timeout,
+    connect_postgres,
+    using_postgres,
+)
 
 from collector import (
     SUPPORTED_EXTENSIONS,
@@ -323,12 +327,15 @@ def _connect_db_postgres() -> sqlite3.Connection:
     # startup. This module mostly reuses one shared connection rather than
     # opening one per task, so the same race is less likely here -- but the
     # lock is free when uncontended, so there's no reason not to have it.
-    conn.execute("SELECT pg_advisory_lock(hashtext(?))", ("pipeline_migration",))
+    locked = acquire_advisory_lock_with_timeout(conn, "pipeline_migration")
     try:
         conn.executescript(_PIPELINE_POSTGRES_SCHEMA)
         conn.commit()
     finally:
-        conn.execute("SELECT pg_advisory_unlock(hashtext(?))", ("pipeline_migration",))
+        if locked:
+            conn.execute(
+                "SELECT pg_advisory_unlock(hashtext(?))", ("pipeline_migration",)
+            )
     return conn
 
 

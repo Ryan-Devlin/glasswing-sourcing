@@ -6,6 +6,7 @@ from pathlib import Path
 
 from db_backend import (
     PostgresConnection,
+    acquire_advisory_lock_with_timeout,
     connect_postgres,
     using_postgres,
 )
@@ -46,11 +47,17 @@ def connect(
             # connect() -- without serializing here, they'd race to run this
             # same schema DDL at once and deadlock on conflicting locks, the
             # same bug confirmed live in ai_search's identical connect().
-            conn.execute("SELECT pg_advisory_lock(hashtext(?))", ("zone_universe_migration",))
+            locked = acquire_advisory_lock_with_timeout(
+                conn, "zone_universe_migration"
+            )
             try:
                 migrate_postgres(conn)
             finally:
-                conn.execute("SELECT pg_advisory_unlock(hashtext(?))", ("zone_universe_migration",))
+                if locked:
+                    conn.execute(
+                        "SELECT pg_advisory_unlock(hashtext(?))",
+                        ("zone_universe_migration",),
+                    )
         return conn
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

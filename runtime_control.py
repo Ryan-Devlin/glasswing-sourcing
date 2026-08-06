@@ -23,7 +23,11 @@ from common import (
     STREAM_STOP,
     atomic_write_json,
 )
-from db_backend import connect_postgres, using_postgres
+from db_backend import (
+    acquire_advisory_lock_with_timeout,
+    connect_postgres,
+    using_postgres,
+)
 
 
 RUNTIME_MODE = os.getenv("GLASSWING_RUNTIME_MODE", "local").strip().lower()
@@ -125,9 +129,8 @@ def _connect_runtime_control():
             conn.execute("CREATE SCHEMA IF NOT EXISTS runtime")
             conn.commit()
             conn.execute("SET search_path TO runtime, public")
-            conn.execute(
-                "SELECT pg_advisory_lock(hashtext(?))",
-                ("runtime_control_migration",),
+            locked = acquire_advisory_lock_with_timeout(
+                conn, "runtime_control_migration"
             )
             try:
                 conn.executescript(
@@ -156,10 +159,11 @@ def _connect_runtime_control():
                 conn.commit()
                 _runtime_schema_initialized_for = database_key
             finally:
-                conn.execute(
-                    "SELECT pg_advisory_unlock(hashtext(?))",
-                    ("runtime_control_migration",),
-                )
+                if locked:
+                    conn.execute(
+                        "SELECT pg_advisory_unlock(hashtext(?))",
+                        ("runtime_control_migration",),
+                    )
         else:
             conn.execute("SET search_path TO runtime, public")
     return conn
