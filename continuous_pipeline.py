@@ -1372,17 +1372,26 @@ def adaptive_screening_profile(
     safe_workers = min(4, max(1, base_workers))
     if pending >= 1000:
         return {
+            # Confirmed live: at the old ceiling (200/batch, 32 workers),
+            # even a fully successful batch only sustains roughly 1.5-2
+            # domains/sec -- far below CertStream's real matched-extension
+            # arrival rate, so the pending queue would keep growing even
+            # with zero failures. Scoring now runs on its own dedicated
+            # 128-thread pool (no longer competing for asyncio's small
+            # default executor), so raising concurrency here no longer
+            # risks the queueing/contention issues that motivated the
+            # original conservative caps.
             "mode": "surge",
-            "batch_size": min(200, max(50, base_batch)),
-            "workers": min(32, max(8, base_workers)),
+            "batch_size": min(300, max(50, base_batch)),
+            "workers": min(48, max(8, base_workers)),
             "timeout": max(12.0, min(base_timeout, 18.0)),
             "homepage_only": True,
         }
     if pending >= 250:
         return {
             "mode": "catch_up",
-            "batch_size": min(150, max(40, base_batch)),
-            "workers": min(24, max(8, base_workers)),
+            "batch_size": min(200, max(40, base_batch)),
+            "workers": min(32, max(8, base_workers)),
             "timeout": max(12.0, min(base_timeout, 18.0)),
             "homepage_only": True,
         }
