@@ -752,18 +752,18 @@ def clear_stale_work_queue(conn: sqlite3.Connection) -> int:
 
 def discard_pending_by_extension(
     conn: sqlite3.Connection,
-    extension: str,
+    extension: str | None,
 ) -> int:
-    """Bulk-discard not-yet-attempted queue rows for one TLD.
+    """Bulk-discard not-yet-attempted queue rows, optionally for one TLD.
 
-    For clearing a stale backlog after an Extensions misconfiguration --
-    confirmed live: an accidental .co-only Extensions setting queued 1700+
-    .co domains before anyone noticed, and claim_batch() (ordered oldest
-    first, with no extension awareness) would have kept drawing from that
-    backlog for over an hour before ever reaching newly-arriving domains
-    in the corrected extension set. This only ever touches the pipeline's
-    own scheduling queue (undiscovered, unscored hostnames) -- never
-    classifications, training truth, or any human decision.
+    extension=None wipes the entire not-yet-attempted queue regardless of
+    TLD -- for clearing an enormous historical backlog (confirmed live:
+    121,000+ pending rows, accumulated over days, that dominated every
+    claim_batch() call regardless of which TLD's misconfiguration was fixed)
+    so the worker starts fresh from newly-arriving CertStream domains only.
+    This only ever touches the pipeline's own scheduling queue
+    (undiscovered, unscored hostnames) -- never classifications, training
+    truth, or any human decision.
     """
     rows = conn.execute(
         "SELECT domain FROM domains WHERE status IN ('pending', 'processing')"
@@ -771,10 +771,15 @@ def discard_pending_by_extension(
     to_discard = [
         str(row["domain"])
         for row in rows
-        if domain_extension(str(row["domain"])) == extension
+        if extension is None or domain_extension(str(row["domain"])) == extension
     ]
     if not to_discard:
         return 0
+    reason = (
+        "full_queue_wipe_requested"
+        if extension is None
+        else "stale_extension_backlog_discarded"
+    )
     for start in range(0, len(to_discard), 800):
         batch = to_discard[start : start + 800]
         marks = ",".join("?" for _ in batch)
@@ -782,10 +787,10 @@ def discard_pending_by_extension(
             f"""
             UPDATE domains
             SET status='discarded', next_attempt_at=NULL,
-                last_error='stale_extension_backlog_discarded'
+                last_error=?
             WHERE domain IN ({marks})
             """,
-            batch,
+            [reason, *batch],
         )
     conn.commit()
     return len(to_discard)
@@ -1568,11 +1573,12 @@ async def worker_loop(
             # entire worker forever -- the per-domain fetch timeout bounds
             # one HTTP request, not the batch as a whole, so anything that
             # blocks after that stage (a downstream write, a stuck lock, an
-            # await that never resolves) had no ceiling at all. This outer
-            # deadline is deliberately generous (well beyond any realistic
-            # batch) so it only ever fires on a genuine hang, converting it
-            # into the same mark_failure/retry path as any other error
-            # instead of an indefinite, silent stall.
+            # await that never resolves) had no ceiling at all. Deliberately
+            # tight at 30s per explicit request to surface a stuck/hung
+            # batch fast rather than sitting silently for minutes; a batch
+            # that legitimately needs its full retry pass at reduced
+            # concurrency can still hit this ceiling and get marked failed
+            # for retry next cycle rather than actually being stuck.
             output, screening_stats = await asyncio.wait_for(
                 screening_filter.screen_records(
                     records,
@@ -1581,7 +1587,7 @@ async def worker_loop(
                     homepage_only=bool(profile["homepage_only"]),
                     persist=True,
                 ),
-                timeout=600.0,
+                timeout=30.0,
             )
             mark_success(conn, domains)
 

@@ -294,6 +294,33 @@ with tabs[0]:
         )
         st.rerun()
 
+    st.markdown("#### Wipe the entire new-domain queue")
+    st.caption(
+        "Discards every not-yet-attempted domain in the new-domain "
+        "screening queue, regardless of TLD. Only affects undiscovered/"
+        "unscored hostnames waiting to be checked -- never "
+        "classifications, training truth, or any human decision. New "
+        "CertStream events keep arriving and refill the queue normally "
+        "afterward."
+    )
+    wipe_confirm = st.checkbox(
+        "I understand this discards every not-yet-attempted domain in "
+        "the entire queue, for every TLD.",
+        key="queue_wipe_confirm",
+    )
+    if st.button(
+        "Wipe entire new-domain queue",
+        disabled=not wipe_confirm,
+    ):
+        conn = connect_db()
+        try:
+            discarded = discard_pending_by_extension(conn, None)
+        finally:
+            conn.close()
+        st.cache_data.clear()
+        st.success(f"Discarded {discarded:,} pending domains from the queue.")
+        st.rerun()
+
 with tabs[1]:
     st.subheader("Readiness checks")
     st.dataframe(

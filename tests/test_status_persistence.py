@@ -181,6 +181,40 @@ class StatusPersistenceTests(unittest.TestCase):
         self.assertEqual(rows["keep.ai"], "pending")
         self.assertEqual(rows["done.co"], "complete")
 
+    def test_discard_pending_by_extension_none_wipes_every_tld(self):
+        # Confirmed live: a 121,000+ historical backlog (many TLDs, not
+        # just the one misconfiguration that started the investigation)
+        # dominated every claim_batch() call regardless of which specific
+        # TLD's backlog got cleared -- extension=None wipes all of it.
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("""
+            CREATE TABLE domains (
+                domain TEXT PRIMARY KEY, status TEXT, next_attempt_at TEXT,
+                last_error TEXT
+            )
+        """)
+        conn.executemany(
+            "INSERT INTO domains(domain, status) VALUES (?, 'pending')",
+            [("junk1.co",), ("junk2.ai",), ("junk3.app",)],
+        )
+        conn.execute(
+            "INSERT INTO domains(domain, status) VALUES ('done.ai', 'complete')"
+        )
+        conn.commit()
+
+        discarded = continuous_pipeline.discard_pending_by_extension(conn, None)
+
+        self.assertEqual(discarded, 3)
+        rows = {
+            row["domain"]: row["status"]
+            for row in conn.execute("SELECT domain, status FROM domains").fetchall()
+        }
+        self.assertEqual(rows["junk1.co"], "discarded")
+        self.assertEqual(rows["junk2.ai"], "discarded")
+        self.assertEqual(rows["junk3.app"], "discarded")
+        self.assertEqual(rows["done.ai"], "complete")
+
     def test_claim_batch_prefers_newest_domains_over_stale_backlog(self):
         # Confirmed live: a 121,000+ historical backlog meant claim_batch's
         # old oldest-first ordering would have starved freshly arriving
