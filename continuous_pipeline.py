@@ -609,15 +609,20 @@ def claim_batch(conn: sqlite3.Connection, size: int) -> list[str]:
             SELECT domain, first_seen FROM domains
             WHERE status='pending'
               AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
-            ORDER BY first_seen
+            ORDER BY first_seen DESC
             LIMIT ?
             """,
             (now, candidate_limit),
         ).fetchall()
         priority = _corpus_priority_for_domains([row["domain"] for row in rows])
-        ordered = sorted(
-            rows, key=lambda row: (priority.get(row["domain"], 2), row["first_seen"])
-        )
+        # Newest first within each priority tier -- confirmed live: a
+        # 121,000+ historical backlog (oldest-first) meant freshly arriving
+        # domains would never be reached for days, even after fixing the
+        # bugs actually causing the backlog. rows already arrive newest
+        # first from the query above; sort on priority alone (stable sort
+        # preserves that ordering within each tier) instead of re-sorting
+        # by first_seen ascending.
+        ordered = sorted(rows, key=lambda row: priority.get(row["domain"], 2))
         domains = [row["domain"] for row in ordered[:size]]
         if not domains:
             return []
@@ -657,7 +662,7 @@ def claim_batch(conn: sqlite3.Connection, size: int) -> list[str]:
                 WHEN crawled.domain IS NOT NULL THEN 1
                 ELSE 2
               END,
-              queue.first_seen
+              queue.first_seen DESC
             LIMIT ?
             """,
             (now, size),
@@ -677,7 +682,7 @@ def claim_batch(conn: sqlite3.Connection, size: int) -> list[str]:
               )
             ORDER BY
               CASE WHEN crawled.domain IS NOT NULL THEN 0 ELSE 1 END,
-              queue.first_seen
+              queue.first_seen DESC
             LIMIT ?
             """,
             (now, size),
@@ -696,7 +701,7 @@ def claim_batch(conn: sqlite3.Connection, size: int) -> list[str]:
               )
             ORDER BY
               CASE WHEN zone_page.domain IS NOT NULL THEN 0 ELSE 1 END,
-              queue.first_seen
+              queue.first_seen DESC
             LIMIT ?
             """,
             (now, size),
@@ -708,7 +713,7 @@ def claim_batch(conn: sqlite3.Connection, size: int) -> list[str]:
             FROM domains
             WHERE status='pending'
               AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
-            ORDER BY first_seen
+            ORDER BY first_seen DESC
             LIMIT ?
             """,
             (now, size),

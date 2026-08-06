@@ -181,6 +181,46 @@ class StatusPersistenceTests(unittest.TestCase):
         self.assertEqual(rows["keep.ai"], "pending")
         self.assertEqual(rows["done.co"], "complete")
 
+    def test_claim_batch_prefers_newest_domains_over_stale_backlog(self):
+        # Confirmed live: a 121,000+ historical backlog meant claim_batch's
+        # old oldest-first ordering would have starved freshly arriving
+        # domains for days, even after fixing the actual bugs that caused
+        # the backlog and the extension misconfiguration. Fresh, likely-
+        # live domains must be tried before ancient, likely-dead ones.
+        with tempfile.TemporaryDirectory() as directory:
+            queue_db = Path(directory) / "queue.sqlite3"
+            # Nonexistent paths so _connect_db_sqlite() takes the bare
+            # fallback query (no ai_search/zone_universe ATTACH) -- isolates
+            # the first_seen ordering fix from the separate, legitimate
+            # already-crawled priority tier.
+            missing_ai_search = Path(directory) / "no_ai_search.sqlite3"
+            missing_zone_universe = Path(directory) / "no_zone_universe.sqlite3"
+            with patch.object(
+                continuous_pipeline, "QUEUE_DB", queue_db
+            ), patch.object(
+                continuous_pipeline, "AI_SEARCH_DB", missing_ai_search
+            ), patch.object(
+                continuous_pipeline, "ZONE_UNIVERSE_DB", missing_zone_universe
+            ):
+                conn = continuous_pipeline.connect_db()
+                conn.execute(
+                    "INSERT INTO domains(domain, first_seen, last_seen) "
+                    "VALUES ('stale-backlog-item.ai', '2020-01-01T00:00:00Z', "
+                    "'2020-01-01T00:00:00Z')"
+                )
+                conn.execute(
+                    "INSERT INTO domains(domain, first_seen, last_seen) "
+                    "VALUES ('just-discovered.ai', '2026-08-06T00:00:00Z', "
+                    "'2026-08-06T00:00:00Z')"
+                )
+                conn.commit()
+
+                claimed = continuous_pipeline.claim_batch(conn, size=10)
+                conn.close()
+
+        self.assertEqual(claimed[0], "just-discovered.ai")
+        self.assertEqual(claimed[1], "stale-backlog-item.ai")
+
     def test_duplicate_domain_registration_is_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "queue.sqlite3"
