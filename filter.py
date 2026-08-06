@@ -9,7 +9,6 @@ import json
 import os
 import re
 import sqlite3
-import sys
 import time
 from dataclasses import dataclass
 from functools import lru_cache
@@ -49,6 +48,28 @@ from common import (
 )
 
 USER_AGENT = "Mozilla/5.0 Glasswing-Sourcing/2.0"
+
+
+def _report_slow_operation(kind: str, **fields: object) -> None:
+    """Surface a slow-operation diagnostic on the live dashboard.
+
+    print()-based diagnostics in this module never reached anywhere
+    observable -- confirmed live: railway.pipeline-worker.json runs a bare
+    "python continuous_pipeline.py" with no log capture wired up, so
+    stderr output (even flush=True prints) was invisible for the entire
+    investigation, making "no slow operation was ever logged" a false
+    negative rather than real evidence. write_status() already reaches the
+    live dashboard reliably in both local and cloud (Postgres-backed)
+    modes, so route diagnostics through it instead of print().
+    """
+    try:
+        import continuous_pipeline
+
+        continuous_pipeline.write_status(
+            **{f"last_slow_{kind}": {**fields, "logged_at": continuous_pipeline.utc_now()}}
+        )
+    except Exception:
+        pass
 
 
 def crawler_database_paths() -> tuple[Path, Path]:
@@ -3535,20 +3556,11 @@ async def process(
 
         scoring_elapsed = time.monotonic() - _scoring_started
         if scoring_elapsed > 2.0:
-            # Confirmed live: the outer batch deadline fired 40-79s late
-            # (259.0s against a 180s ceiling, and 220.5s against a separate
-            # 180s ceiling), which asyncio.wait_for can only do if the event
-            # loop itself was blocked by synchronous work that long. This
-            # synchronous scoring chain (score_text and the dozen+ regex-based
-            # *_assessment calls above) is the only CPU-bound, non-awaited work
-            # in the whole per-domain path -- logging any outlier here is the
-            # fastest way to find which domain/page text is pathological
-            # without another deploy-and-wait cycle.
-            print(
-                f"SLOW_SCORING domain={domain} seconds={scoring_elapsed:.2f} "
-                f"text_chars={len(combined)}",
-                file=sys.stderr,
-                flush=True,
+            _report_slow_operation(
+                "scoring",
+                domain=domain,
+                seconds=round(scoring_elapsed, 2),
+                text_chars=len(combined),
             )
 
         source_row = {
@@ -4523,19 +4535,8 @@ async def screen_records(
     )
     persist_elapsed = time.monotonic() - _persist_started
     if persist_elapsed > 2.0:
-        # Confirmed live: the batch outer deadline fired 40-79s late twice
-        # in a row even after capping response size and confirming the
-        # per-domain scoring chain isn't the culprit (no SLOW_SCORING ever
-        # logged). persist_screening_output runs a batch's worth of
-        # Postgres writes (classifications upsert, CSV upserts, rejection
-        # purge) synchronously -- moved to a thread so it can no longer
-        # block the event loop and delay the outer deadline's own
-        # cancellation, and logged here so a genuinely slow persist step is
-        # now visible instead of just guessed at.
-        print(
-            f"SLOW_PERSIST rows={len(output)} seconds={persist_elapsed:.2f}",
-            file=sys.stderr,
-            flush=True,
+        _report_slow_operation(
+            "persist", rows=len(output), seconds=round(persist_elapsed, 2)
         )
     return output, stats
 

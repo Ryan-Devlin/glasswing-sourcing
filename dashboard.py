@@ -1676,6 +1676,27 @@ if stream_status.get("last_error"):
                 ).splitlines()
                 st.code("\n".join(lines[-60:]) or "No log output.")
 
+_slow_op_labels = {
+    "last_slow_scoring": "Slow per-domain scoring",
+    "last_slow_persist": "Slow batch persist",
+    "last_slow_register_domain_event": "Slow CertStream event registration",
+}
+_slow_ops = {
+    label: stream_status[key]
+    for key, label in _slow_op_labels.items()
+    if stream_status.get(key)
+}
+if _slow_ops:
+    with st.expander("Slow-operation diagnostics", expanded=False):
+        st.caption(
+            "Surfaces individual operations that took longer than "
+            "expected -- helps pin down what's actually consuming time "
+            "inside a batch, since railway logs doesn't capture this "
+            "process's stdout/stderr."
+        )
+        for label, details in _slow_ops.items():
+            st.write(f"**{label}**", details)
+
 manual_message = st.session_state.pop(
     "last_manual_claude_message",
     "",

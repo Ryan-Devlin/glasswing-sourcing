@@ -1228,21 +1228,20 @@ async def listener(
                             time.monotonic() - _register_started
                         )
                         if _register_elapsed > 0.5:
-                            # Confirmed live: this call ran a synchronous
-                            # DB round trip (an UPDATE for a repeat event,
-                            # or an INSERT for a new one, plus a commit) on
-                            # the same event loop the worker's own outer
-                            # batch deadline depends on -- thousands of
-                            # repeat events per run made this a real
-                            # candidate for the 30-80s late-firing deadline
-                            # observed live even after moving both scoring
-                            # and persistence off this same event loop.
-                            print(
-                                "SLOW_REGISTER_DOMAIN_EVENT "
-                                f"domain={domain} "
-                                f"seconds={_register_elapsed:.3f}",
-                                file=sys.stderr,
-                                flush=True,
+                            # print()-based diagnostics never reached
+                            # anywhere observable -- confirmed live:
+                            # railway.pipeline-worker.json runs a bare
+                            # "python continuous_pipeline.py" with no log
+                            # capture wired up, so stderr output was
+                            # invisible for the entire investigation.
+                            # write_status() already reaches the live
+                            # dashboard reliably.
+                            write_status(
+                                last_slow_register_domain_event={
+                                    "domain": domain,
+                                    "seconds": round(_register_elapsed, 3),
+                                    "logged_at": utc_now(),
+                                }
                             )
                         if not event.get("accepted"):
                             continue
