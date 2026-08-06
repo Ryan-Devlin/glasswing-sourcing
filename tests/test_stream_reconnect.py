@@ -69,7 +69,27 @@ class ScreeningBatchTimeoutTests(unittest.TestCase):
             "screening_filter.screen_records(", 1
         )
         self.assertTrue(before.rstrip().endswith("asyncio.wait_for("))
-        self.assertIn("timeout=90.0", after.split("\n\n", 1)[0])
+        self.assertIn("timeout=outer_deadline_seconds", after.split("\n\n", 1)[0])
+        self.assertIn("outer_deadline_seconds = 180.0", self.pipeline)
+
+    def test_timeout_error_reports_which_batch_and_settings_hit_the_deadline(self):
+        # Confirmed live: 30s and then 90s both still cut off real batches
+        # before they finished once claim_batch started surfacing fresh,
+        # live domains (real HTTP work) instead of the old dead/parked
+        # backlog (instant failures) -- a bare "TimeoutError:" with no
+        # detail made it impossible to tell a genuine hang apart from a
+        # batch that just needed a bit more room without another
+        # deploy-and-wait cycle.
+        after_screen_records = self.pipeline.split(
+            "screening_filter.screen_records(", 1
+        )[1]
+        section = after_screen_records.split(
+            "except asyncio.TimeoutError:", 1
+        )[1]
+        section = section.split("except Exception as exc:", 1)[0]
+        self.assertIn("outer_deadline_", section)
+        self.assertIn("batch=", section)
+        self.assertIn("per_domain_timeout=", section)
 
     def test_timed_out_batch_is_caught_by_the_existing_failure_handler(self):
         # asyncio.wait_for raises TimeoutError, which must still land in the

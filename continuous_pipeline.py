@@ -1574,22 +1574,34 @@ async def worker_loop(
             # one HTTP request, not the batch as a whole, so anything that
             # blocks after that stage (a downstream write, a stuck lock, an
             # await that never resolves) had no ceiling at all. Confirmed
-            # live: cutting this to 30s (to surface a stuck batch fast)
-            # meant almost every real batch -- even ones making genuine
-            # progress -- got cut off before finishing a retry pass, so
-            # nothing ever completed (the sourcing funnel stayed at zero).
-            # 90s keeps that same fast-feedback goal while giving a normal
-            # batch plus one retry pass enough room to actually finish.
-            output, screening_stats = await asyncio.wait_for(
-                screening_filter.screen_records(
-                    records,
-                    workers=int(profile["workers"]),
-                    timeout=float(profile["timeout"]),
-                    homepage_only=bool(profile["homepage_only"]),
-                    persist=True,
-                ),
-                timeout=90.0,
-            )
+            # live: 30s and then 90s both still cut off real batches before
+            # they finished -- once claim_batch started prioritizing fresh,
+            # live domains over the old dead/parked backlog, batches started
+            # doing genuine HTTP work (real page loads, redirects) instead
+            # of instantly failing, which legitimately takes longer per
+            # domain. 180s keeps the same fast-feedback goal (still 3.3x
+            # faster than the original 600s) while giving a real batch plus
+            # a retry pass realistic room to finish.
+            outer_deadline_seconds = 180.0
+            batch_started_wall = time.monotonic()
+            try:
+                output, screening_stats = await asyncio.wait_for(
+                    screening_filter.screen_records(
+                        records,
+                        workers=int(profile["workers"]),
+                        timeout=float(profile["timeout"]),
+                        homepage_only=bool(profile["homepage_only"]),
+                        persist=True,
+                    ),
+                    timeout=outer_deadline_seconds,
+                )
+            except asyncio.TimeoutError:
+                raise asyncio.TimeoutError(
+                    f"outer_deadline_{outer_deadline_seconds:.0f}s_exceeded "
+                    f"after {time.monotonic() - batch_started_wall:.1f}s "
+                    f"(batch={len(domains)}, workers={profile['workers']}, "
+                    f"per_domain_timeout={profile['timeout']})"
+                ) from None
             mark_success(conn, domains)
 
             batch_seconds = time.monotonic() - batch_started
