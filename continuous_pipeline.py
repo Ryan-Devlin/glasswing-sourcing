@@ -1486,14 +1486,26 @@ async def worker_loop(
                 }
                 for domain in domains
             ]
-            output, screening_stats = (
-                await screening_filter.screen_records(
+            # A hang inside screen_records (confirmed live: worker stuck
+            # reporting stage="screening" indefinitely, Classified/Failed
+            # both frozen at 0, no exception ever raised) used to block this
+            # entire worker forever -- the per-domain fetch timeout bounds
+            # one HTTP request, not the batch as a whole, so anything that
+            # blocks after that stage (a downstream write, a stuck lock, an
+            # await that never resolves) had no ceiling at all. This outer
+            # deadline is deliberately generous (well beyond any realistic
+            # batch) so it only ever fires on a genuine hang, converting it
+            # into the same mark_failure/retry path as any other error
+            # instead of an indefinite, silent stall.
+            output, screening_stats = await asyncio.wait_for(
+                screening_filter.screen_records(
                     records,
                     workers=int(profile["workers"]),
                     timeout=float(profile["timeout"]),
                     homepage_only=bool(profile["homepage_only"]),
                     persist=True,
-                )
+                ),
+                timeout=600.0,
             )
             mark_success(conn, domains)
 
