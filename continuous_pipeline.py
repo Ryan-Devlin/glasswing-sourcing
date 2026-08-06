@@ -501,27 +501,27 @@ def register_domain_event(
             "seen_count": 1,
         }
 
-    conn.execute(
+    # Confirmed live: this ran as a separate UPDATE, then a SELECT, then a
+    # commit -- three synchronous round trips for every single repeat
+    # certificate event (thousands of them per run: "5741 repeat events
+    # ignored" observed live), on the same event loop the worker's own
+    # outer batch deadline depends on. One UPDATE ... RETURNING cuts that
+    # to two round trips (the write, then the commit) without changing
+    # what gets stored or returned.
+    row = conn.execute(
         """
         UPDATE domains
         SET last_seen = ?,
             seen_count = seen_count + 1,
             last_seen_run_id = ?
         WHERE domain = ?
+        RETURNING status, seen_count
         """,
         (
             now,
             run_id,
             domain,
         ),
-    )
-    row = conn.execute(
-        """
-        SELECT status, seen_count
-        FROM domains
-        WHERE domain = ?
-        """,
-        (domain,),
     ).fetchone()
     conn.commit()
 
@@ -1217,12 +1217,33 @@ async def listener(
                     }
 
                     for domain in sorted(message_domains):
+                        _register_started = time.monotonic()
                         event = register_domain_event(
                             conn,
                             domain,
                             allowed_extensions,
                             run_id=active_run_id,
                         )
+                        _register_elapsed = (
+                            time.monotonic() - _register_started
+                        )
+                        if _register_elapsed > 0.5:
+                            # Confirmed live: this call ran a synchronous
+                            # DB round trip (an UPDATE for a repeat event,
+                            # or an INSERT for a new one, plus a commit) on
+                            # the same event loop the worker's own outer
+                            # batch deadline depends on -- thousands of
+                            # repeat events per run made this a real
+                            # candidate for the 30-80s late-firing deadline
+                            # observed live even after moving both scoring
+                            # and persistence off this same event loop.
+                            print(
+                                "SLOW_REGISTER_DOMAIN_EVENT "
+                                f"domain={domain} "
+                                f"seconds={_register_elapsed:.3f}",
+                                file=sys.stderr,
+                                flush=True,
+                            )
                         if not event.get("accepted"):
                             continue
 
