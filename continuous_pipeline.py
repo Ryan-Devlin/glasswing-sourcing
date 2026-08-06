@@ -1371,31 +1371,31 @@ def adaptive_screening_profile(
     # turning an entire batch into identical TimeoutError results.
     safe_workers = min(4, max(1, base_workers))
     if pending >= 1000:
+        # Confirmed live twice: (1) raising the ceiling alone did nothing --
+        # min(ceiling, max(floor, base_batch)) just returns base_batch
+        # whenever the user's own configured "Domains per batch" is
+        # already above a low floor; (2) once the floor landed (confirmed
+        # via a real batch=250, workers=40 in the wild), that batch still
+        # blew the 240s ceiling at 277.7s -- 250/40 = 6.25 domains per
+        # worker meant most of the batch had to queue behind an earlier
+        # round instead of running concurrently. Batch size now equals
+        # worker count: every domain in a batch gets its own concurrent
+        # scraper slot for the whole batch, so total time is bounded by one
+        # round (the slowest single domain), not several queued rounds.
+        surge_workers = min(120, max(100, base_workers))
         return {
-            # Confirmed live: raising the ceiling here alone did nothing --
-            # min(ceiling, max(floor, base_batch)) just returns base_batch
-            # whenever the user's own configured "Domains per batch" is
-            # already above the (low) floor, which it was (75 vs. a floor
-            # of 50). A batch that showed batch=75, workers=28 right after
-            # deploying a 300/48 ceiling confirmed this: surge mode needs a
-            # floor ABOVE typical baseline settings so it actually overrides
-            # them, not a ceiling that only matters if the user has already
-            # configured something huge. Scoring now runs on its own
-            # dedicated 128-thread pool (no longer competing for asyncio's
-            # small default executor), so this level of concurrency no
-            # longer risks the queueing/contention issues that motivated
-            # the original conservative caps.
             "mode": "surge",
-            "batch_size": min(300, max(250, base_batch)),
-            "workers": min(48, max(40, base_workers)),
+            "batch_size": surge_workers,
+            "workers": surge_workers,
             "timeout": max(12.0, min(base_timeout, 18.0)),
             "homepage_only": True,
         }
     if pending >= 250:
+        catch_up_workers = min(80, max(64, base_workers))
         return {
             "mode": "catch_up",
-            "batch_size": min(200, max(150, base_batch)),
-            "workers": min(32, max(28, base_workers)),
+            "batch_size": catch_up_workers,
+            "workers": catch_up_workers,
             "timeout": max(12.0, min(base_timeout, 18.0)),
             "homepage_only": True,
         }

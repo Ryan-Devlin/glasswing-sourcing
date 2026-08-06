@@ -4507,10 +4507,19 @@ async def screen_records(
         len(records) >= 5 and len(retry_indexes) / len(records) >= 0.5
     )
     if retry_indexes and not mostly_timed_out:
+        # A fixed cap of 8 was tuned for small (~75-domain) batches --
+        # confirmed live: once batch sizes scaled up with the worker
+        # count (batch_size == workers, so every domain gets its own
+        # concurrent slot), this same fixed cap would have made the retry
+        # pass for a large batch queue behind just 8 slots regardless of
+        # how many workers the main pass used, recreating the exact
+        # queueing bottleneck that motivated matching batch size to worker
+        # count in the first place. Scale with the batch's own worker
+        # count instead of a constant.
         retry_records = [records[index] for index in retry_indexes]
         retry_results = await scrape_rows(
             retry_records,
-            min(8, max(2, int(workers) // 2)),
+            max(2, int(workers) // 2),
             max(20.0, float(timeout)),
         )
         for index, retry_result in zip(retry_indexes, retry_results):
