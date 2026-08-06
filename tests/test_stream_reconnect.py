@@ -98,4 +98,5 @@ class ScreeningBatchTimeoutTests(unittest.TestCase):
         # unhandled and crash the worker instead of just failing one batch.
         after = self.pipeline.split("screening_filter.screen_records(", 1)[1]
         before_except = after.split("except Exception as exc:", 1)[0]
-        self.assertIn("mark_success(conn, domains)", before_except)
+        self.assertIn("mark_success(conn, succeeded_domains)", before_except)
+        self.assertIn("mark_failure(", before_except)

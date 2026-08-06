@@ -91,7 +91,7 @@ class ScraperResilienceTests(unittest.TestCase):
         # that takes, which is exactly the kind of delay that would make
         # asyncio.wait_for's own cancellation fire late.
         source = Path("filter.py").read_text(encoding="utf-8")
-        section = source.split("output = pd.DataFrame(results)", 1)[1].split(
+        section = source.split("output = pd.DataFrame(succeeded_rows)", 1)[1].split(
             "\n\n", 1
         )[0]
         self.assertIn("_SCORING_EXECUTOR", section)
@@ -119,20 +119,63 @@ class ScraperResilienceTests(unittest.TestCase):
             process_body,
         )
 
-    def test_systemic_timeout_batch_is_not_persisted(self):
+    def test_all_timed_out_batch_persists_nothing_but_reports_the_timeouts(self):
+        # Confirmed live: this used to raise and discard the whole batch
+        # once 80%+ timed out -- fine when every row is a timeout, but the
+        # same all-or-nothing check also discarded a batch's real,
+        # successfully-fetched companies whenever timeouts crossed that
+        # threshold. It no longer raises; nothing here succeeded, so
+        # nothing is persisted, but the timed-out domains are reported for
+        # the caller's normal retry path instead of just being lost.
         async def always_timeout(row, session, sem, timeout, homepage_only=False):
             return {"domain": row["registrable"], "fetch_error": "TimeoutError: "}
 
         rows = [{"registrable": f"failed-{index}.ai"} for index in range(5)]
         with patch.object(screening_filter, "process", always_timeout):
-            with self.assertRaisesRegex(RuntimeError, "systemic_scraper_timeout"):
-                asyncio.run(screening_filter.screen_records(
-                    rows,
-                    workers=4,
-                    timeout=15,
-                    homepage_only=True,
-                    persist=True,
-                ))
+            output, stats = asyncio.run(screening_filter.screen_records(
+                rows,
+                workers=4,
+                timeout=15,
+                homepage_only=True,
+                persist=False,
+            ))
+
+        self.assertTrue(output.empty)
+        self.assertEqual(
+            set(stats["timed_out_domains"]),
+            {f"failed-{index}.ai" for index in range(5)},
+        )
+
+    def test_partial_timeout_batch_persists_the_real_successes(self):
+        # The concrete cost of the old all-or-nothing behavior: a batch
+        # where most domains are brand-new and not yet live (a normal
+        # CertStream reality, not a bug) would discard the handful that
+        # genuinely did succeed right along with the timeouts.
+        async def mostly_timeout(row, session, sem, timeout, homepage_only=False):
+            domain = row["registrable"]
+            if domain == "real-company.ai":
+                return {
+                    "domain": domain,
+                    "fetch_error": "",
+                    "http_status": 200,
+                    "routing_bucket": "review",
+                }
+            return {"domain": domain, "fetch_error": "TimeoutError: "}
+
+        rows = [{"registrable": f"failed-{index}.ai"} for index in range(9)]
+        rows.append({"registrable": "real-company.ai"})
+        with patch.object(screening_filter, "process", mostly_timeout):
+            output, stats = asyncio.run(screening_filter.screen_records(
+                rows,
+                workers=32,
+                timeout=15,
+                homepage_only=True,
+                persist=False,
+            ))
+
+        self.assertEqual(list(output["domain"]), ["real-company.ai"])
+        self.assertNotIn("real-company.ai", stats["timed_out_domains"])
+        self.assertEqual(len(stats["timed_out_domains"]), 9)
 
     def test_mostly_timed_out_batch_skips_the_slow_retry_pass(self):
         # Confirmed live: retrying a mostly-timed-out batch at a fixed 2
@@ -140,7 +183,7 @@ class ScraperResilienceTests(unittest.TestCase):
         # itself (e.g. 75 domains / 2 workers * 25s+ each), turning a real
         # network problem into an apparent hang with zero progress. When
         # most of a batch times out on the first pass, skip the slow retry
-        # and let the systemic-timeout check below fail fast instead.
+        # instead.
         calls = 0
 
         async def always_timeout(row, session, sem, timeout, homepage_only=False):
@@ -150,14 +193,13 @@ class ScraperResilienceTests(unittest.TestCase):
 
         rows = [{"registrable": f"failed-{index}.ai"} for index in range(10)]
         with patch.object(screening_filter, "process", always_timeout):
-            with self.assertRaisesRegex(RuntimeError, "systemic_scraper_timeout"):
-                asyncio.run(screening_filter.screen_records(
-                    rows,
-                    workers=32,
-                    timeout=15,
-                    homepage_only=True,
-                    persist=True,
-                ))
+            asyncio.run(screening_filter.screen_records(
+                rows,
+                workers=32,
+                timeout=15,
+                homepage_only=True,
+                persist=False,
+            ))
 
         self.assertEqual(calls, 10)
 

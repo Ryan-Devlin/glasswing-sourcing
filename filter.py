@@ -4246,6 +4246,20 @@ def automated_discard_mask(output: pd.DataFrame) -> pd.Series:
 
 def persist_screening_output(output: pd.DataFrame) -> dict[str, int]:
     """Persist one in-process screening batch to all master datasets."""
+    if output.empty:
+        # Confirmed live: screen_records now excludes timed-out rows from
+        # output before this is ever called, so a batch where every domain
+        # timed out reaches here with zero rows. .get() on a genuinely
+        # empty frame returns the fallback scalar instead of an empty
+        # Series (e.g. output.get("routing_bucket", "") == "priority" is
+        # just False, not a Series), which crashes .sum() below.
+        return {
+            "batch_total": 0,
+            "investable": 0,
+            "coming_soon": 0,
+            "hard_denied": 0,
+            "screened_out": 0,
+        }
     output = apply_run_preferences(output, load_run_preferences())
     output = apply_persistent_overrides(output)
     manual_override = (
@@ -4557,45 +4571,69 @@ async def screen_records(
         for index, retry_result in zip(retry_indexes, retry_results):
             results[index] = retry_result
 
-    remaining_timeouts = sum(
-        "TimeoutError" in str(result.get("fetch_error", ""))
+    # Confirmed live: this used to be all-or-nothing -- if 80%+ of a batch
+    # timed out (common for a batch skewed toward brand-new, not-yet-live
+    # CertStream domains, regardless of TLD), the whole batch was discarded
+    # via a raised exception, throwing away the real, successfully-fetched
+    # companies in it too (100 domains genuinely succeeded in one batch,
+    # then the next 100-domain batch's real successes were discarded
+    # alongside its timeouts). Persist whatever genuinely succeeded either
+    # way; only the timed-out rows get excluded here and handed back for
+    # the caller's normal retry-with-backoff path instead of being
+    # silently lost.
+    timed_out_rows = [
+        result
         for result in results
-    )
-    if len(results) >= 5 and remaining_timeouts / len(results) >= 0.8:
-        raise RuntimeError(
-            "systemic_scraper_timeout: refusing to persist unreliable batch"
-        )
+        if "TimeoutError" in str(result.get("fetch_error", ""))
+    ]
+    succeeded_rows = [
+        result for result in results if result not in timed_out_rows
+    ]
+    timed_out_domains = [
+        str(result.get("domain", "")) for result in timed_out_rows if result.get("domain")
+    ]
 
-    output = pd.DataFrame(results)
+    output = pd.DataFrame(succeeded_rows)
     _persist_started = time.monotonic()
     stats = (
         await asyncio.get_running_loop().run_in_executor(
             _SCORING_EXECUTOR, persist_screening_output, output
         )
         if persist
-        else {
-            "batch_total": len(output),
-            "investable": int(
-                (output.get("routing_bucket", "") == "priority").sum()
-            ),
-            "coming_soon": int(
-                (output.get("routing_bucket", "") == "coming_soon").sum()
-            ),
-            "hard_denied": int(
-                (output.get("routing_bucket", "") == "reject").sum()
-            ),
-            "screened_out": int(
-                output.get("routing_bucket", "").isin(
-                    ["screened_out", "review", "comp"]
-                ).sum()
-            ),
-        }
+        else (
+            {
+                "batch_total": 0,
+                "investable": 0,
+                "coming_soon": 0,
+                "hard_denied": 0,
+                "screened_out": 0,
+            }
+            if output.empty
+            else {
+                "batch_total": len(output),
+                "investable": int(
+                    (output.get("routing_bucket", "") == "priority").sum()
+                ),
+                "coming_soon": int(
+                    (output.get("routing_bucket", "") == "coming_soon").sum()
+                ),
+                "hard_denied": int(
+                    (output.get("routing_bucket", "") == "reject").sum()
+                ),
+                "screened_out": int(
+                    output.get("routing_bucket", "").isin(
+                        ["screened_out", "review", "comp"]
+                    ).sum()
+                ),
+            }
+        )
     )
     persist_elapsed = time.monotonic() - _persist_started
     if persist_elapsed > 2.0:
         _report_slow_operation(
             "persist", rows=len(output), seconds=round(persist_elapsed, 2)
         )
+    stats["timed_out_domains"] = timed_out_domains
     return output, stats
 
 

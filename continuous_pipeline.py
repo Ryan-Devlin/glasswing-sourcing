@@ -1637,7 +1637,26 @@ async def worker_loop(
                     f"(batch={len(domains)}, workers={profile['workers']}, "
                     f"per_domain_timeout={profile['timeout']})"
                 ) from None
-            mark_success(conn, domains)
+            # Confirmed live: screen_records used to discard an entire
+            # batch outright once 80%+ timed out, throwing away the real,
+            # successfully-fetched companies in it too. It now persists
+            # whatever succeeded and reports which domains timed out
+            # instead -- mark only those for retry, not the whole batch.
+            timed_out_domains = set(
+                screening_stats.get("timed_out_domains", [])
+            )
+            succeeded_domains = [
+                domain for domain in domains if domain not in timed_out_domains
+            ]
+            if succeeded_domains:
+                mark_success(conn, succeeded_domains)
+            if timed_out_domains:
+                mark_failure(
+                    conn,
+                    [domain for domain in domains if domain in timed_out_domains],
+                    "TimeoutError: fetch timed out",
+                    max_attempts,
+                )
 
             batch_seconds = time.monotonic() - batch_started
             total_batch_seconds += batch_seconds
