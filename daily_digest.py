@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from pathlib import Path
+import urllib.error
+import urllib.request
 from urllib.parse import quote_plus
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -467,6 +469,49 @@ def build_message(
     return message
 
 
+RESEND_SMTP_HOST = "smtp.resend.com"
+RESEND_API_URL = "https://api.resend.com/emails"
+
+
+def send_via_resend_api(
+    rows: list[dict], settings: DigestSettings, *, date_label: str
+) -> None:
+    """Resend's HTTP API, not their SMTP relay.
+
+    Reported failure: TimeoutError: timed out, on the very SMTP connection
+    attempt (smtplib.SMTP_SSL(..., timeout=30)) -- consistent with cloud
+    platforms (Railway included) commonly blocking outbound SMTP ports
+    (465/587) by default to curb spam, regardless of credentials. The API
+    is a plain HTTPS POST, unaffected by that class of restriction, and
+    reuses the same Resend API key already stored as the SMTP password.
+    """
+    payload = json.dumps({
+        "from": settings.sender,
+        "to": list(settings.recipients),
+        "subject": (
+            f"Glasswing: {len(rows)} new high-confidence compan"
+            f"{'ies' if len(rows) != 1 else 'y'} — {date_label}"
+        ),
+        "text": render_plain_text(rows, settings, date_label=date_label),
+        "html": render_html(rows, settings, date_label=date_label),
+    }).encode("utf-8")
+    request = urllib.request.Request(
+        RESEND_API_URL,
+        data=payload,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {settings.smtp_password}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            response.read()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Resend API error {exc.code}: {detail}") from exc
+
+
 def send_message(message: EmailMessage, settings: DigestSettings) -> None:
     context = ssl.create_default_context()
     if settings.use_ssl:
@@ -601,7 +646,12 @@ def run_digest(
         database=database,
     )
     try:
-        send_message(build_message(rows, settings, date_label=date_label), settings)
+        if settings.smtp_host == RESEND_SMTP_HOST:
+            send_via_resend_api(rows, settings, date_label=date_label)
+        else:
+            send_message(
+                build_message(rows, settings, date_label=date_label), settings
+            )
         sent_at = _iso(utc_now())
         record_deliveries(
             run_id, rows, settings.recipients,

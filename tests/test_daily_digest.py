@@ -206,3 +206,90 @@ def test_first_run_lookback_prevents_historical_flood(tmp_path):
         )
         conn.commit()
     assert qualified_candidates(settings(), now=NOW, database=database) == []
+
+
+def test_send_via_resend_api_posts_json_with_bearer_auth(monkeypatch):
+    import json as json_module
+
+    import daily_digest
+
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def read(self):
+            return b'{"id": "abc"}'
+
+    def fake_urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["headers"] = dict(request.headers)
+        captured["body"] = json_module.loads(request.data)
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr(daily_digest.urllib.request, "urlopen", fake_urlopen)
+
+    row = {
+        "domain": "strong.ai",
+        "company_name": "Strong Systems",
+        "fit_score": 92,
+        "confidence_score": 96,
+        "content_source": "crawler_cache",
+        "claude_fit_score": 87,
+        "claude_summary": "Robotics infrastructure platform",
+        "claude_reasoning": "Defensible enterprise robotics wedge",
+        "thesis_pillar": "physical_ai",
+        "routing_reason": "strong_investable_candidate",
+        "final_url": "",
+        "meta_description": "",
+        "rule_evidence": "",
+    }
+    daily_digest.send_via_resend_api(
+        [row],
+        settings(
+            smtp_host="smtp.resend.com",
+            smtp_password="re_secret_key",
+            sender="onboarding@resend.dev",
+            recipients=("team@example.com",),
+        ),
+        date_label="August 5, 2026",
+    )
+
+    assert captured["url"] == daily_digest.RESEND_API_URL
+    assert captured["headers"]["Authorization"] == "Bearer re_secret_key"
+    assert captured["body"]["from"] == "onboarding@resend.dev"
+    assert captured["body"]["to"] == ["team@example.com"]
+    assert "strong.ai" in captured["body"]["text"]
+    assert "strong.ai" in captured["body"]["html"]
+
+
+def test_run_digest_routes_resend_host_through_api_not_smtp(tmp_path, monkeypatch):
+    import daily_digest
+
+    database = tmp_path / "classifications.sqlite3"
+    seed(database)
+
+    api_calls = []
+    smtp_calls = []
+    monkeypatch.setattr(
+        daily_digest,
+        "send_via_resend_api",
+        lambda *a, **k: api_calls.append(1),
+    )
+    monkeypatch.setattr(
+        daily_digest, "send_message", lambda *a, **k: smtp_calls.append(1)
+    )
+
+    daily_digest.run_digest(
+        settings(smtp_host="smtp.resend.com", smtp_password="re_secret_key"),
+        now=NOW,
+        database=database,
+    )
+
+    assert api_calls == [1]
+    assert smtp_calls == []
