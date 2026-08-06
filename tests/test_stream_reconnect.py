@@ -69,7 +69,7 @@ class ScreeningBatchTimeoutTests(unittest.TestCase):
             "screening_filter.screen_records(", 1
         )
         self.assertTrue(before.rstrip().endswith("asyncio.wait_for("))
-        self.assertIn("timeout=30.0", after.split("\n\n", 1)[0])
+        self.assertIn("timeout=90.0", after.split("\n\n", 1)[0])
 
     def test_timed_out_batch_is_caught_by_the_existing_failure_handler(self):
         # asyncio.wait_for raises TimeoutError, which must still land in the

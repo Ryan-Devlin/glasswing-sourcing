@@ -1573,12 +1573,13 @@ async def worker_loop(
             # entire worker forever -- the per-domain fetch timeout bounds
             # one HTTP request, not the batch as a whole, so anything that
             # blocks after that stage (a downstream write, a stuck lock, an
-            # await that never resolves) had no ceiling at all. Deliberately
-            # tight at 30s per explicit request to surface a stuck/hung
-            # batch fast rather than sitting silently for minutes; a batch
-            # that legitimately needs its full retry pass at reduced
-            # concurrency can still hit this ceiling and get marked failed
-            # for retry next cycle rather than actually being stuck.
+            # await that never resolves) had no ceiling at all. Confirmed
+            # live: cutting this to 30s (to surface a stuck batch fast)
+            # meant almost every real batch -- even ones making genuine
+            # progress -- got cut off before finishing a retry pass, so
+            # nothing ever completed (the sourcing funnel stayed at zero).
+            # 90s keeps that same fast-feedback goal while giving a normal
+            # batch plus one retry pass enough room to actually finish.
             output, screening_stats = await asyncio.wait_for(
                 screening_filter.screen_records(
                     records,
@@ -1587,7 +1588,7 @@ async def worker_loop(
                     homepage_only=bool(profile["homepage_only"]),
                     persist=True,
                 ),
-                timeout=30.0,
+                timeout=90.0,
             )
             mark_success(conn, domains)
 
