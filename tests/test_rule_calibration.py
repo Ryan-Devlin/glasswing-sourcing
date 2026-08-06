@@ -42,6 +42,46 @@ class RuleCalibrationTests(unittest.TestCase):
         self.assertTrue(rejected)
         self.assertIn("engineering-services provider", evidence)
 
+    def test_boutique_security_advisory_is_a_consultancy_not_a_product(self):
+        # Confirmed live: this exact copy scored as a top cybersecurity
+        # candidate -- a small team billed per project ("the engagement")
+        # advising clients is a consultancy regardless of industry.
+        rejected, evidence = agency_assessment(
+            "A small, senior team of offensive professionals who crossed "
+            "into AI security. We secure AI systems, advise leaders on AI "
+            "strategy, and build the capability that outlasts the "
+            "engagement."
+        )
+        self.assertTrue(rejected)
+        self.assertTrue(
+            any(
+                term in evidence
+                for term in ("advise leaders", "outlasts the engagement", "crossed into ai security")
+            )
+        )
+
+    def test_bespoke_ai_implementation_for_regulated_industries_is_a_service(self):
+        # Confirmed live: this exact copy scored as a top candidate --
+        # bespoke, per-client "building AI systems for X" is a services
+        # model, not a repeatable product, even with enterprise-sounding
+        # language.
+        rejected, evidence = agency_assessment(
+            "A precision approach to AI implementation. Building AI "
+            "systems for regulated industries with enterprise-grade "
+            "controls."
+        )
+        self.assertTrue(rejected)
+        self.assertIn("bespoke-ai-implementation services", evidence)
+
+    def test_handoff_delivery_model_is_a_service_signal(self):
+        rejected, evidence = agency_assessment(
+            "Production AI agents, workflow automation, and system "
+            "integrations. Built for your business, handed off to your "
+            "team."
+        )
+        self.assertTrue(rejected)
+        self.assertIn("handed off to your team", evidence)
+
     def test_course_and_event_identity_are_non_product_content(self):
         course, _ = media_newsletter_assessment(
             "Online AI program for students. Explore the curriculum, "

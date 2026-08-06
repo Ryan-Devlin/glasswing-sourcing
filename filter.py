@@ -1215,6 +1215,19 @@ def agency_assessment(text: str) -> tuple[bool, list[str]]:
         "for clients",
         "client work",
         "client projects",
+        # A small senior/boutique team billed per project ("the
+        # engagement") advising clients is a consultancy regardless of
+        # industry -- confirmed live: a boutique offensive-security shop
+        # ("small, senior team... advise leaders on AI strategy... the
+        # capability that outlasts the engagement") scored as a top
+        # cybersecurity candidate because none of these exact phrases
+        # were previously matched anywhere.
+        "advise leaders",
+        "advises leaders",
+        "outlasts the engagement",
+        "crossed into ai security",
+        "handed off to your team",
+        "handed off to you",
     ]
     product_signals = [
         "platform",
@@ -1230,7 +1243,11 @@ def agency_assessment(text: str) -> tuple[bool, list[str]]:
     ]
 
     service_hits = [term for term in service_signals if term in lower]
-    product_hits = [term for term in product_signals if term in lower]
+    # Confirmed live: a naive substring check matched "product" inside
+    # "production" and would equally match "api" inside "rapid" --
+    # occurrences() already exists precisely for boundary-safe phrase
+    # matching everywhere else in this file.
+    product_hits = occurrences(lower, product_signals)
     identity_hits = [
         term for term in service_identity if term in leading_copy
     ]
@@ -1320,6 +1337,17 @@ def agency_assessment(text: str) -> tuple[bool, list[str]]:
             ["we deliver production solutions", "build high-performance applications"],
             "application-development services",
         ),
+        (
+            # Confirmed live: "A precision approach to AI implementation.
+            # Building AI systems for regulated industries with
+            # enterprise-grade controls" scored as a top candidate --
+            # bespoke, per-client "building AI systems for X" is a
+            # services model, not a repeatable product, even when the
+            # copy uses enterprise/product-sounding language.
+            ["ai implementation", "building ai systems for"],
+            ["regulated industries", "enterprise-grade controls", "precision approach"],
+            "bespoke-ai-implementation services",
+        ),
     ]
     for identity_terms, confirming_terms, label in service_identity_bundles:
         if (
@@ -1396,7 +1424,11 @@ def media_newsletter_assessment(text: str) -> tuple[bool, list[str]]:
     ]
 
     strong_hits = [term for term in strong_media if term in lower]
-    product_hits = [term for term in product_signals if term in lower]
+    # Confirmed live: a naive substring check matched "product" inside
+    # "production" and would equally match "api" inside "rapid" --
+    # occurrences() already exists precisely for boundary-safe phrase
+    # matching everywhere else in this file.
+    product_hits = occurrences(lower, product_signals)
 
     education_identity_hits: list[str] = []
     education_patterns = (
