@@ -1032,6 +1032,12 @@ st.markdown(
     unsafe_allow_html=True,
 )
 with st.expander("Run Filters", expanded=not running):
+    if running:
+        st.info(
+            "Filters are locked while the pipeline is running -- every "
+            "control below is read-only. Click **Stop** above to unlock "
+            "them, make your changes, then **Start** again."
+        )
     st.markdown("##### Domain discovery")
     saved_extensions = [
         extension
@@ -1070,6 +1076,11 @@ with st.expander("Run Filters", expanded=not running):
         else preset_extensions
     )
 
+    if not running and extension_preset != "Custom":
+        st.caption(
+            "Extensions follows the coverage preset above. Set "
+            "**Coverage preset** to **Custom** to edit them individually."
+        )
     selected_extensions = st.multiselect(
         "Extensions",
         options=list(EXTENSION_OPTIONS.keys()),
