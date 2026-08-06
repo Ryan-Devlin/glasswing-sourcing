@@ -4328,6 +4328,23 @@ async def screen_records(
             # Each domain probes apex and www concurrently.
             limit=max(2, int(selected_workers) * 2),
             ttl_dns_cache=300,
+            # The real bug (confirmed live: a whole 75-domain batch hung
+            # 600+ seconds with zero exception, twice in a row, even after
+            # every per-request HTTP timeout below was already correctly
+            # bounded). aiohttp's default resolver runs socket.getaddrinfo()
+            # in the loop's thread-pool executor -- cancelling the asyncio
+            # Task waiting on it (our outer asyncio.wait_for, or any of the
+            # timeouts here) does NOT stop that underlying thread. A domain
+            # whose DNS never resolves and never errors (a black-holed
+            # query, a broken/non-responding authoritative nameserver) burns
+            # one executor thread forever. Enough of those, accumulated
+            # across repeated batches, exhausts the whole pool -- every
+            # future getaddrinfo() call then queues behind zombie threads
+            # that will never finish, hanging every subsequent batch too,
+            # regardless of any of the timeout values below. aiodns's
+            # AsyncResolver does DNS natively on the event loop instead, so
+            # a cancelled lookup is actually cancelled.
+            resolver=aiohttp.AsyncResolver(),
         )
         client_timeout = aiohttp.ClientTimeout(
             # total=None was the real bug here (confirmed live: an entire

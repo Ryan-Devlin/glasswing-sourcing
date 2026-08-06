@@ -108,6 +108,27 @@ class ScraperResilienceTests(unittest.TestCase):
         self.assertNotIn("total=None,", source)
         self.assertIn("total=selected_timeout * 2,", source)
 
+    def test_connector_uses_a_native_async_dns_resolver(self):
+        # Confirmed live: two whole 75-domain batches hung 600+ seconds each,
+        # back to back, even after the total= fix -- aiohttp's default
+        # resolver runs getaddrinfo() in a thread-pool executor, and
+        # cancelling the Task waiting on it does not stop that thread. A
+        # domain whose DNS never resolves and never errors burns one
+        # executor thread forever; enough of those (accumulated across
+        # repeated failed batches) exhausts the pool and hangs every future
+        # lookup regardless of any per-request timeout. AsyncResolver (via
+        # aiodns) does DNS natively on the event loop, so a cancelled lookup
+        # is actually cancelled.
+        source = Path("filter.py").read_text(encoding="utf-8")
+        connector_section = source.split(
+            "aiohttp.TCPConnector(", 1
+        )[1].split("\n\n", 1)[0]
+        self.assertIn("resolver=aiohttp.AsyncResolver()", connector_section)
+
+    def test_aiodns_is_a_declared_dependency(self):
+        requirements = Path("requirements.txt").read_text(encoding="utf-8")
+        self.assertIn("aiodns", requirements)
+
 
 if __name__ == "__main__":
     unittest.main()
