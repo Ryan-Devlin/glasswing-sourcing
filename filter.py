@@ -3167,526 +3167,529 @@ async def process(
                 homepage_only=homepage_only,
             )
 
-    combined = clean(f"{page.title} {page.description} {page.text}")
-    lower = combined.lower()
-    _scoring_started = time.monotonic()
-    scoring_copy = combined
+    def _score_and_bucket_domain():
+        combined = clean(f"{page.title} {page.description} {page.text}")
+        lower = combined.lower()
+        _scoring_started = time.monotonic()
+        scoring_copy = combined
 
-    word_count = len(combined.split())
-    (
-        is_placeholder,
-        placeholder_reason,
-        placeholder_evidence,
-    ) = placeholder_assessment(combined, word_count=word_count)
-    is_parked = placeholder_reason == "parked_or_for_sale"
-    is_agency, agency_evidence = agency_assessment(combined)
-
-    score, pillar, evidence, counts = score_text(scoring_copy)
-    dimensions = glasswing_dimensions(scoring_copy)
-    enterprise_rescue_signal, enterprise_rescue_evidence = (
-        enterprise_rescue_assessment(combined)
-    )
-    high_conviction_fit, high_conviction_evidence = (
-        high_conviction_fit_assessment(combined)
-    )
-    is_consumer_junk, b2c_score, b2c_evidence = b2c_assessment(combined)
-    is_media_newsletter, media_evidence = media_newsletter_assessment(combined)
-    is_non_english, language_evidence = language_assessment(combined)
-    is_commodity_wrapper, commodity_evidence = commodity_wrapper_assessment(combined)
-    is_hosting_provider, hosting_evidence = hosting_provider_assessment(
-        combined
-    )
-    (
-        is_non_operating_investor,
-        investor_evidence,
-    ) = non_operating_investor_assessment(combined)
-    maturity_risk, maturity_evidence = maturity_score(combined)
-    investment_label, investment_label_reason, disclosed_funding_m = (
-        investment_profile_label(combined, maturity_risk)
-    )
-    location_status, location_evidence = company_location_assessment(combined)
-    explicit_non_us, explicit_non_us_evidence = (
-        explicit_non_us_identity_assessment(
-            f"{page.title} {page.description}"
-        )
-    )
-    if explicit_non_us and location_status != "US":
-        location_status = "NON_US"
-        location_evidence = list(dict.fromkeys(
-            list(location_evidence) + explicit_non_us_evidence
-        ))
-
-    if pillar and not category_is_valid(pillar, scoring_copy):
-        pillar = ""
-        score = min(score, 55)
-
-    score, score_eligibility_caps = investment_eligibility_adjusted_score(
-        score,
-        predominantly_non_english=is_non_english,
-        location_status=location_status,
-        parked=is_parked,
-        placeholder=is_placeholder,
-        agency=is_agency,
-        consumer=is_consumer_junk,
-        media=is_media_newsletter,
-        commodity_ai_service=(
-            is_commodity_wrapper
-            or is_hosting_provider
-            or is_non_operating_investor
-        ),
-        mature_or_funded=investment_label == "Potential Comp",
-    )
-
-    venture_quality = venture_quality_assessment(
-        combined,
-        pillar=pillar,
-        counts=counts,
-        dimensions=dimensions,
-        high_conviction_fit=high_conviction_fit,
-    )
-    potential_glasswing_fit = bool(venture_quality["thesis_fit"])
-
-    is_coming, prelaunch_score, prelaunch_evidence = prelaunch_assessment(
-        text=combined,
-        pages_scraped=page.pages_scraped,
-        meaningful_internal_links=page.meaningful_internal_links,
-        word_count=word_count,
-        pillar_count=counts["pillar"],
-        ai_count=counts["ai"],
-        technical_count=dimensions["technical"],
-        buyer_count=dimensions["buyer"],
-    )
-
-    # Thesis-first, not website-polish-first. Sparse early-stage sites can
-    # qualify when the underlying idea is clearly relevant and non-commodity.
-    # Generic "AI-powered" copy alone is never enough.
-    deep_tech_pillars = {
-        "physical_ai",
-        "ai_adaptive_infrastructure",
-        "intelligent_enterprise_defense",
-        "next_gen_compute",
-    }
-
-    clear_enterprise_idea = (
-        counts["pillar"] >= 1
-        and counts["product"] >= 1
-        and dimensions["buyer"] >= 1
-        and (
-            dimensions["technical"] >= 1
-            or dimensions["workflow"] >= 1
-            or dimensions["business_value"] >= 1
-        )
-    )
-
-    sparse_deep_tech_idea = (
-        pillar in deep_tech_pillars
-        and counts["product"] >= 1
-        and dimensions["technical"] >= 1
-        and (
-            counts["ai"] >= 1
-            or counts["pillar"] >= 2
-            or dimensions["business_value"] >= 1
-        )
-    )
-
-    sparse_vertical_workflow_idea = (
-        pillar in {"vertical_ai", "collaborative_intelligence"}
-        and counts["product"] >= 1
-        and dimensions["workflow"] >= 1
-        and (
-            dimensions["buyer"] >= 1
-            or dimensions["business_value"] >= 1
-        )
-    )
-
-    plausible_company = (
-        word_count >= 12
-        and bool(venture_quality["reviewable"])
-        and not is_commodity_wrapper
-        and not is_hosting_provider
-        and not is_non_operating_investor
-        and not is_non_english
-    )
-    independent_signal_dimensions = sum([
-        dimensions["buyer"] >= 1,
-        dimensions["technical"] >= 1,
-        dimensions["workflow"] >= 1,
-        dimensions["business_value"] >= 1,
-        counts["defensibility"] >= 1,
-        counts["important_problem"] >= 1,
-    ])
-    generic_strong_fit = bool(
-        score >= 70
-        and counts["pillar"] >= 2
-        and counts["product"] >= 1
-        and dimensions["buyer"] >= 1
-        and independent_signal_dimensions >= 4
-        and (
-            counts["defensibility"] >= 1
-            or counts["important_problem"] >= 1
-        )
-    )
-
-    rank_score = diligence_rank_score(
-        rule_score=score,
-        counts=counts,
-        dimensions=dimensions,
-        location_status=location_status,
-        pillar=pillar,
-        word_count=word_count,
-    )
-    rank_score = round(
-        rank_score * 0.60
-        + int(venture_quality["overall_score"]) * 0.40
-    )
-    rank_score, _ = investment_eligibility_adjusted_score(
-        rank_score,
-        predominantly_non_english=is_non_english,
-        location_status=location_status,
-        parked=is_parked,
-        placeholder=is_placeholder,
-        agency=is_agency,
-        consumer=is_consumer_junk,
-        media=is_media_newsletter,
-        commodity_ai_service=(
-            is_commodity_wrapper
-            or is_hosting_provider
-            or is_non_operating_investor
-        ),
-        mature_or_funded=investment_label == "Potential Comp",
-    )
-
-    # Investable is now a venture-quality judgment, not a keyword threshold.
-    qualified_for_llm = (
-        word_count >= 12
-        and location_status in {"US", "UNKNOWN"}
-        and investment_label == "Investable Candidate"
-        and not is_consumer_junk
-        and not is_media_newsletter
-        and not is_agency
-        and not is_non_english
-        and not is_commodity_wrapper
-        and not is_hosting_provider
-        and bool(venture_quality["investable_ready"])
-        and not is_coming
-    )
-
-    calibration_text = "\n".join([
-        f"Company: {clean(page.title)[:100]}",
-        f"Website description: {clean(page.description)[:300]}",
-        f"Website evidence: {clean(page.text)[:800]}",
-        f"Glasswing category evidence: {clean('; '.join(evidence))[:220]}",
-        f"Location: {location_status}; "
-        f"{clean('; '.join(location_evidence))[:100]}",
-        f"Maturity: {clean('; '.join(maturity_evidence))[:120]}",
-    ])[:1800]
-    preference = calibrate_text(calibration_text)
-    preference_yes_probability = (
-        preference.probability_yes if preference is not None else None
-    )
-    preference_confidence = (
-        preference.confidence if preference is not None else None
-    )
-    preference_evidence = (
-        "; ".join(preference.evidence) if preference is not None else ""
-    )
-    preference_model_ready = bool(
-        preference is not None and preference.training_ready
-    )
-
-    # The learned layer may promote a strongly matching, otherwise plausible
-    # enterprise company. It may not invent a Hard Denial: the current
-    # holdout set supports positive recognition, but is not yet large enough
-    # to prove that an inferred negative is safe.
-    learned_positive_fit = bool(
-        preference_yes_probability is not None
-        and preference_model_ready
-        and preference_yes_probability >= 0.90
-        and word_count >= 20
-        and location_status in {"US", "UNKNOWN"}
-        and investment_label == "Investable Candidate"
-        and bool(venture_quality["reviewable"])
-        and not any([
+        word_count = len(combined.split())
+        (
             is_placeholder,
-            is_parked,
-            is_consumer_junk,
-            is_media_newsletter,
-            is_agency,
-            is_non_english,
-            is_commodity_wrapper,
-            is_hosting_provider,
+            placeholder_reason,
+            placeholder_evidence,
+        ) = placeholder_assessment(combined, word_count=word_count)
+        is_parked = placeholder_reason == "parked_or_for_sale"
+        is_agency, agency_evidence = agency_assessment(combined)
+
+        score, pillar, evidence, counts = score_text(scoring_copy)
+        dimensions = glasswing_dimensions(scoring_copy)
+        enterprise_rescue_signal, enterprise_rescue_evidence = (
+            enterprise_rescue_assessment(combined)
+        )
+        high_conviction_fit, high_conviction_evidence = (
+            high_conviction_fit_assessment(combined)
+        )
+        is_consumer_junk, b2c_score, b2c_evidence = b2c_assessment(combined)
+        is_media_newsletter, media_evidence = media_newsletter_assessment(combined)
+        is_non_english, language_evidence = language_assessment(combined)
+        is_commodity_wrapper, commodity_evidence = commodity_wrapper_assessment(combined)
+        is_hosting_provider, hosting_evidence = hosting_provider_assessment(
+            combined
+        )
+        (
             is_non_operating_investor,
-            is_coming,
-        ])
-    )
-    if learned_positive_fit:
-        # Training data can reorder an already credible candidate, but it
-        # cannot manufacture a wedge or moat that the website never showed.
-        rank_score = min(100, rank_score + 3)
+            investor_evidence,
+        ) = non_operating_investor_assessment(combined)
+        maturity_risk, maturity_evidence = maturity_score(combined)
+        investment_label, investment_label_reason, disclosed_funding_m = (
+            investment_profile_label(combined, maturity_risk)
+        )
+        location_status, location_evidence = company_location_assessment(combined)
+        explicit_non_us, explicit_non_us_evidence = (
+            explicit_non_us_identity_assessment(
+                f"{page.title} {page.description}"
+            )
+        )
+        if explicit_non_us and location_status != "US":
+            location_status = "NON_US"
+            location_evidence = list(dict.fromkeys(
+                list(location_evidence) + explicit_non_us_evidence
+            ))
 
-    enterprise_rescue_signal = bool(
-        enterprise_rescue_signal
-        and not is_placeholder
-        and not is_parked
-        and not is_consumer_junk
-        and not is_media_newsletter
-        and not is_agency
-        and not is_non_english
-        and not is_commodity_wrapper
-        and not is_hosting_provider
-        and not is_non_operating_investor
-        and location_status != "NON_US"
-        and not page.error
-        and (page.status is None or int(page.status) < 400)
-        and bool(venture_quality["thesis_fit"])
-        and bool(venture_quality["product_real"])
-    )
+        if pillar and not category_is_valid(pillar, scoring_copy):
+            pillar = ""
+            score = min(score, 55)
 
-    borderline_glasswing_fit = bool(
-        bool(venture_quality["reviewable"])
-        or enterprise_rescue_signal
-    )
-
-    substantive_no_fit_evidence = bool(
-        domain not in set(GLASSWING_PORTFOLIO_DOMAINS)
-        and
-        not page.error
-        and page.status is not None
-        and 200 <= int(page.status) < 400
-        and word_count >= 80
-        and not borderline_glasswing_fit
-    )
-    strong_multidimensional_fit = bool(
-        investment_label == "Investable Candidate"
-        and bool(venture_quality["investable_ready"])
-        and location_status in {"US", "UNKNOWN"}
-        and not any([
-            is_placeholder,
-            is_parked,
-            is_consumer_junk,
-            is_media_newsletter,
-            is_agency,
-            is_non_english,
-            is_commodity_wrapper,
-            is_hosting_provider,
-            is_non_operating_investor,
-            is_coming,
-        ])
-    )
-
-    bucket, reason = route_company(
-        is_parked=is_parked,
-        is_coming=is_coming,
-        is_agency=is_agency,
-        is_consumer_junk=is_consumer_junk,
-        is_media_newsletter=is_media_newsletter,
-        is_non_english=is_non_english,
-        is_commodity_wrapper=is_commodity_wrapper,
-        is_hosting_provider=is_hosting_provider,
-        is_non_operating_investor=is_non_operating_investor,
-        is_placeholder=is_placeholder,
-        page_error=page.error if not combined else "",
-        page_status=page.status,
-        location_status=location_status,
-        maturity_risk=maturity_risk,
-        qualified_for_llm=qualified_for_llm,
-        score=score,
-        potential_glasswing_fit=potential_glasswing_fit,
-        high_conviction_fit=high_conviction_fit,
-        strong_multidimensional_fit=strong_multidimensional_fit,
-        venture_reviewable=bool(venture_quality["reviewable"]),
-        substantive_no_fit_evidence=substantive_no_fit_evidence,
-    )
-
-    if not combined.strip():
-        bucket = "ghost"
-        reason = "ghost_or_inaccessible_site"
-
-    hard_rejection = bucket == "reject"
-    if (
-        investment_label == "Potential Comp"
-        and potential_glasswing_fit
-        and not hard_rejection
-        and bucket != "coming_soon"
-    ):
-        bucket = "comp"
-        reason = "relevant_but_mature_or_funded"
-
-    (
-        denial_confidence,
-        denial_evidence,
-        denial_rule,
-    ) = denial_audit_fields(
-        bucket=bucket,
-        reason=reason,
-        placeholder_evidence=placeholder_evidence,
-        language_evidence=language_evidence,
-        b2c_evidence=b2c_evidence,
-        media_evidence=media_evidence,
-        commodity_evidence=list(dict.fromkeys(
-            commodity_evidence + hosting_evidence + investor_evidence
-        )),
-        location_evidence=location_evidence,
-        page_error=page.error,
-        http_status=page.status,
-        combined=combined,
-    )
-
-    scoring_elapsed = time.monotonic() - _scoring_started
-    if scoring_elapsed > 2.0:
-        # Confirmed live: the outer batch deadline fired 40-79s late
-        # (259.0s against a 180s ceiling, and 220.5s against a separate
-        # 180s ceiling), which asyncio.wait_for can only do if the event
-        # loop itself was blocked by synchronous work that long. This
-        # synchronous scoring chain (score_text and the dozen+ regex-based
-        # *_assessment calls above) is the only CPU-bound, non-awaited work
-        # in the whole per-domain path -- logging any outlier here is the
-        # fastest way to find which domain/page text is pathological
-        # without another deploy-and-wait cycle.
-        print(
-            f"SLOW_SCORING domain={domain} seconds={scoring_elapsed:.2f} "
-            f"text_chars={len(combined)}",
-            file=sys.stderr,
-            flush=True,
+        score, score_eligibility_caps = investment_eligibility_adjusted_score(
+            score,
+            predominantly_non_english=is_non_english,
+            location_status=location_status,
+            parked=is_parked,
+            placeholder=is_placeholder,
+            agency=is_agency,
+            consumer=is_consumer_junk,
+            media=is_media_newsletter,
+            commodity_ai_service=(
+                is_commodity_wrapper
+                or is_hosting_provider
+                or is_non_operating_investor
+            ),
+            mature_or_funded=investment_label == "Potential Comp",
         )
 
-    source_row = {
-        key: value
-        for key, value in row.items()
-        if key != "_cached_page"
-    }
-    return {
-        **source_row,
-        "domain": domain,
-        "final_url": page.url or f"https://{domain}",
-        "website_attempted": page.url or f"https://{domain}",
-        "http_status": page.status or "",
-        "page_title": page.title,
-        "meta_description": page.description,
-        "homepage_excerpt": page.text[:12000],
-        "pages_scraped": page.pages_scraped,
-        "meaningful_internal_links": page.meaningful_internal_links,
-        "content_source": page.source,
-        "crawl_status": page.crawl_status,
-        "crawler_crawled_at": page.crawled_at,
-        "rule_score": score,
-        "glasswing_rating": rank_score,
-        "diligence_rank_score": rank_score,
-        "score_eligibility_caps": "; ".join(score_eligibility_caps),
-        "score_defensibility_signals": counts.get("defensibility", 0),
-        "score_important_problem_signals": counts.get("important_problem", 0),
-        "score_technical_signals": counts.get("technical", 0),
-        "score_workflow_signals": counts.get("workflow", 0),
-        "score_business_value_signals": counts.get("business_value", 0),
-        "venture_quality_score": venture_quality["overall_score"],
-        "venture_thesis_score": venture_quality["thesis_score"],
-        "venture_product_score": venture_quality["product_score"],
-        "venture_wedge_score": venture_quality["wedge_score"],
-        "venture_moat_score": venture_quality["moat_score"],
-        "venture_founder_score": venture_quality["founder_score"],
-        "venture_investable_ready": venture_quality["investable_ready"],
-        "venture_reviewable": venture_quality["reviewable"],
-        "venture_frontier_technical_wedge": venture_quality[
-            "frontier_technical_wedge"
-        ],
-        "venture_review_quality_signal": venture_quality[
-            "review_quality_signal"
-        ],
-        "venture_wedge_present": venture_quality["wedge_present"],
-        "venture_moat_present": venture_quality["moat_present"],
-        "venture_founder_strength": venture_quality["founder_strength"],
-        "venture_slop_risk": venture_quality["slop_risk"],
-        "venture_product_evidence": "; ".join(
-            venture_quality["product_evidence"]
-        ),
-        "venture_wedge_evidence": "; ".join(
-            venture_quality["wedge_evidence"]
-        ),
-        "venture_moat_evidence": "; ".join(
-            venture_quality["moat_evidence"]
-        ),
-        "venture_founder_evidence": "; ".join(
-            venture_quality["founder_evidence"]
-        ),
-        "venture_slop_evidence": "; ".join(
-            venture_quality["slop_evidence"]
-        ),
-        "rule_thesis_pillar": pillar,
-        "rule_evidence": "; ".join(evidence[:15]),
-        "word_count": word_count,
-        "pillar_hit_count": counts["pillar"],
-        "ai_hit_count": counts["ai"],
-        "enterprise_hit_count": counts["enterprise"],
-        "product_hit_count": counts["product"],
-        "buyer_signal_count": dimensions["buyer"],
-        "workflow_depth_count": dimensions["workflow"],
-        "technical_depth_count": dimensions["technical"],
-        "business_value_count": dimensions["business_value"],
-        "b2c_score": b2c_score,
-        "b2c_evidence": "; ".join(b2c_evidence[:12]),
-        "media_newsletter": is_media_newsletter,
-        "media_evidence": "; ".join(media_evidence[:12]),
-        "placeholder_detected": is_placeholder,
-        "placeholder_reason": placeholder_reason,
-        "placeholder_evidence": "; ".join(placeholder_evidence[:12]),
-        "predominantly_non_english": is_non_english,
-        "language_evidence": "; ".join(language_evidence[:12]),
-        "commodity_wrapper": is_commodity_wrapper,
-        "commodity_evidence": "; ".join(commodity_evidence[:12]),
-        "hosting_provider": is_hosting_provider,
-        "hosting_evidence": "; ".join(hosting_evidence[:12]),
-        "non_operating_investor": is_non_operating_investor,
-        "investor_evidence": "; ".join(investor_evidence[:12]),
-        "clear_enterprise_idea": clear_enterprise_idea,
-        "sparse_deep_tech_idea": sparse_deep_tech_idea,
-        "sparse_vertical_workflow_idea": sparse_vertical_workflow_idea,
-        "contextual_location_evidence": (
-            location_evidence
-            if isinstance(location_evidence, str)
-            else "; ".join(location_evidence[:12])
-        ),
-        "prelaunch_score": prelaunch_score,
-        "prelaunch_evidence": "; ".join(prelaunch_evidence[:12]),
-        "potential_glasswing_fit": potential_glasswing_fit,
-        "enterprise_rescue_signal": enterprise_rescue_signal,
-        "enterprise_rescue_evidence": "; ".join(
-            enterprise_rescue_evidence
-        ),
-        "high_conviction_fit": high_conviction_fit,
-        "high_conviction_evidence": "; ".join(
-            high_conviction_evidence
-        ),
-        "generic_strong_fit": generic_strong_fit,
-        "independent_signal_dimensions": independent_signal_dimensions,
-        "location_status": location_status,
-        "location_evidence": "; ".join(location_evidence[:10]),
-        "maturity_risk_score": maturity_risk,
-        "maturity_evidence": "; ".join(maturity_evidence[:10]),
-        "investment_classification": investment_label,
-        "classification_reason": investment_label_reason,
-        "website_disclosed_funding_m": (
-            disclosed_funding_m if disclosed_funding_m is not None else ""
-        ),
-        "qualified_for_llm": qualified_for_llm,
-        "preference_yes_probability": (
-            preference_yes_probability
-            if preference_yes_probability is not None else ""
-        ),
-        "preference_confidence": (
-            preference_confidence
-            if preference_confidence is not None else ""
-        ),
-        "preference_evidence": preference_evidence,
-        "preference_model_ready": preference_model_ready,
-        "learned_positive_fit": learned_positive_fit,
-        "routing_bucket": bucket,
-        "routing_reason": reason,
-        "viability_label": viability_label(bucket),
-        "denial_confidence": denial_confidence,
-        "denial_rule": denial_rule,
-        "denial_evidence": denial_evidence,
-        "fetch_error": page.error,
-    }
+        venture_quality = venture_quality_assessment(
+            combined,
+            pillar=pillar,
+            counts=counts,
+            dimensions=dimensions,
+            high_conviction_fit=high_conviction_fit,
+        )
+        potential_glasswing_fit = bool(venture_quality["thesis_fit"])
+
+        is_coming, prelaunch_score, prelaunch_evidence = prelaunch_assessment(
+            text=combined,
+            pages_scraped=page.pages_scraped,
+            meaningful_internal_links=page.meaningful_internal_links,
+            word_count=word_count,
+            pillar_count=counts["pillar"],
+            ai_count=counts["ai"],
+            technical_count=dimensions["technical"],
+            buyer_count=dimensions["buyer"],
+        )
+
+        # Thesis-first, not website-polish-first. Sparse early-stage sites can
+        # qualify when the underlying idea is clearly relevant and non-commodity.
+        # Generic "AI-powered" copy alone is never enough.
+        deep_tech_pillars = {
+            "physical_ai",
+            "ai_adaptive_infrastructure",
+            "intelligent_enterprise_defense",
+            "next_gen_compute",
+        }
+
+        clear_enterprise_idea = (
+            counts["pillar"] >= 1
+            and counts["product"] >= 1
+            and dimensions["buyer"] >= 1
+            and (
+                dimensions["technical"] >= 1
+                or dimensions["workflow"] >= 1
+                or dimensions["business_value"] >= 1
+            )
+        )
+
+        sparse_deep_tech_idea = (
+            pillar in deep_tech_pillars
+            and counts["product"] >= 1
+            and dimensions["technical"] >= 1
+            and (
+                counts["ai"] >= 1
+                or counts["pillar"] >= 2
+                or dimensions["business_value"] >= 1
+            )
+        )
+
+        sparse_vertical_workflow_idea = (
+            pillar in {"vertical_ai", "collaborative_intelligence"}
+            and counts["product"] >= 1
+            and dimensions["workflow"] >= 1
+            and (
+                dimensions["buyer"] >= 1
+                or dimensions["business_value"] >= 1
+            )
+        )
+
+        plausible_company = (
+            word_count >= 12
+            and bool(venture_quality["reviewable"])
+            and not is_commodity_wrapper
+            and not is_hosting_provider
+            and not is_non_operating_investor
+            and not is_non_english
+        )
+        independent_signal_dimensions = sum([
+            dimensions["buyer"] >= 1,
+            dimensions["technical"] >= 1,
+            dimensions["workflow"] >= 1,
+            dimensions["business_value"] >= 1,
+            counts["defensibility"] >= 1,
+            counts["important_problem"] >= 1,
+        ])
+        generic_strong_fit = bool(
+            score >= 70
+            and counts["pillar"] >= 2
+            and counts["product"] >= 1
+            and dimensions["buyer"] >= 1
+            and independent_signal_dimensions >= 4
+            and (
+                counts["defensibility"] >= 1
+                or counts["important_problem"] >= 1
+            )
+        )
+
+        rank_score = diligence_rank_score(
+            rule_score=score,
+            counts=counts,
+            dimensions=dimensions,
+            location_status=location_status,
+            pillar=pillar,
+            word_count=word_count,
+        )
+        rank_score = round(
+            rank_score * 0.60
+            + int(venture_quality["overall_score"]) * 0.40
+        )
+        rank_score, _ = investment_eligibility_adjusted_score(
+            rank_score,
+            predominantly_non_english=is_non_english,
+            location_status=location_status,
+            parked=is_parked,
+            placeholder=is_placeholder,
+            agency=is_agency,
+            consumer=is_consumer_junk,
+            media=is_media_newsletter,
+            commodity_ai_service=(
+                is_commodity_wrapper
+                or is_hosting_provider
+                or is_non_operating_investor
+            ),
+            mature_or_funded=investment_label == "Potential Comp",
+        )
+
+        # Investable is now a venture-quality judgment, not a keyword threshold.
+        qualified_for_llm = (
+            word_count >= 12
+            and location_status in {"US", "UNKNOWN"}
+            and investment_label == "Investable Candidate"
+            and not is_consumer_junk
+            and not is_media_newsletter
+            and not is_agency
+            and not is_non_english
+            and not is_commodity_wrapper
+            and not is_hosting_provider
+            and bool(venture_quality["investable_ready"])
+            and not is_coming
+        )
+
+        calibration_text = "\n".join([
+            f"Company: {clean(page.title)[:100]}",
+            f"Website description: {clean(page.description)[:300]}",
+            f"Website evidence: {clean(page.text)[:800]}",
+            f"Glasswing category evidence: {clean('; '.join(evidence))[:220]}",
+            f"Location: {location_status}; "
+            f"{clean('; '.join(location_evidence))[:100]}",
+            f"Maturity: {clean('; '.join(maturity_evidence))[:120]}",
+        ])[:1800]
+        preference = calibrate_text(calibration_text)
+        preference_yes_probability = (
+            preference.probability_yes if preference is not None else None
+        )
+        preference_confidence = (
+            preference.confidence if preference is not None else None
+        )
+        preference_evidence = (
+            "; ".join(preference.evidence) if preference is not None else ""
+        )
+        preference_model_ready = bool(
+            preference is not None and preference.training_ready
+        )
+
+        # The learned layer may promote a strongly matching, otherwise plausible
+        # enterprise company. It may not invent a Hard Denial: the current
+        # holdout set supports positive recognition, but is not yet large enough
+        # to prove that an inferred negative is safe.
+        learned_positive_fit = bool(
+            preference_yes_probability is not None
+            and preference_model_ready
+            and preference_yes_probability >= 0.90
+            and word_count >= 20
+            and location_status in {"US", "UNKNOWN"}
+            and investment_label == "Investable Candidate"
+            and bool(venture_quality["reviewable"])
+            and not any([
+                is_placeholder,
+                is_parked,
+                is_consumer_junk,
+                is_media_newsletter,
+                is_agency,
+                is_non_english,
+                is_commodity_wrapper,
+                is_hosting_provider,
+                is_non_operating_investor,
+                is_coming,
+            ])
+        )
+        if learned_positive_fit:
+            # Training data can reorder an already credible candidate, but it
+            # cannot manufacture a wedge or moat that the website never showed.
+            rank_score = min(100, rank_score + 3)
+
+        enterprise_rescue_signal = bool(
+            enterprise_rescue_signal
+            and not is_placeholder
+            and not is_parked
+            and not is_consumer_junk
+            and not is_media_newsletter
+            and not is_agency
+            and not is_non_english
+            and not is_commodity_wrapper
+            and not is_hosting_provider
+            and not is_non_operating_investor
+            and location_status != "NON_US"
+            and not page.error
+            and (page.status is None or int(page.status) < 400)
+            and bool(venture_quality["thesis_fit"])
+            and bool(venture_quality["product_real"])
+        )
+
+        borderline_glasswing_fit = bool(
+            bool(venture_quality["reviewable"])
+            or enterprise_rescue_signal
+        )
+
+        substantive_no_fit_evidence = bool(
+            domain not in set(GLASSWING_PORTFOLIO_DOMAINS)
+            and
+            not page.error
+            and page.status is not None
+            and 200 <= int(page.status) < 400
+            and word_count >= 80
+            and not borderline_glasswing_fit
+        )
+        strong_multidimensional_fit = bool(
+            investment_label == "Investable Candidate"
+            and bool(venture_quality["investable_ready"])
+            and location_status in {"US", "UNKNOWN"}
+            and not any([
+                is_placeholder,
+                is_parked,
+                is_consumer_junk,
+                is_media_newsletter,
+                is_agency,
+                is_non_english,
+                is_commodity_wrapper,
+                is_hosting_provider,
+                is_non_operating_investor,
+                is_coming,
+            ])
+        )
+
+        bucket, reason = route_company(
+            is_parked=is_parked,
+            is_coming=is_coming,
+            is_agency=is_agency,
+            is_consumer_junk=is_consumer_junk,
+            is_media_newsletter=is_media_newsletter,
+            is_non_english=is_non_english,
+            is_commodity_wrapper=is_commodity_wrapper,
+            is_hosting_provider=is_hosting_provider,
+            is_non_operating_investor=is_non_operating_investor,
+            is_placeholder=is_placeholder,
+            page_error=page.error if not combined else "",
+            page_status=page.status,
+            location_status=location_status,
+            maturity_risk=maturity_risk,
+            qualified_for_llm=qualified_for_llm,
+            score=score,
+            potential_glasswing_fit=potential_glasswing_fit,
+            high_conviction_fit=high_conviction_fit,
+            strong_multidimensional_fit=strong_multidimensional_fit,
+            venture_reviewable=bool(venture_quality["reviewable"]),
+            substantive_no_fit_evidence=substantive_no_fit_evidence,
+        )
+
+        if not combined.strip():
+            bucket = "ghost"
+            reason = "ghost_or_inaccessible_site"
+
+        hard_rejection = bucket == "reject"
+        if (
+            investment_label == "Potential Comp"
+            and potential_glasswing_fit
+            and not hard_rejection
+            and bucket != "coming_soon"
+        ):
+            bucket = "comp"
+            reason = "relevant_but_mature_or_funded"
+
+        (
+            denial_confidence,
+            denial_evidence,
+            denial_rule,
+        ) = denial_audit_fields(
+            bucket=bucket,
+            reason=reason,
+            placeholder_evidence=placeholder_evidence,
+            language_evidence=language_evidence,
+            b2c_evidence=b2c_evidence,
+            media_evidence=media_evidence,
+            commodity_evidence=list(dict.fromkeys(
+                commodity_evidence + hosting_evidence + investor_evidence
+            )),
+            location_evidence=location_evidence,
+            page_error=page.error,
+            http_status=page.status,
+            combined=combined,
+        )
+
+        scoring_elapsed = time.monotonic() - _scoring_started
+        if scoring_elapsed > 2.0:
+            # Confirmed live: the outer batch deadline fired 40-79s late
+            # (259.0s against a 180s ceiling, and 220.5s against a separate
+            # 180s ceiling), which asyncio.wait_for can only do if the event
+            # loop itself was blocked by synchronous work that long. This
+            # synchronous scoring chain (score_text and the dozen+ regex-based
+            # *_assessment calls above) is the only CPU-bound, non-awaited work
+            # in the whole per-domain path -- logging any outlier here is the
+            # fastest way to find which domain/page text is pathological
+            # without another deploy-and-wait cycle.
+            print(
+                f"SLOW_SCORING domain={domain} seconds={scoring_elapsed:.2f} "
+                f"text_chars={len(combined)}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+        source_row = {
+            key: value
+            for key, value in row.items()
+            if key != "_cached_page"
+        }
+        return {
+            **source_row,
+            "domain": domain,
+            "final_url": page.url or f"https://{domain}",
+            "website_attempted": page.url or f"https://{domain}",
+            "http_status": page.status or "",
+            "page_title": page.title,
+            "meta_description": page.description,
+            "homepage_excerpt": page.text[:12000],
+            "pages_scraped": page.pages_scraped,
+            "meaningful_internal_links": page.meaningful_internal_links,
+            "content_source": page.source,
+            "crawl_status": page.crawl_status,
+            "crawler_crawled_at": page.crawled_at,
+            "rule_score": score,
+            "glasswing_rating": rank_score,
+            "diligence_rank_score": rank_score,
+            "score_eligibility_caps": "; ".join(score_eligibility_caps),
+            "score_defensibility_signals": counts.get("defensibility", 0),
+            "score_important_problem_signals": counts.get("important_problem", 0),
+            "score_technical_signals": counts.get("technical", 0),
+            "score_workflow_signals": counts.get("workflow", 0),
+            "score_business_value_signals": counts.get("business_value", 0),
+            "venture_quality_score": venture_quality["overall_score"],
+            "venture_thesis_score": venture_quality["thesis_score"],
+            "venture_product_score": venture_quality["product_score"],
+            "venture_wedge_score": venture_quality["wedge_score"],
+            "venture_moat_score": venture_quality["moat_score"],
+            "venture_founder_score": venture_quality["founder_score"],
+            "venture_investable_ready": venture_quality["investable_ready"],
+            "venture_reviewable": venture_quality["reviewable"],
+            "venture_frontier_technical_wedge": venture_quality[
+                "frontier_technical_wedge"
+            ],
+            "venture_review_quality_signal": venture_quality[
+                "review_quality_signal"
+            ],
+            "venture_wedge_present": venture_quality["wedge_present"],
+            "venture_moat_present": venture_quality["moat_present"],
+            "venture_founder_strength": venture_quality["founder_strength"],
+            "venture_slop_risk": venture_quality["slop_risk"],
+            "venture_product_evidence": "; ".join(
+                venture_quality["product_evidence"]
+            ),
+            "venture_wedge_evidence": "; ".join(
+                venture_quality["wedge_evidence"]
+            ),
+            "venture_moat_evidence": "; ".join(
+                venture_quality["moat_evidence"]
+            ),
+            "venture_founder_evidence": "; ".join(
+                venture_quality["founder_evidence"]
+            ),
+            "venture_slop_evidence": "; ".join(
+                venture_quality["slop_evidence"]
+            ),
+            "rule_thesis_pillar": pillar,
+            "rule_evidence": "; ".join(evidence[:15]),
+            "word_count": word_count,
+            "pillar_hit_count": counts["pillar"],
+            "ai_hit_count": counts["ai"],
+            "enterprise_hit_count": counts["enterprise"],
+            "product_hit_count": counts["product"],
+            "buyer_signal_count": dimensions["buyer"],
+            "workflow_depth_count": dimensions["workflow"],
+            "technical_depth_count": dimensions["technical"],
+            "business_value_count": dimensions["business_value"],
+            "b2c_score": b2c_score,
+            "b2c_evidence": "; ".join(b2c_evidence[:12]),
+            "media_newsletter": is_media_newsletter,
+            "media_evidence": "; ".join(media_evidence[:12]),
+            "placeholder_detected": is_placeholder,
+            "placeholder_reason": placeholder_reason,
+            "placeholder_evidence": "; ".join(placeholder_evidence[:12]),
+            "predominantly_non_english": is_non_english,
+            "language_evidence": "; ".join(language_evidence[:12]),
+            "commodity_wrapper": is_commodity_wrapper,
+            "commodity_evidence": "; ".join(commodity_evidence[:12]),
+            "hosting_provider": is_hosting_provider,
+            "hosting_evidence": "; ".join(hosting_evidence[:12]),
+            "non_operating_investor": is_non_operating_investor,
+            "investor_evidence": "; ".join(investor_evidence[:12]),
+            "clear_enterprise_idea": clear_enterprise_idea,
+            "sparse_deep_tech_idea": sparse_deep_tech_idea,
+            "sparse_vertical_workflow_idea": sparse_vertical_workflow_idea,
+            "contextual_location_evidence": (
+                location_evidence
+                if isinstance(location_evidence, str)
+                else "; ".join(location_evidence[:12])
+            ),
+            "prelaunch_score": prelaunch_score,
+            "prelaunch_evidence": "; ".join(prelaunch_evidence[:12]),
+            "potential_glasswing_fit": potential_glasswing_fit,
+            "enterprise_rescue_signal": enterprise_rescue_signal,
+            "enterprise_rescue_evidence": "; ".join(
+                enterprise_rescue_evidence
+            ),
+            "high_conviction_fit": high_conviction_fit,
+            "high_conviction_evidence": "; ".join(
+                high_conviction_evidence
+            ),
+            "generic_strong_fit": generic_strong_fit,
+            "independent_signal_dimensions": independent_signal_dimensions,
+            "location_status": location_status,
+            "location_evidence": "; ".join(location_evidence[:10]),
+            "maturity_risk_score": maturity_risk,
+            "maturity_evidence": "; ".join(maturity_evidence[:10]),
+            "investment_classification": investment_label,
+            "classification_reason": investment_label_reason,
+            "website_disclosed_funding_m": (
+                disclosed_funding_m if disclosed_funding_m is not None else ""
+            ),
+            "qualified_for_llm": qualified_for_llm,
+            "preference_yes_probability": (
+                preference_yes_probability
+                if preference_yes_probability is not None else ""
+            ),
+            "preference_confidence": (
+                preference_confidence
+                if preference_confidence is not None else ""
+            ),
+            "preference_evidence": preference_evidence,
+            "preference_model_ready": preference_model_ready,
+            "learned_positive_fit": learned_positive_fit,
+            "routing_bucket": bucket,
+            "routing_reason": reason,
+            "viability_label": viability_label(bucket),
+            "denial_confidence": denial_confidence,
+            "denial_rule": denial_rule,
+            "denial_evidence": denial_evidence,
+            "fetch_error": page.error,
+        }
+
+    return await asyncio.to_thread(_score_and_bucket_domain)
 
 
 INDUSTRY_LABELS = {

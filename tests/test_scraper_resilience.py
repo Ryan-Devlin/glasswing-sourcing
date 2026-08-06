@@ -99,6 +99,28 @@ class ScraperResilienceTests(unittest.TestCase):
             section,
         )
 
+    def test_process_offloads_scoring_to_a_real_thread(self):
+        # Confirmed live: the batch outer deadline fired late by 35-80s
+        # across multiple attempts, even after ruling out a single huge
+        # download and any individual slow-scoring domain (no SLOW_SCORING
+        # was ever logged). The remaining explanation is cumulative cost:
+        # BeautifulSoup parsing plus a dozen+ regex-based *_assessment
+        # calls, run in series for every domain in a 75-domain batch on the
+        # single asyncio event-loop thread, with no single domain slow
+        # enough to trip an outlier alarm but the total adding up to real
+        # delay. Offloading each domain's scoring to asyncio.to_thread lets
+        # the OS thread pool actually run this CPU-bound work in parallel
+        # instead of serializing it on one thread.
+        source = Path("filter.py").read_text(encoding="utf-8")
+        process_body = source.split("async def process(", 1)[1].split(
+            "\nasync def ", 1
+        )[0].split("\ndef ", 1)[0]
+        self.assertIn("def _score_and_bucket_domain():", process_body)
+        self.assertIn(
+            "return await asyncio.to_thread(_score_and_bucket_domain)",
+            process_body,
+        )
+
     def test_systemic_timeout_batch_is_not_persisted(self):
         async def always_timeout(row, session, sem, timeout, homepage_only=False):
             return {"domain": row["registrable"], "fetch_error": "TimeoutError: "}
