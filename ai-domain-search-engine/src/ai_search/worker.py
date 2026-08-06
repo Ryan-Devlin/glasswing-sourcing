@@ -17,11 +17,16 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from runtime_control import RUNTIME_MODE, read_control
+from runtime_control import (
+    RUNTIME_MODE,
+    read_control,
+    request_services,
+    service_requested_by,
+)
 
 from .config import PROJECT_ROOT, load_settings
 from .crawler import crawl_pending
-from .database import add_domain, connect, set_worker_state, utc_now
+from .database import add_domain, connect, diagnostics, set_worker_state, utc_now
 from .discovery import stream_domains
 from .domains import normalize_domain
 from .web_discovery import discover_query, provider_name
@@ -81,12 +86,26 @@ def sync_crawled_domains_to_original_queue(database) -> dict[str, int]:
     )
 
 
+AUTO_PAUSE_REASON = "auto_full_coverage"
+
+
 async def crawl_loop(database, settings, stop: asyncio.Event) -> None:
     while not stop.is_set():
         if RUNTIME_MODE != "local" and not read_control()["desired"].get(
             "ai_crawler", True
         ):
             conn = connect(database)
+            # Coverage can only have auto-paused this; a human pausing it
+            # via the dashboard must never be silently overridden here.
+            if (
+                service_requested_by("ai_crawler") == AUTO_PAUSE_REASON
+                and diagnostics(conn)["pending"] > 0
+            ):
+                request_services(
+                    {"ai_crawler": True}, requested_by="auto_resume_new_domains"
+                )
+                conn.close()
+                continue
             set_worker_state(conn, "crawler_status", "paused")
             conn.close()
             try:
@@ -100,6 +119,11 @@ async def crawl_loop(database, settings, stop: asyncio.Event) -> None:
             counts = await crawl_pending(
                 conn, settings, settings.crawl_batch_size
             )
+            if RUNTIME_MODE != "local" and diagnostics(conn)["pending"] == 0:
+                request_services(
+                    {"ai_crawler": False}, requested_by=AUTO_PAUSE_REASON
+                )
+                set_worker_state(conn, "crawler_status", "paused_full_coverage")
             if counts:
                 set_worker_state(conn, "last_crawl_batch", counts)
                 set_worker_state(conn, "last_crawl_error", "")

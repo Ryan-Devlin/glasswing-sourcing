@@ -321,6 +321,31 @@ def read_control() -> dict[str, object]:
     }
 
 
+def service_requested_by(service: str) -> str:
+    """Who last set this specific service's desired state.
+
+    read_control()'s top-level requested_by is the single most-recently
+    updated row across ALL services, not this one -- callers deciding
+    whether to auto-resume a service need to know it was auto-paused
+    (not paused by a human) before touching it again.
+    """
+    if using_postgres(RUNTIME_CONTROL_DATABASE_ENV_VAR):
+        conn = _connect_runtime_control()
+        try:
+            row = conn.execute(
+                "SELECT requested_by FROM worker_control WHERE service=?",
+                (service,),
+            ).fetchone()
+        finally:
+            conn.close()
+        return str(row["requested_by"]) if row else ""
+    try:
+        payload = json.loads(CONTROL_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        payload = {}
+    return str(payload.get("requested_by", ""))
+
+
 def request_services(
     desired: dict[str, bool],
     *,

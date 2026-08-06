@@ -13,11 +13,16 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from runtime_control import RUNTIME_MODE, read_control
+from runtime_control import (
+    RUNTIME_MODE,
+    read_control,
+    request_services,
+    service_requested_by,
+)
 
 from .config import PID_FILE, STOP_FILE, ZONEFILES, Settings, load_settings
 from .crawler import crawl_once, queue_candidate_registrations
-from .database import connect, log_event, set_state
+from .database import connect, diagnostics, log_event, set_state
 from .rdap import (
     RegistrationRecord,
     automatic_lookups_today,
@@ -207,6 +212,12 @@ async def run() -> None:
             or STOP_FILE.exists()
             or not zone_crawler_requested()
         )
+
+    def coverage_complete() -> bool:
+        stats = diagnostics(conn)
+        queued = int(stats.get("queued_domains", 0))
+        attempted = int(stats.get("attempted", 0))
+        return queued > 0 and attempted >= queued
     if settings.auto_registration:
         from classification_store import classification_map
 
@@ -235,9 +246,22 @@ async def run() -> None:
     registration_task = asyncio.create_task(
         enrich_registration_dates(settings, stop, pause_requested)
     )
+    AUTO_PAUSE_REASON = "auto_full_coverage"
     try:
         while not stop.is_set() and not STOP_FILE.exists():
             if not zone_crawler_requested():
+                # Coverage can only have auto-paused this; a human pausing
+                # it via the dashboard must never be silently overridden.
+                if (
+                    RUNTIME_MODE != "local"
+                    and service_requested_by("zone_crawler") == AUTO_PAUSE_REASON
+                    and not coverage_complete()
+                ):
+                    request_services(
+                        {"zone_crawler": True},
+                        requested_by="auto_resume_new_domains",
+                    )
+                    continue
                 set_state(conn, "crawler_status", "paused")
                 set_state(conn, "crawler_phase", "paused_by_user")
                 await wait_or_stop(stop, 5)
@@ -304,6 +328,11 @@ async def run() -> None:
                     await asyncio.sleep(2)
             if not made_progress:
                 set_state(conn, "crawler_status", "idle")
+                if RUNTIME_MODE != "local" and coverage_complete():
+                    request_services(
+                        {"zone_crawler": False}, requested_by=AUTO_PAUSE_REASON
+                    )
+                    set_state(conn, "crawler_phase", "paused_full_coverage")
                 try:
                     await asyncio.wait_for(
                         stop.wait(),
