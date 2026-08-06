@@ -745,6 +745,47 @@ def clear_stale_work_queue(conn: sqlite3.Connection) -> int:
     return int(cursor.rowcount or 0)
 
 
+def discard_pending_by_extension(
+    conn: sqlite3.Connection,
+    extension: str,
+) -> int:
+    """Bulk-discard not-yet-attempted queue rows for one TLD.
+
+    For clearing a stale backlog after an Extensions misconfiguration --
+    confirmed live: an accidental .co-only Extensions setting queued 1700+
+    .co domains before anyone noticed, and claim_batch() (ordered oldest
+    first, with no extension awareness) would have kept drawing from that
+    backlog for over an hour before ever reaching newly-arriving domains
+    in the corrected extension set. This only ever touches the pipeline's
+    own scheduling queue (undiscovered, unscored hostnames) -- never
+    classifications, training truth, or any human decision.
+    """
+    rows = conn.execute(
+        "SELECT domain FROM domains WHERE status IN ('pending', 'processing')"
+    ).fetchall()
+    to_discard = [
+        str(row["domain"])
+        for row in rows
+        if domain_extension(str(row["domain"])) == extension
+    ]
+    if not to_discard:
+        return 0
+    for start in range(0, len(to_discard), 800):
+        batch = to_discard[start : start + 800]
+        marks = ",".join("?" for _ in batch)
+        conn.execute(
+            f"""
+            UPDATE domains
+            SET status='discarded', next_attempt_at=NULL,
+                last_error='stale_extension_backlog_discarded'
+            WHERE domain IN ({marks})
+            """,
+            batch,
+        )
+    conn.commit()
+    return len(to_discard)
+
+
 def queue_counts(conn: sqlite3.Connection) -> dict[str, int]:
     rows = conn.execute(
         "SELECT status, COUNT(*) AS count FROM domains GROUP BY status"

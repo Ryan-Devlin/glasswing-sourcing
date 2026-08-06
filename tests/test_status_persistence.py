@@ -143,6 +143,44 @@ class StatusPersistenceTests(unittest.TestCase):
             "website_unreachable_after_immediate_retry",
         )
 
+    def test_discard_pending_by_extension_only_touches_that_tld(self):
+        # Confirmed live: an accidental Extensions misconfiguration queued
+        # 1700+ .co domains before anyone noticed, and claim_batch() (no
+        # extension awareness, oldest first) would have kept drawing from
+        # that stale backlog for over an hour after the config was fixed.
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("""
+            CREATE TABLE domains (
+                domain TEXT PRIMARY KEY, status TEXT, next_attempt_at TEXT,
+                last_error TEXT
+            )
+        """)
+        conn.executemany(
+            "INSERT INTO domains(domain, status) VALUES (?, 'pending')",
+            [("junk1.co",), ("junk2.co",), ("keep.ai",)],
+        )
+        conn.execute(
+            "INSERT INTO domains(domain, status) VALUES ('inflight.co', 'processing')"
+        )
+        conn.execute(
+            "INSERT INTO domains(domain, status) VALUES ('done.co', 'complete')"
+        )
+        conn.commit()
+
+        discarded = continuous_pipeline.discard_pending_by_extension(conn, ".co")
+
+        self.assertEqual(discarded, 3)
+        rows = {
+            row["domain"]: row["status"]
+            for row in conn.execute("SELECT domain, status FROM domains").fetchall()
+        }
+        self.assertEqual(rows["junk1.co"], "discarded")
+        self.assertEqual(rows["junk2.co"], "discarded")
+        self.assertEqual(rows["inflight.co"], "discarded")
+        self.assertEqual(rows["keep.ai"], "pending")
+        self.assertEqual(rows["done.co"], "complete")
+
     def test_duplicate_domain_registration_is_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "queue.sqlite3"

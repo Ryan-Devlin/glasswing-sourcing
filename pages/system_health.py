@@ -20,6 +20,7 @@ for source in (ROOT, AI_SRC, ZONE_SRC):
         sys.path.insert(0, str(source))
 
 from classification_store import delete_bucket_classifications, recent_digest_runs
+from continuous_pipeline import connect_db, discard_pending_by_extension
 from db_backend import using_postgres
 from health_monitor import health_report
 from manual_truth_backup import (
@@ -256,6 +257,42 @@ with tabs[0]:
                     "needed a forced kill. Refresh to confirm."
                 )
             st.rerun()
+
+    st.markdown("#### New-domain queue cleanup")
+    st.caption(
+        "Discards not-yet-attempted domains for one TLD from the "
+        "new-domain screening queue. Only affects undiscovered/unscored "
+        "hostnames waiting to be checked -- never classifications, "
+        "training truth, or any human decision. Use this after an "
+        "Extensions misconfiguration leaves a stale backlog for a TLD "
+        "you no longer intend to capture."
+    )
+    queue_extension = st.text_input(
+        "TLD to discard (e.g. .co)",
+        key="queue_cleanup_extension",
+    )
+    queue_confirm = st.checkbox(
+        "I understand this discards every not-yet-attempted domain for "
+        "this TLD from the queue.",
+        key="queue_cleanup_confirm",
+    )
+    if st.button(
+        "Discard pending queue for this TLD",
+        disabled=not (queue_confirm and queue_extension.strip()),
+    ):
+        conn = connect_db()
+        try:
+            discarded = discard_pending_by_extension(
+                conn, queue_extension.strip()
+            )
+        finally:
+            conn.close()
+        st.cache_data.clear()
+        st.success(
+            f"Discarded {discarded:,} pending {queue_extension.strip()} "
+            "domains from the queue."
+        )
+        st.rerun()
 
 with tabs[1]:
     st.subheader("Readiness checks")
