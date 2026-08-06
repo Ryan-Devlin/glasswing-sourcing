@@ -1594,15 +1594,17 @@ async def worker_loop(
             # one HTTP request, not the batch as a whole, so anything that
             # blocks after that stage (a downstream write, a stuck lock, an
             # await that never resolves) had no ceiling at all. Confirmed
-            # live: 30s and then 90s both still cut off real batches before
-            # they finished -- once claim_batch started prioritizing fresh,
-            # live domains over the old dead/parked backlog, batches started
-            # doing genuine HTTP work (real page loads, redirects) instead
-            # of instantly failing, which legitimately takes longer per
-            # domain. 180s keeps the same fast-feedback goal (still 3.3x
-            # faster than the original 600s) while giving a real batch plus
-            # a retry pass realistic room to finish.
-            outer_deadline_seconds = 180.0
+            # live: once claim_batch started prioritizing fresh, live domains
+            # and scoring got its own dedicated thread pool (removing
+            # queueing as a variable), a batch finally completed with real
+            # results -- but a following batch of different domains still
+            # occasionally hit 180s with zero individual operation ever
+            # flagged as slow, consistent with real-world variance in how
+            # long different websites take to load rather than a remaining
+            # bug. 240s gives a batch containing a few slow-loading real
+            # sites realistic room, while still failing fast on a genuine
+            # hang (still 2.5x faster than the original 600s).
+            outer_deadline_seconds = 240.0
             batch_started_wall = time.monotonic()
             try:
                 output, screening_stats = await asyncio.wait_for(

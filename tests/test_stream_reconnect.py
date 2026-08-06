@@ -70,7 +70,7 @@ class ScreeningBatchTimeoutTests(unittest.TestCase):
         )
         self.assertTrue(before.rstrip().endswith("asyncio.wait_for("))
         self.assertIn("timeout=outer_deadline_seconds", after.split("\n\n", 1)[0])
-        self.assertIn("outer_deadline_seconds = 180.0", self.pipeline)
+        self.assertIn("outer_deadline_seconds = 240.0", self.pipeline)
 
     def test_timeout_error_reports_which_batch_and_settings_hit_the_deadline(self):
         # Confirmed live: 30s and then 90s both still cut off real batches
