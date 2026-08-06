@@ -261,11 +261,25 @@ async def run() -> None:
                     break
                 try:
                     set_state(conn, "crawler_status", f"crawling_{tld}")
-                    counts = await crawl_once(
-                        conn,
-                        settings,
-                        tld=tld,
-                        should_pause=pause_requested,
+                    # A hang inside crawl_once (confirmed live: worker stuck
+                    # self-reporting "paused by user"/"caught up" while
+                    # Quick checks and Admitted to full crawl both stayed at
+                    # exactly 0 for hours, despite millions of queued
+                    # candidates and a "Desired: running" state) used to
+                    # block this entire worker forever -- per-request
+                    # timeouts inside crawl_once bound one HTTP fetch, not
+                    # the whole call. This outer deadline is deliberately
+                    # generous so it only fires on a genuine hang, turning
+                    # it into the same logged-error/retry-next-tld path as
+                    # any other exception instead of an indefinite stall.
+                    counts = await asyncio.wait_for(
+                        crawl_once(
+                            conn,
+                            settings,
+                            tld=tld,
+                            should_pause=pause_requested,
+                        ),
+                        timeout=600.0,
                     )
                     made_progress = made_progress or bool(counts)
                     if pause_requested():
