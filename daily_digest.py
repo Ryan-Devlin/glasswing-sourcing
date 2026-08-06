@@ -521,6 +521,54 @@ def send_via_resend_api(
         raise RuntimeError(f"Resend API error {exc.code}: {detail}") from exc
 
 
+SENDGRID_SMTP_HOST = "smtp.sendgrid.net"
+SENDGRID_API_URL = "https://api.sendgrid.com/v3/mail/send"
+
+
+def send_via_sendgrid_api(
+    rows: list[dict], settings: DigestSettings, *, date_label: str
+) -> None:
+    """SendGrid's HTTP API, not their SMTP relay -- same reasoning as
+    send_via_resend_api: a plain HTTPS POST isn't affected by cloud
+    platforms (Railway included) commonly blocking outbound SMTP ports
+    regardless of credentials."""
+    payload = json.dumps({
+        "personalizations": [{"to": [{"email": r} for r in settings.recipients]}],
+        "from": {"email": settings.sender},
+        "subject": (
+            f"Glasswing: {len(rows)} new high-confidence compan"
+            f"{'ies' if len(rows) != 1 else 'y'} — {date_label}"
+        ),
+        "content": [
+            {
+                "type": "text/plain",
+                "value": render_plain_text(rows, settings, date_label=date_label),
+            },
+            {
+                "type": "text/html",
+                "value": render_html(rows, settings, date_label=date_label),
+            },
+        ],
+    }).encode("utf-8")
+    request = urllib.request.Request(
+        SENDGRID_API_URL,
+        data=payload,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {settings.smtp_password}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "glasswing-sourcing-daily-digest/1.0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            response.read()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"SendGrid API error {exc.code}: {detail}") from exc
+
+
 def send_message(message: EmailMessage, settings: DigestSettings) -> None:
     context = ssl.create_default_context()
     if settings.use_ssl:
@@ -657,6 +705,8 @@ def run_digest(
     try:
         if settings.smtp_host == RESEND_SMTP_HOST:
             send_via_resend_api(rows, settings, date_label=date_label)
+        elif settings.smtp_host == SENDGRID_SMTP_HOST:
+            send_via_sendgrid_api(rows, settings, date_label=date_label)
         else:
             send_message(
                 build_message(rows, settings, date_label=date_label), settings
