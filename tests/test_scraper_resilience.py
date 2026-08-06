@@ -96,6 +96,33 @@ class ScraperResilienceTests(unittest.TestCase):
                     persist=True,
                 ))
 
+    def test_mostly_timed_out_batch_skips_the_slow_retry_pass(self):
+        # Confirmed live: retrying a mostly-timed-out batch at a fixed 2
+        # workers could take longer than the caller's outer deadline all by
+        # itself (e.g. 75 domains / 2 workers * 25s+ each), turning a real
+        # network problem into an apparent hang with zero progress. When
+        # most of a batch times out on the first pass, skip the slow retry
+        # and let the systemic-timeout check below fail fast instead.
+        calls = 0
+
+        async def always_timeout(row, session, sem, timeout, homepage_only=False):
+            nonlocal calls
+            calls += 1
+            return {"domain": row["registrable"], "fetch_error": "TimeoutError: "}
+
+        rows = [{"registrable": f"failed-{index}.ai"} for index in range(10)]
+        with patch.object(screening_filter, "process", always_timeout):
+            with self.assertRaisesRegex(RuntimeError, "systemic_scraper_timeout"):
+                asyncio.run(screening_filter.screen_records(
+                    rows,
+                    workers=32,
+                    timeout=15,
+                    homepage_only=True,
+                    persist=True,
+                ))
+
+        self.assertEqual(calls, 10)
+
     def test_client_timeout_bounds_the_whole_request_not_just_each_phase(self):
         # Confirmed live: an entire 75-domain batch hung for 600+ seconds
         # with zero exception and zero progress. total=None meant no ceiling

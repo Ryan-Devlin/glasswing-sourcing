@@ -4394,19 +4394,30 @@ async def screen_records(
     results = await scrape_rows(records, int(workers), float(timeout))
 
     # A saturated connector or brief network stall can otherwise make a whole
-    # batch look like dead websites. Retry timeout-only records slowly before
+    # batch look like dead websites. Retry timeout-only records before
     # classification or persistence; real HTTP failures are left untouched.
     retry_indexes = [
         index
         for index, result in enumerate(results)
         if "TimeoutError" in str(result.get("fetch_error", ""))
     ]
-    if retry_indexes:
+    # If most of the batch timed out on the first pass, that's a systemic
+    # condition (dead egress, saturated connector), not a handful of slow
+    # sites -- retrying it at deliberately low concurrency (below) would
+    # only multiply the wait. Confirmed live: a 75-domain batch with a near-
+    # total first-pass timeout rate, retried at a fixed 2 workers, took long
+    # enough to blow through the caller's outer deadline before ever
+    # finishing, surfacing as a bare TimeoutError with zero progress. Skip
+    # straight to the systemic-timeout check below instead of retrying.
+    mostly_timed_out = (
+        len(records) >= 5 and len(retry_indexes) / len(records) >= 0.5
+    )
+    if retry_indexes and not mostly_timed_out:
         retry_records = [records[index] for index in retry_indexes]
         retry_results = await scrape_rows(
             retry_records,
-            min(2, max(1, int(workers))),
-            max(25.0, float(timeout)),
+            min(8, max(2, int(workers) // 2)),
+            max(20.0, float(timeout)),
         )
         for index, retry_result in zip(retry_indexes, retry_results):
             results[index] = retry_result
