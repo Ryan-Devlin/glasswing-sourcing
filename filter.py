@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import concurrent.futures
 import json
 import os
 import re
@@ -48,6 +49,18 @@ from common import (
 )
 
 USER_AGENT = "Mozilla/5.0 Glasswing-Sourcing/2.0"
+
+# asyncio.to_thread() uses the event loop's DEFAULT executor, sized at
+# min(32, (os.cpu_count() or 1) + 4) -- os.cpu_count() reports the host's
+# CPU count, not a container's cgroup quota, so this can look plenty large
+# while still being far smaller than a 75-domain batch's peak concurrent
+# demand (every domain's scoring, plus one persist call, all wanting a
+# thread at once). Queueing time waiting for a free thread doesn't show up
+# in any per-operation timer, only in the batch's total wall-clock time --
+# a dedicated, generously-sized pool removes that as a variable.
+_SCORING_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=128, thread_name_prefix="glasswing-scoring"
+)
 
 
 def _report_slow_operation(kind: str, **fields: object) -> None:
@@ -3701,7 +3714,9 @@ async def process(
             "fetch_error": page.error,
         }
 
-    return await asyncio.to_thread(_score_and_bucket_domain)
+    return await asyncio.get_running_loop().run_in_executor(
+        _SCORING_EXECUTOR, _score_and_bucket_domain
+    )
 
 
 INDUSTRY_LABELS = {
@@ -4513,7 +4528,9 @@ async def screen_records(
     output = pd.DataFrame(results)
     _persist_started = time.monotonic()
     stats = (
-        await asyncio.to_thread(persist_screening_output, output)
+        await asyncio.get_running_loop().run_in_executor(
+            _SCORING_EXECUTOR, persist_screening_output, output
+        )
         if persist
         else {
             "batch_total": len(output),

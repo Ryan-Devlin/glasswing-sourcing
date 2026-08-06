@@ -94,10 +94,8 @@ class ScraperResilienceTests(unittest.TestCase):
         section = source.split("output = pd.DataFrame(results)", 1)[1].split(
             "\n\n", 1
         )[0]
-        self.assertIn(
-            "await asyncio.to_thread(persist_screening_output, output)",
-            section,
-        )
+        self.assertIn("_SCORING_EXECUTOR", section)
+        self.assertIn("persist_screening_output, output", section)
 
     def test_process_offloads_scoring_to_a_real_thread(self):
         # Confirmed live: the batch outer deadline fired late by 35-80s
@@ -117,7 +115,7 @@ class ScraperResilienceTests(unittest.TestCase):
         )[0].split("\ndef ", 1)[0]
         self.assertIn("def _score_and_bucket_domain():", process_body)
         self.assertIn(
-            "return await asyncio.to_thread(_score_and_bucket_domain)",
+            "run_in_executor(\n        _SCORING_EXECUTOR, _score_and_bucket_domain\n    )",
             process_body,
         )
 
