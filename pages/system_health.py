@@ -19,6 +19,7 @@ for source in (ROOT, AI_SRC, ZONE_SRC):
     if str(source) not in sys.path:
         sys.path.insert(0, str(source))
 
+from classification_store import recent_digest_runs
 from db_backend import using_postgres
 from health_monitor import health_report
 from manual_truth_backup import (
@@ -90,6 +91,7 @@ tabs = st.tabs([
     "Model performance",
     "Human backups",
     "Cloud readiness",
+    "Daily digest",
 ])
 
 with tabs[0]:
@@ -450,3 +452,38 @@ with tabs[4]:
         ]),
         language="bash",
     )
+
+with tabs[5]:
+    st.subheader("Daily digest runs")
+    st.caption(
+        "History of daily_digest.py's cron runs -- previously written but "
+        "never surfaced anywhere, so a failed run was invisible."
+    )
+    if st.button("Refresh digest history"):
+        st.cache_data.clear()
+        st.rerun()
+    runs = recent_digest_runs(limit=20)
+    if not runs:
+        st.info(
+            "No digest runs recorded yet. If the cron job has already run "
+            "today, this means it never reached run_digest() at all -- "
+            "check its own logs/env vars, since it fails before any row "
+            "is written on a startup-time error (e.g. a missing setting)."
+        )
+    else:
+        latest = runs[0]
+        if latest["status"] == "failed":
+            st.error(f"Most recent run failed: {latest['error'] or 'no error message recorded'}")
+        table = pd.DataFrame([
+            {
+                "Status": row["status"],
+                "Started": row["started_at"],
+                "Completed": row["completed_at"],
+                "Candidates": row["candidate_count"],
+                "Sent": row["sent_count"],
+                "Recipients": row["recipient_count"],
+                "Error": row["error"],
+            }
+            for row in runs
+        ])
+        st.dataframe(table, hide_index=True, width="stretch")

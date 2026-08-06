@@ -715,3 +715,27 @@ def test_corpus_bucket_counts_works_via_connect_fn_without_a_local_file(
     )
 
     assert counts == {"priority": 1}
+
+
+def test_recent_digest_runs_orders_newest_first(tmp_path):
+    database = tmp_path / "classifications.sqlite3"
+    with connect_store(database) as conn:
+        conn.execute(
+            "INSERT INTO daily_digest_runs"
+            "(run_id,status,started_at,completed_at,candidate_count,"
+            "sent_count,recipient_count,error) VALUES (?,?,?,?,?,?,?,?)",
+            ("run-1", "sent", "2026-08-01T00:00:00Z", "2026-08-01T00:01:00Z", 3, 3, 1, ""),
+        )
+        conn.execute(
+            "INSERT INTO daily_digest_runs"
+            "(run_id,status,started_at,completed_at,candidate_count,"
+            "sent_count,recipient_count,error) VALUES (?,?,?,?,?,?,?,?)",
+            ("run-2", "failed", "2026-08-02T00:00:00Z", "2026-08-02T00:01:00Z", 2, 0, 1, "SMTPAuthenticationError: bad creds"),
+        )
+        conn.commit()
+
+    runs = classification_store.recent_digest_runs(path=database)
+
+    assert [row["run_id"] for row in runs] == ["run-2", "run-1"]
+    assert runs[0]["status"] == "failed"
+    assert "SMTPAuthenticationError" in runs[0]["error"]

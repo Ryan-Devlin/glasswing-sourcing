@@ -41,7 +41,7 @@ DIGEST_SMTP_PORT=587
 DIGEST_SMTP_USERNAME=sender@example.com
 DIGEST_SMTP_PASSWORD=<secret>
 DIGEST_SMTP_STARTTLS=true
-DIGEST_APP_URL=https://web-production-d42333.up.railway.app
+DIGEST_APP_URL=https://glasswing-sourcing.up.railway.app
 ANTHROPIC_API_KEY=<secret>
 ```
 

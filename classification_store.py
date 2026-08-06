@@ -1410,6 +1410,29 @@ def recent_movements(
     return [dict(row) for row in rows]
 
 
+def recent_digest_runs(
+    *,
+    limit: int = 20,
+    path: Path | str = CLASSIFICATION_DB,
+) -> list[dict[str, object]]:
+    """Daily digest run history -- written by daily_digest.py, but nothing
+    ever reads it back; a failed run is otherwise invisible."""
+    if not using_classification_postgres() and not Path(path).exists():
+        return []
+    with connect_store(path, read_only=True) as conn:
+        rows = conn.execute(
+            """
+            SELECT run_id, status, started_at, completed_at,
+                   candidate_count, sent_count, recipient_count, error
+            FROM daily_digest_runs
+            ORDER BY started_at DESC
+            LIMIT ?
+            """,
+            (max(1, min(int(limit), 200)),),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 _CRAWLED_CORPUS_CACHE_SECONDS = 10.0
 _crawled_corpus_cache: dict[str, tuple[float, list[str]]] = {}
 
