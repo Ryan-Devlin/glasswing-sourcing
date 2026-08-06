@@ -19,7 +19,7 @@ for source in (ROOT, AI_SRC, ZONE_SRC):
     if str(source) not in sys.path:
         sys.path.insert(0, str(source))
 
-from classification_store import recent_digest_runs
+from classification_store import delete_bucket_classifications, recent_digest_runs
 from db_backend import using_postgres
 from health_monitor import health_report
 from manual_truth_backup import (
@@ -377,6 +377,44 @@ with tabs[3]:
                     f"{result['restored_training_labels']} training labels."
                 )
                 st.rerun()
+
+    st.markdown("#### Bulk bucket cleanup")
+    st.caption(
+        "Permanently deletes every classification currently in one bucket. "
+        "Explicit human decisions (Mark Yes/No, manual moves) and verified "
+        "training truth are never deleted by this, regardless of bucket."
+    )
+    bucket_to_delete = st.selectbox(
+        "Bucket",
+        ["Potential Comp", "Coming Soon", "Needs Review", "Insufficient Evidence", "Hard Denied"],
+        key="bucket_cleanup_choice",
+    )
+    bucket_codes = {
+        "Potential Comp": "comp",
+        "Coming Soon": "coming_soon",
+        "Needs Review": "review",
+        "Insufficient Evidence": "insufficient",
+        "Hard Denied": "reject",
+    }
+    delete_confirm = st.checkbox(
+        f"I understand this permanently deletes {bucket_to_delete} "
+        "classifications and cannot be undone.",
+        key="bucket_cleanup_confirm",
+    )
+    if st.button(
+        f"Delete all {bucket_to_delete} classifications",
+        disabled=not delete_confirm,
+    ):
+        snapshot_path = create_manual_snapshot(
+            reason=f"pre_bucket_delete_{bucket_codes[bucket_to_delete]}"
+        )
+        deleted = delete_bucket_classifications(bucket_codes[bucket_to_delete])
+        st.cache_data.clear()
+        st.success(
+            f"Deleted {deleted:,} {bucket_to_delete} classifications. "
+            f"Safety snapshot saved first: {snapshot_path.name}"
+        )
+        st.rerun()
 
 with tabs[4]:
     st.subheader("Cloud migration boundary")

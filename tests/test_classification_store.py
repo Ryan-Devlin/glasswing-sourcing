@@ -739,3 +739,41 @@ def test_recent_digest_runs_orders_newest_first(tmp_path):
     assert [row["run_id"] for row in runs] == ["run-2", "run-1"]
     assert runs[0]["status"] == "failed"
     assert "SMTPAuthenticationError" in runs[0]["error"]
+
+
+def test_delete_bucket_classifications_protects_human_truth(tmp_path, monkeypatch):
+    database = tmp_path / "classifications.sqlite3"
+    frame = pd.DataFrame([
+        {"domain": "junk-comp.ai", "routing_bucket": "comp"},
+        {"domain": "manually-kept-comp.ai", "routing_bucket": "comp"},
+        {"domain": "protected-comp.ai", "routing_bucket": "comp"},
+        {"domain": "real-investable.ai", "routing_bucket": "priority"},
+    ])
+    assert upsert_classifications(frame, database) == 4
+    record_manual_move(
+        ["manually-kept-comp.ai"],
+        target_label="comp",
+        target_bucket="comp",
+        note="human confirmed this is a real comp",
+        path=database,
+    )
+    monkeypatch.setattr(
+        "training_truth.protected_training_domains",
+        lambda: {"protected-comp.ai"},
+    )
+
+    deleted = classification_store.delete_bucket_classifications(
+        "comp", path=database
+    )
+
+    assert deleted == 1
+    with connect_store(database, read_only=True) as conn:
+        remaining = {
+            row["domain"]
+            for row in conn.execute("SELECT domain FROM classifications")
+        }
+    assert remaining == {
+        "manually-kept-comp.ai",
+        "protected-comp.ai",
+        "real-investable.ai",
+    }

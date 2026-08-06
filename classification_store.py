@@ -1440,6 +1440,56 @@ def recent_digest_runs(
     return [dict(row) for row in rows]
 
 
+def delete_bucket_classifications(
+    bucket: str,
+    *,
+    path: Path | str = CLASSIFICATION_DB,
+) -> int:
+    """Bulk-delete every classification currently in one routing bucket.
+
+    Explicit human decisions and verified training truth are never touched
+    by this, matching every other bulk operation in this store: a domain is
+    skipped if it has a manual_decisions row (a human, not Python/Claude,
+    put it there or confirmed it) or is in protected_training_domains().
+    """
+    if not using_classification_postgres() and not Path(path).exists():
+        return 0
+    from training_truth import protected_training_domains
+
+    protected = protected_training_domains()
+    with connect_store(path) as conn:
+        candidates = [
+            str(row["domain"])
+            for row in conn.execute(
+                "SELECT domain FROM classifications WHERE routing_bucket=?",
+                (bucket,),
+            ).fetchall()
+        ]
+        manually_decided = {
+            str(row["domain"])
+            for row in conn.execute(
+                "SELECT domain FROM manual_decisions"
+            ).fetchall()
+        }
+        to_delete = [
+            domain
+            for domain in candidates
+            if domain not in protected and domain not in manually_decided
+        ]
+        if not to_delete:
+            return 0
+        begin_immediate(conn)
+        for start in range(0, len(to_delete), 800):
+            batch = to_delete[start : start + 800]
+            marks = ",".join("?" for _ in batch)
+            conn.execute(
+                f"DELETE FROM classifications WHERE domain IN ({marks})",
+                batch,
+            )
+        conn.commit()
+    return len(to_delete)
+
+
 _CRAWLED_CORPUS_CACHE_SECONDS = 10.0
 _crawled_corpus_cache: dict[str, tuple[float, list[str]]] = {}
 
