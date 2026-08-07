@@ -199,6 +199,11 @@ async def run() -> None:
     PID_FILE.write_text(str(os.getpid()), encoding="utf-8")
     conn = connect(settings.database)
 
+    from .queue_migration import migrate_queue_files_from_object_storage
+
+    migration = migrate_queue_files_from_object_storage(conn, settings)
+    set_state(conn, "last_queue_migration", migration)
+
     def zone_crawler_requested() -> bool:
         if RUNTIME_MODE == "local":
             return True
