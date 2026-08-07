@@ -332,6 +332,8 @@ def prepare_input(
             "exceptional_score": exceptional_score,
         }
 
+    total_rows_in_input = len(frame)
+
     if "domain" not in frame.columns:
         source = (
             frame["registrable"]
@@ -427,13 +429,16 @@ def prepare_input(
         ascending=[False, False],
     )
 
-    all_screened_path = FILTERED / "all_screened.csv"
-    total_screened = 0
-    if all_screened_path.exists() and all_screened_path.stat().st_size:
-        try:
-            total_screened = len(pd.read_csv(all_screened_path))
-        except Exception:
-            total_screened = 0
+    # Confirmed live: this used to re-read a separate hardcoded
+    # FILTERED/all_screened.csv here regardless of what `path` (this same
+    # function's actual input) pointed at. That file is deliberately never
+    # refreshed in cloud/Postgres mode (bulk_compatibility_exports_enabled()
+    # in filter.py keeps huge CSV mirrors off worker volumes there) -- so
+    # total_screened silently read 0 there, zeroing percentage_quota and
+    # therefore the real quota (below) every single time in production,
+    # with no error anywhere. total_rows_in_input reflects the real size of
+    # whatever candidates file this call was actually given.
+    total_screened = total_rows_in_input
 
     percentage_quota = int(total_screened * max(percentage_cap, 0))
     quota = (

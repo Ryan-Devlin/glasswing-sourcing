@@ -39,6 +39,7 @@ for _source_root in (_AI_SEARCH_SRC, _ZONE_UNIVERSE_SRC):
 
 import filter as screening_filter
 from classification_store import (
+    frame_from_store,
     import_private_sqlite_into_shared,
     using_classification_postgres,
 )
@@ -1103,9 +1104,26 @@ def maybe_run_claude(batch_path: Path) -> int:
             )
             return 0
 
-        candidates = FILTERED / "all_screened.csv"
-        if not candidates.exists() or candidates.stat().st_size == 0:
-            return 0
+        if using_classification_postgres():
+            # bulk_compatibility_exports_enabled() deliberately disables
+            # refreshing all_screened.csv in cloud/Postgres mode (keeps
+            # enormous CSV mirrors off worker volumes) -- but this function
+            # still needs *some* real file to hand claude_classifier.py.
+            # Confirmed live: with that export disabled, this stale/absent
+            # local file silently zeroed out every Claude call for two full
+            # days despite plenty of freshly-screened, above-threshold
+            # domains sitting in the (Postgres) classification store the
+            # whole time. Build a fresh candidate file straight from the
+            # real store instead of depending on that local mirror at all.
+            frame = frame_from_store()
+            if frame.empty:
+                return 0
+            candidates = FILTERED / "all_screened_live.csv"
+            frame.to_csv(candidates, index=False)
+        else:
+            candidates = FILTERED / "all_screened.csv"
+            if not candidates.exists() or candidates.stat().st_size == 0:
+                return 0
 
         calls = min(allowance, CLAUDE_BATCH_MAX)
         if calls <= 0:
