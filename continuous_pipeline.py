@@ -1789,6 +1789,18 @@ async def worker_loop(
                 + successfully_screened
             )
 
+            # Automatic Python rejections (parked/agency/non-US/etc.) are
+            # deliberately purged down to a minimal tombstone -- they never
+            # reach the classifications store, so they don't appear in any
+            # of the three visible buckets. Without this, "New domains ->
+            # Websites checked -> Investable+Needs Review+Hard Denied"
+            # can't reconcile: this is the missing piece that was silently
+            # discarded from every accounting total.
+            auto_rejected = (
+                int(status.get("auto_rejected", 0) or 0)
+                + int(screening_stats.get("storage_discarded", 0) or 0)
+            )
+
             received = int(
                 status.get("domains_received", 0) or 0
             )
@@ -1806,6 +1818,7 @@ async def worker_loop(
             write_status(
                 processed=processed,
                 screened=screened,
+                auto_rejected=auto_rejected,
                 last_domain_processed=domains[-1],
                 current_batch=[],
                 queue=queue_counts(conn),

@@ -100,3 +100,23 @@ class ScreeningBatchTimeoutTests(unittest.TestCase):
         before_except = after.split("except Exception as exc:", 1)[0]
         self.assertIn("mark_success(conn, succeeded_domains)", before_except)
         self.assertIn("mark_failure(", before_except)
+
+    def test_auto_rejected_domains_are_not_dropped_from_every_total(self):
+        # Confirmed live: "New domains > Classified 100% of the time" --
+        # parked/agency/non-US/etc. domains get purged down to a minimal
+        # tombstone right after Python routes them "reject", so they never
+        # reach the classifications store and are invisible to all three
+        # visible-bucket frames. Without accumulating storage_discarded
+        # into a real cumulative counter, Investable + Needs Review + Hard
+        # Denied structurally undercounts Websites checked by exactly that
+        # many domains, and the two numbers can never reconcile.
+        self.assertIn(
+            'auto_rejected = (\n'
+            '                int(status.get("auto_rejected", 0) or 0)\n'
+            '                + int(screening_stats.get("storage_discarded", 0) or 0)',
+            self.pipeline,
+        )
+        write_status_call = self.pipeline.split(
+            "write_status(\n                processed=processed,", 1
+        )[1].split(")\n", 1)[0]
+        self.assertIn("auto_rejected=auto_rejected", write_status_call)

@@ -1463,7 +1463,7 @@ elif RUNTIME_MODE != "local":
     )
 
 queue = stream_status.get("queue", {}) or {}
-status_metrics = st.columns(5)
+status_metrics = st.columns(4)
 status_metrics[0].metric(
     "New domains",
     int(
@@ -1478,22 +1478,20 @@ status_metrics[0].metric(
         "Only these enter screening."
     ),
 )
+# "Classified" used to live here as its own worker-side counter, computed
+# before Python auto-rejections get purged -- it could show a different
+# number than the Sourcing funnel's "Websites checked" below (the same
+# concept, computed from what's actually retained). Removed rather than
+# fixed in place so there's exactly one definition of this number on the
+# page, not two that can drift apart.
 status_metrics[1].metric(
-    "Classified",
-    int(stream_status.get("screened", 0) or 0),
-    help=(
-        "Websites that reached a decision-ready classification during this "
-        "run. Inaccessible and evidence-free sites are excluded."
-    ),
-)
-status_metrics[2].metric(
     "Ignored repeats",
     int(stream_status.get("repeat_events_ignored", 0) or 0),
     help=(
         "Certificate renewals and repeat sightings ignored before scraping."
     ),
 )
-status_metrics[3].metric(
+status_metrics[2].metric(
     "Claude calls",
     int(stream_status.get("claude_calls", 0) or 0),
     help=(
@@ -1501,7 +1499,7 @@ status_metrics[3].metric(
         f"· Manual: {int(stream_status.get('manual_claude_calls', 0) or 0)}"
     ),
 )
-status_metrics[4].metric(
+status_metrics[3].metric(
     "Failed",
     int(stream_status.get("failed_this_run", 0) or 0),
     help="New domains that exhausted retries during this run.",
@@ -2130,30 +2128,59 @@ if not visible_screened.empty and "domain" in visible_screened.columns:
 # attempt on a domain, not unique resolved domains, so it could drift
 # away from the bucket totals. New domains must always be >= this, since
 # a domain can only reach a bucket after being received.
+#
+# Auto-rejected has to be counted explicitly, not just caveated away:
+# parked/agency/non-US/etc. domains are purged down to a minimal
+# tombstone immediately after Python routes them "reject" -- they never
+# reach the classifications store, so they're invisible to every one of
+# the three review-tab frames above. Without this, Investable + Needs
+# Review + Hard Denied structurally undercounts Websites checked by
+# however many were auto-rejected, and the two numbers can never
+# reconcile. Only meaningful for "Current Run" -- a purged row leaves no
+# record in classification history to reconstruct this count from later.
+funnel_auto_rejected = (
+    int(stream_status.get("auto_rejected", 0) or 0)
+    if result_scope == "Current Run"
+    else 0
+)
 funnel_screened = (
-    len(investable_candidates) + len(needs_review) + len(hard_denied)
+    len(investable_candidates)
+    + len(needs_review)
+    + len(hard_denied)
+    + funnel_auto_rejected
 )
 
 funnel_1.metric("New domains", funnel_received)
 funnel_2.metric(
     "Websites checked",
     funnel_screened,
-    help="Investable + Needs Review + Hard Denied -- always equal by definition.",
+    help=(
+        "Investable + Needs Review + Hard Denied + Auto-rejected -- "
+        "always equal by definition."
+    ),
 )
 
-metric_1, metric_2, metric_3 = st.columns(3)
+metric_1, metric_2, metric_3, metric_4 = st.columns(4)
 metric_1.metric("Investable", len(investable_candidates))
 metric_2.metric("Needs review", len(needs_review))
 metric_3.metric("Hard denied", len(hard_denied))
+metric_4.metric(
+    "Auto-rejected",
+    funnel_auto_rejected,
+    help=(
+        "Parked, agency, non-US, and other factual disqualifiers, purged "
+        "immediately -- no record exists to review, by design."
+    ),
+)
 
-retained_total = funnel_screened
+retained_total = len(investable_candidates) + len(needs_review) + len(hard_denied)
 st.caption(
-    f"The three review tabs contain {retained_total:,} retained records, "
-    "equal to Websites checked by definition. Automatic Python rejections "
-    "are included in processing totals, but their domain data is "
-    "intentionally deleted and therefore does not appear here. Investable "
-    "is a Claude/manual label applied on top of Needs Review, not an "
-    "automatic outcome."
+    f"The three review tabs contain {retained_total:,} retained records. "
+    f"Retained + auto-rejected = Websites checked ({funnel_screened:,}) by "
+    "definition. Automatic Python rejections are purged down to a minimal "
+    "tombstone, so their domain data does not appear in any tab. "
+    "Investable is a Claude/manual label applied on top of Needs Review, "
+    "not an automatic outcome."
 )
 
 tabs = st.tabs([
@@ -2767,6 +2794,8 @@ with tabs[7]:
         {"Bucket": "Needs review", "Count": len(needs_review)},
         {"Bucket": "Hard denied", "Count": len(hard_denied)},
         {"Bucket": "Retained total", "Count": retained_total},
+        {"Bucket": "Auto-rejected (purged)", "Count": funnel_auto_rejected},
+        {"Bucket": "Websites checked", "Count": funnel_screened},
     ])
     st.dataframe(
         reconciliation,
