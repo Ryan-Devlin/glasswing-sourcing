@@ -538,8 +538,33 @@ US_LOCATION_TERMS = [
     "north carolina", "north dakota", "ohio", "oklahoma", "oregon",
     "pennsylvania", "rhode island", "south carolina", "south dakota",
     "tennessee", "texas", "utah", "vermont", "virginia", "washington",
-    "west virginia", "wisconsin", "wyoming", "district of columbia",
+    "west virginia", "wisconsin", "wyoming", "district of columbia"
 ]
+
+STRONG_US_SCHOOLS = ["harvard", "mit", "stanford", "yale", "princeton", "columbia",
+                     "caltech", "chicago", "upenn", "cornell", "duke", "northwestern", 
+                     "johns hopkins", "brown", "dartmouth", "washington university",
+                       "university of california", "university of michigan"]
+MID_US_SCHOOLS = ["penn state", "university of florida", "university of texas",
+                  "university of wisconsin", "university of washington", "university of illinois",
+                  "university of minnesota", "university of arizona", "university of colorado",
+                  "university of oregon", "university of utah", "university of nevada",
+                  "university of kansas", "university of missouri", "university of tennessee",
+                  "university of georgia", "university of north carolina", "university of virginia",
+                  "university of maryland", "university of massachusetts", "university of connecticut"]
+BAD_US_SCHOOLS = ["university of phoenix", "devry university", "strayer university",
+                  "capella university", "walden university", "grand canyon university",
+                  "keiser university", "american intercontinental university", "argosy university",
+                  "chamberlain university", "herzing university", "independence university",
+                  "national american university", "robert morris university", "south university",
+                  "trident university international", "westwood college"] 
+
+STRONG_WORK_EXPERIENCE = ["google", "microsoft", "amazon", "facebook", "apple", "netflix",
+                          "linkedin", "twitter", "uber", "airbnb", "salesforce",
+                          "adobe", "intel", "nvidia", "ibm", "oracle", "dell",
+                          "hp", "cisco", "vmware", "sap", "qualcomm", "tesla",
+                          "space x", "palantir", "stripe", "square", "snap",
+                          "reddit", "dropbox", "slack", "zoom"]
 
 NON_US_COUNTRIES = [
     "afghanistan", "albania", "algeria", "andorra", "angola",
@@ -769,7 +794,11 @@ FOUNDER_CREDIBILITY_SIGNALS = [
     "former founder", "repeat founder", "previously founded",
     "ex-google", "ex-meta", "ex-openai", "ex-anthropic", "ex-nvidia",
     "former google", "former meta", "former openai", "former anthropic",
-    "former nvidia", "mit", "stanford", "carnegie mellon", "caltech",
+    "former nvidia", "carnegie mellon",
+    # "mit"/"stanford" moved to the tiered STRONG/MID/BAD_US_SCHOOLS check
+    # below -- that list is a more precise, dedicated treatment of school
+    # pedigree than a couple of bare names mixed into a generic
+    # credibility list, and this avoids double-counting the same signal.
     "published research", "peer-reviewed", "patent holder",
 ]
 
@@ -2116,6 +2145,10 @@ def venture_quality_assessment(
         cleaned,
         FOUNDER_CREDIBILITY_SIGNALS,
     )
+    strong_school_hits = occurrences(cleaned, STRONG_US_SCHOOLS)
+    mid_school_hits = occurrences(cleaned, MID_US_SCHOOLS)
+    bad_school_hits = occurrences(cleaned, BAD_US_SCHOOLS)
+    strong_work_experience_hits = occurrences(cleaned, STRONG_WORK_EXPERIENCE)
     slop_evidence = occurrences(cleaned, AI_SLOP_SIGNALS)
 
     pillar_count = int(counts.get("pillar", 0))
@@ -2166,10 +2199,25 @@ def venture_quality_assessment(
         + min(technical_count, 3) * 12
         + min(len(set(moat_evidence)), 2) * 16,
     )
+    # Slight, not decisive -- a top-tier school or employer mention nudges
+    # founder_score the way one extra credibility signal would, a
+    # diploma-mill mention nudges it back down by about the same amount.
+    # Never enough on its own to move thesis_fit/product_real or any hard
+    # gate.
+    school_adjustment = (
+        min(len(set(strong_school_hits)), 2) * 5
+        + min(len(set(mid_school_hits)), 2) * 2
+        - min(len(set(bad_school_hits)), 2) * 5
+        + min(len(set(strong_work_experience_hits)), 2) * 5
+    )
     founder_score = min(
         100,
-        min(len(set(founder_visibility)), 2) * 18
-        + min(len(set(founder_credibility)), 3) * 20,
+        max(
+            0,
+            min(len(set(founder_visibility)), 2) * 18
+            + min(len(set(founder_credibility)), 3) * 20
+            + school_adjustment,
+        ),
     )
 
     thesis_fit = thesis_score >= 38
@@ -2280,7 +2328,12 @@ def venture_quality_assessment(
             + occurrences(cleaned, DEFENSIBILITY_SIGNALS)
         ))[:10],
         "founder_evidence": list(dict.fromkeys(
-            founder_visibility + founder_credibility
+            founder_visibility
+            + founder_credibility
+            + strong_school_hits
+            + mid_school_hits
+            + bad_school_hits
+            + strong_work_experience_hits
         ))[:10],
         "slop_evidence": slop_evidence[:10],
     }

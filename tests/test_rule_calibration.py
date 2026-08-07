@@ -514,6 +514,87 @@ class RuleCalibrationTests(unittest.TestCase):
         self.assertFalse(profile["reviewable"])
         self.assertFalse(profile["investable_ready"])
 
+    def test_strong_school_mention_slightly_lifts_founder_score(self):
+        text = (
+            "Founded by a team with deep enterprise software experience. "
+            "Our founders previously built and sold two companies."
+        )
+        _, pillar, _, counts = score_text(text)
+        from filter import glasswing_dimensions
+
+        baseline = venture_quality_assessment(
+            text, pillar=pillar, counts=counts,
+            dimensions=glasswing_dimensions(text),
+        )
+        with_school = venture_quality_assessment(
+            text + " One of our founders is a Stanford graduate.",
+            pillar=pillar, counts=counts,
+            dimensions=glasswing_dimensions(text),
+        )
+        # Slight, not decisive: a real lift, but nowhere near the ~18-20
+        # points a real founder_visibility/credibility signal is worth.
+        delta = with_school["founder_score"] - baseline["founder_score"]
+        self.assertGreater(delta, 0)
+        self.assertLessEqual(delta, 10)
+
+    def test_diploma_mill_mention_slightly_lowers_founder_score(self):
+        text = (
+            "Founded by a team with deep enterprise software experience. "
+            "Our founders previously built and sold two companies. "
+            "One of our founders is a Stanford graduate."
+        )
+        _, pillar, _, counts = score_text(text)
+        from filter import glasswing_dimensions
+
+        with_top_school = venture_quality_assessment(
+            text, pillar=pillar, counts=counts,
+            dimensions=glasswing_dimensions(text),
+        )
+        with_bad_school = venture_quality_assessment(
+            text.replace("Stanford", "University of Phoenix"),
+            pillar=pillar, counts=counts,
+            dimensions=glasswing_dimensions(text),
+        )
+        self.assertLess(
+            with_bad_school["founder_score"],
+            with_top_school["founder_score"],
+        )
+
+    def test_strong_work_experience_slightly_lifts_founder_score(self):
+        text = (
+            "Founded by a team with deep enterprise software experience. "
+            "Our founders previously built and sold two companies."
+        )
+        _, pillar, _, counts = score_text(text)
+        from filter import glasswing_dimensions
+
+        baseline = venture_quality_assessment(
+            text, pillar=pillar, counts=counts,
+            dimensions=glasswing_dimensions(text),
+        )
+        with_faang = venture_quality_assessment(
+            text + " Our team previously worked at Google and Stripe.",
+            pillar=pillar, counts=counts,
+            dimensions=glasswing_dimensions(text),
+        )
+        delta = with_faang["founder_score"] - baseline["founder_score"]
+        self.assertGreater(delta, 0)
+        self.assertLessEqual(delta, 10)
+
+    def test_school_signal_alone_never_decides_investable_ready(self):
+        # "Slightly" means never decisive on its own -- a thin page with
+        # nothing but a school name and no real product/wedge/moat
+        # evidence must not become investable_ready just from pedigree.
+        text = "Founded by a Harvard and MIT team. We are building something."
+        _, pillar, _, counts = score_text(text)
+        from filter import glasswing_dimensions
+
+        profile = venture_quality_assessment(
+            text, pillar=pillar, counts=counts,
+            dimensions=glasswing_dimensions(text),
+        )
+        self.assertFalse(profile["investable_ready"])
+
     def test_live_config_has_no_stale_quantum_filter(self):
         config_path = Path(__file__).resolve().parents[1] / "data" / "run_config.json"
         if not config_path.exists():

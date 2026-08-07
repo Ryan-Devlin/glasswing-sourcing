@@ -45,7 +45,7 @@ navigation = st.navigation(
         ),
         st.Page(
             "pages/ai_search.py",
-            title="Domain Crawler (.ai)",
+            title="CSV Scraper",
         ),
         st.Page(
             "pages/zone_universe.py",
