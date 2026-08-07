@@ -796,6 +796,31 @@ def discard_pending_by_extension(
     return len(to_discard)
 
 
+def reset_certstream_queue(conn: sqlite3.Connection) -> dict[str, int]:
+    """Wipe the entire CertStream domain queue and Claude call log.
+
+    Removes every row (any status: pending, processing, complete, failed,
+    discarded) from `domains`, plus every row from `claude_calls`. Never
+    touches the classifications store, training truth, or manual decisions
+    -- those live in a completely separate system. `registry_meta` is left
+    alone so the one-time history-bootstrap flag doesn't re-fire and
+    re-seed the now-empty table from the classification export.
+    """
+    domain_count = int(
+        conn.execute("SELECT COUNT(*) FROM domains").fetchone()[0]
+    )
+    claude_call_count = int(
+        conn.execute("SELECT COUNT(*) FROM claude_calls").fetchone()[0]
+    )
+    conn.execute("DELETE FROM domains")
+    conn.execute("DELETE FROM claude_calls")
+    conn.commit()
+    return {
+        "domains_deleted": domain_count,
+        "claude_calls_deleted": claude_call_count,
+    }
+
+
 def queue_counts(conn: sqlite3.Connection) -> dict[str, int]:
     rows = conn.execute(
         "SELECT status, COUNT(*) AS count FROM domains GROUP BY status"

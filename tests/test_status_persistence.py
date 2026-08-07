@@ -215,6 +215,44 @@ class StatusPersistenceTests(unittest.TestCase):
         self.assertEqual(rows["junk3.app"], "discarded")
         self.assertEqual(rows["done.ai"], "complete")
 
+    def test_reset_certstream_queue_deletes_every_status_and_claude_log(self):
+        # "Clear the entire CertStream system of data" -- unlike
+        # discard_pending_by_extension (which only ever marks not-yet-
+        # attempted rows as discarded, preserving history), this is a real
+        # DELETE across every status, for a genuinely fresh start.
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("""
+            CREATE TABLE domains (
+                domain TEXT PRIMARY KEY, status TEXT
+            )
+        """)
+        conn.execute("CREATE TABLE claude_calls (called_at TEXT, domain TEXT)")
+        conn.executemany(
+            "INSERT INTO domains(domain, status) VALUES (?, ?)",
+            [
+                ("pending.ai", "pending"),
+                ("done.ai", "complete"),
+                ("dead.ai", "failed"),
+                ("old.ai", "discarded"),
+            ],
+        )
+        conn.execute(
+            "INSERT INTO claude_calls(called_at, domain) VALUES ('t', 'done.ai')"
+        )
+        conn.commit()
+
+        counts = continuous_pipeline.reset_certstream_queue(conn)
+
+        self.assertEqual(counts["domains_deleted"], 4)
+        self.assertEqual(counts["claude_calls_deleted"], 1)
+        self.assertEqual(
+            conn.execute("SELECT COUNT(*) FROM domains").fetchone()[0], 0
+        )
+        self.assertEqual(
+            conn.execute("SELECT COUNT(*) FROM claude_calls").fetchone()[0], 0
+        )
+
     def test_claim_batch_prefers_newest_domains_over_stale_backlog(self):
         # Confirmed live: a 121,000+ historical backlog meant claim_batch's
         # old oldest-first ordering would have starved freshly arriving

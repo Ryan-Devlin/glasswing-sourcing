@@ -20,7 +20,11 @@ for source in (ROOT, AI_SRC, ZONE_SRC):
         sys.path.insert(0, str(source))
 
 from classification_store import delete_bucket_classifications, recent_digest_runs
-from continuous_pipeline import connect_db, discard_pending_by_extension
+from continuous_pipeline import (
+    connect_db,
+    discard_pending_by_extension,
+    reset_certstream_queue,
+)
 from db_backend import using_postgres
 from health_monitor import health_report
 from manual_truth_backup import (
@@ -319,6 +323,40 @@ with tabs[0]:
             conn.close()
         st.cache_data.clear()
         st.success(f"Discarded {discarded:,} pending domains from the queue.")
+        st.rerun()
+
+    st.markdown("#### Full CertStream reset")
+    st.caption(
+        "Deletes every row in the CertStream domain queue -- pending, "
+        "processing, complete, and failed -- plus the Claude call log. "
+        "This is a hard reset of the pipeline's own scheduling/dedup "
+        "state, not the classification store: investable candidates, "
+        "insufficient/hard-denied records, training truth, and manual "
+        "decisions are untouched. New CertStream events start refilling "
+        "the queue again within seconds. The Sourcing Funnel's 'Current "
+        "Run' counters keep counting from wherever they are -- they only "
+        "reset when the pipeline-worker process itself restarts."
+    )
+    reset_phrase = st.text_input(
+        "Type RESET to confirm",
+        key="certstream_reset_confirm_text",
+    )
+    if st.button(
+        "Wipe entire CertStream queue + Claude call log",
+        disabled=reset_phrase.strip() != "RESET",
+    ):
+        conn = connect_db()
+        try:
+            reset_counts = reset_certstream_queue(conn)
+        finally:
+            conn.close()
+        st.cache_data.clear()
+        st.success(
+            f"Deleted {reset_counts['domains_deleted']:,} domain rows and "
+            f"{reset_counts['claude_calls_deleted']:,} Claude call log rows. "
+            "The queue is empty; new CertStream events will start "
+            "repopulating it immediately."
+        )
         st.rerun()
 
 with tabs[1]:
