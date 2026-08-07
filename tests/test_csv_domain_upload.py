@@ -9,18 +9,19 @@ def test_page_is_retitled_csv_scraper():
     assert 'st.title("CSV Scraper")' in ai_search
 
 
-def test_upload_adds_to_the_shared_queue_not_a_separate_store():
-    # "If we had 15k domains from a previous dataset and add 20k domains
-    # it should show 35k" -- must go through the same shared queue every
-    # other source uses (enqueue_for_screening), not a new local table,
-    # so uploaded domains get scored by the same Python pipeline and
-    # appear in the same Investable/Needs Review/Hard Denied buckets.
+def test_upload_adds_to_the_shared_queue_and_this_pages_own_discovered_count():
+    # Must go through the same shared queue every other source uses
+    # (enqueue_for_screening), so uploaded domains get scored by the same
+    # Python pipeline and appear in the same Investable/Needs Review/Hard
+    # Denied buckets. Also must register in this corpus's own
+    # Discovered/Coverage count (add_domain) -- that's the number this
+    # page actually displays, not a separate "total in system" figure.
     ai_search = Path("pages/ai_search.py").read_text(encoding="utf-8")
     assert "st.file_uploader(" in ai_search
     assert "enqueue_for_screening(" in ai_search
     assert 'source_run_id="csv_upload"' in ai_search
-    assert "screening_queue_connection" in ai_search
-    assert "Total domains in system" in ai_search
+    assert "add_domain(discover_conn, domain" in ai_search
+    assert "Total domains in system" not in ai_search
 
 
 def test_upload_normalizes_and_dedupes_before_enqueueing():

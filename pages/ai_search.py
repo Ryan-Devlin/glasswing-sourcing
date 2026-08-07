@@ -25,13 +25,12 @@ if str(ROOT) not in sys.path:
 if str(SEARCH_SRC) not in sys.path:
     sys.path.insert(0, str(SEARCH_SRC))
 
-from ai_search.database import AI_SEARCH_DATABASE_ENV_VAR
+from ai_search.database import AI_SEARCH_DATABASE_ENV_VAR, add_domain
 from ai_search.database import connect as ai_search_connect
 from ai_search.og_bridge import (
     crawler_state,
     enqueue_for_screening,
     pipeline_status_for_corpus,
-    screening_queue_connection,
     search_companies,
     search_stats,
 )
@@ -134,20 +133,6 @@ if count_classifications() == 0:
         bootstrap_from_csv()
 
 
-def total_domains_in_system() -> int:
-    # psycopg's dict_row (used against Postgres) only supports name-based
-    # access, not row[0] -- SQLite's Row supports both, which is why this
-    # only broke in production. AS count + ["count"] works on both.
-    conn = screening_queue_connection(QUEUE_DB)
-    try:
-        return int(
-            conn.execute("SELECT COUNT(*) AS count FROM domains")
-            .fetchone()["count"]
-        )
-    finally:
-        conn.close()
-
-
 def domain_column_in(frame: pd.DataFrame) -> str | None:
     for candidate in ("domain", "domains", "url", "website", "site"):
         for column in frame.columns:
@@ -161,71 +146,78 @@ def domain_column_in(frame: pd.DataFrame) -> str | None:
 st.markdown("#### Upload domains")
 st.caption(
     "Upload a CSV of domains, any extension. New domains are added to "
-    "the shared screening queue and go through the same Python scorer as "
-    "every other source -- existing domains are never touched or "
-    "re-queued, so this is always additive."
+    "the Discovered count below and go through the same Python scorer "
+    "as every other source -- existing domains are never touched or "
+    "re-queued, so this is always additive. Coverage will drop below "
+    "100% right after an upload, since the newly-added domains haven't "
+    "been crawled yet."
 )
-count_col, upload_col = st.columns([1, 2])
-with count_col:
-    st.metric("Total domains in system", f"{total_domains_in_system():,}")
-with upload_col:
-    uploaded_csv = st.file_uploader(
-        "CSV file",
-        type=["csv"],
-        key="domain_csv_uploader",
-        label_visibility="collapsed",
-    )
-    if uploaded_csv is not None:
-        try:
-            uploaded_frame = pd.read_csv(uploaded_csv, dtype=str)
-        except Exception as exc:
-            uploaded_frame = None
-            st.error(f"Could not read that CSV: {type(exc).__name__}: {exc}")
+uploaded_csv = st.file_uploader(
+    "CSV file",
+    type=["csv"],
+    key="domain_csv_uploader",
+    label_visibility="collapsed",
+)
+if uploaded_csv is not None:
+    try:
+        uploaded_frame = pd.read_csv(uploaded_csv, dtype=str)
+    except Exception as exc:
+        uploaded_frame = None
+        st.error(f"Could not read that CSV: {type(exc).__name__}: {exc}")
 
-        if uploaded_frame is not None and not uploaded_frame.empty:
-            domain_column = domain_column_in(uploaded_frame)
-            if domain_column is None:
-                st.error(
-                    "Couldn't find a domain column -- name one column "
-                    "'domain' (or upload a CSV with just one column)."
+    if uploaded_frame is not None and not uploaded_frame.empty:
+        domain_column = domain_column_in(uploaded_frame)
+        if domain_column is None:
+            st.error(
+                "Couldn't find a domain column -- name one column "
+                "'domain' (or upload a CSV with just one column)."
+            )
+        else:
+            raw_values = uploaded_frame[domain_column].fillna("").tolist()
+            seen_domains: set[str] = set()
+            normalized_domains: list[str] = []
+            unparseable = 0
+            for value in raw_values:
+                domain = stable_domain(value)
+                if not domain:
+                    unparseable += 1
+                    continue
+                if domain in seen_domains:
+                    continue
+                seen_domains.add(domain)
+                normalized_domains.append(domain)
+
+            summary = f"Found {len(normalized_domains):,} unique domains"
+            if unparseable:
+                summary += f" ({unparseable:,} rows couldn't be parsed as a domain)"
+            st.caption(summary + ".")
+
+            if normalized_domains and st.button(
+                f"Add {len(normalized_domains):,} domains to the system",
+                type="primary",
+                key="confirm_csv_upload",
+            ):
+                result = enqueue_for_screening(
+                    QUEUE_DB,
+                    normalized_domains,
+                    source_run_id="csv_upload",
                 )
-            else:
-                raw_values = uploaded_frame[domain_column].fillna("").tolist()
-                seen_domains: set[str] = set()
-                normalized_domains: list[str] = []
-                unparseable = 0
-                for value in raw_values:
-                    domain = stable_domain(value)
-                    if not domain:
-                        unparseable += 1
-                        continue
-                    if domain in seen_domains:
-                        continue
-                    seen_domains.add(domain)
-                    normalized_domains.append(domain)
-
-                summary = f"Found {len(normalized_domains):,} unique domains"
-                if unparseable:
-                    summary += f" ({unparseable:,} rows couldn't be parsed as a domain)"
-                st.caption(summary + ".")
-
-                if normalized_domains and st.button(
-                    f"Add {len(normalized_domains):,} domains to the system",
-                    type="primary",
-                    key="confirm_csv_upload",
-                ):
-                    result = enqueue_for_screening(
-                        QUEUE_DB,
-                        normalized_domains,
-                        source_run_id="csv_upload",
-                    )
-                    st.cache_data.clear()
-                    st.success(
-                        f"Added {result['queued']:,} new domains "
-                        f"({result['already_known']:,} were already in "
-                        f"the system). Total domains in system: "
-                        f"{total_domains_in_system():,}."
-                    )
+                # Also register in this corpus's own Discovered/Coverage
+                # count, not just the shared screening queue -- that's the
+                # number this page actually shows, and it must reflect the
+                # upload directly rather than a separate figure elsewhere.
+                discover_conn = ai_search_connect(SEARCH_DB)
+                try:
+                    for domain in normalized_domains:
+                        add_domain(discover_conn, domain, source="csv_upload")
+                finally:
+                    discover_conn.close()
+                st.cache_data.clear()
+                st.success(
+                    f"Added {result['queued']:,} new domains "
+                    f"({result['already_known']:,} were already in "
+                    "the system)."
+                )
 
 st.divider()
 
