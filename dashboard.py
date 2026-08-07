@@ -1676,7 +1676,33 @@ with run_id_col:
     else:
         st.caption("Showing the latest saved result for every known domain.")
 
-approved_all = read_csv_safely(LLM / "llm_approved_master.csv")
+# Confirmed live: pipeline-worker writes real Claude verdicts to BOTH the
+# shared Postgres claude_diligence table and its own local CSV mirror
+# (llm_approved_master.csv/llm_denied_master.csv) -- but only the shared
+# table is visible cross-service. Reading the local mirror directly here
+# meant the web dashboard's own Investable/Rejected-by-Claude tables stayed
+# permanently empty despite real, successful Claude calls happening on
+# pipeline-worker the whole time. query_claude_diligence() (via
+# latest_claude_results(), defined below) already reads the shared store
+# first with a local-CSV fallback -- reuse that instead of a second,
+# local-only read path.
+def _claude_master_frames() -> tuple[pd.DataFrame, pd.DataFrame]:
+    from classification_store import query_claude_diligence
+
+    shared = pd.DataFrame(query_claude_diligence())
+    if not shared.empty:
+        decisions = shared["llm_decision"].astype(str).str.upper()
+        return (
+            shared[decisions.isin(["KEEP", "MAYBE"])].copy(),
+            shared[decisions.eq("REJECT")].copy(),
+        )
+    return (
+        read_csv_safely(LLM / "llm_approved_master.csv"),
+        read_csv_safely(LLM / "llm_denied_master.csv"),
+    )
+
+
+approved_all, llm_denied = _claude_master_frames()
 verified_leads = (
     approved_all[
         approved_all.get("llm_decision", "").astype(str).str.upper() == "KEEP"
@@ -1695,7 +1721,6 @@ manual_review = (
 python_shortlist = read_csv_safely(
     FILTERED / "python_shortlist_master.csv"
 )
-llm_denied = read_csv_safely(LLM / "llm_denied_master.csv")
 python_denied = read_csv_safely(FILTERED / "python_denied_master.csv")
 
 try:
@@ -2402,9 +2427,10 @@ with tabs[0]:
 
 with tabs[1]:
     st.caption(
-        "Credible borderline companies appear here: score 25+ plus "
-        "at least one enterprise evidence dimension, or a clear enterprise "
-        "signal. Low-signal sites are excluded from this queue."
+        "Everything without an explicit factual disqualifier lands here, "
+        "regardless of score -- this is the default bucket, not a "
+        "high-conviction shortlist. Domains scoring 70+ are automatically "
+        "sent through Claude; a Claude KEEP promotes them to Investable."
     )
     render_candidate_table(
         needs_review,

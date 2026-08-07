@@ -71,10 +71,15 @@ class ReviewQualityUiFixTests(unittest.TestCase):
         self.assertIn("render_hideable_table(", self.dashboard)
 
     def test_needs_review_caption_explains_gate(self):
+        # The bucketing redesign made Needs Review the catch-all for
+        # anything without a factual disqualifier, regardless of score --
+        # a stale caption claiming a 25+ score gate misled the user into
+        # thinking a filter existed that the routing logic never applied.
         self.assertIn(
-            "score 25+ plus",
+            "regardless of score",
             self.dashboard,
         )
+        self.assertNotIn("score 25+", self.dashboard)
 
     def test_needs_review_is_not_automatically_positive_training_data(self):
         self.assertIn(
