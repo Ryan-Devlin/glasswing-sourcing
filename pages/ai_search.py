@@ -135,9 +135,15 @@ if count_classifications() == 0:
 
 
 def total_domains_in_system() -> int:
+    # psycopg's dict_row (used against Postgres) only supports name-based
+    # access, not row[0] -- SQLite's Row supports both, which is why this
+    # only broke in production. AS count + ["count"] works on both.
     conn = screening_queue_connection(QUEUE_DB)
     try:
-        return int(conn.execute("SELECT COUNT(*) FROM domains").fetchone()[0])
+        return int(
+            conn.execute("SELECT COUNT(*) AS count FROM domains")
+            .fetchone()["count"]
+        )
     finally:
         conn.close()
 
@@ -157,9 +163,7 @@ st.caption(
     "Upload a CSV of domains, any extension. New domains are added to "
     "the shared screening queue and go through the same Python scorer as "
     "every other source -- existing domains are never touched or "
-    "re-queued, so this is always additive: if the system already has "
-    "15,000 domains and you upload 20,000, it grows to at most 35,000, "
-    "and re-uploading the same file adds nothing the second time."
+    "re-queued, so this is always additive."
 )
 count_col, upload_col = st.columns([1, 2])
 with count_col:

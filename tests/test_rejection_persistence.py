@@ -29,12 +29,22 @@ class RejectionPersistenceTests(unittest.TestCase):
         # like review/comp regardless of score, or almost every ambiguous
         # domain silently vanishes before reaching the Insufficient
         # Evidence tab (confirmed live: a 600-domain batch retained zero).
+        #
+        # "reject" is protected too (2026-08-08): three buckets only, and
+        # a Python rejection must actually show up as Hard Denied, not get
+        # purged. venture_slop_risk still overrides protection regardless
+        # of bucket, including "reject" -- that's a quality signal, not
+        # something any bucket should shield a row from.
         self.assertEqual(
             screening_filter.automated_discard_mask(frame).tolist(),
-            [False, False, False, False, False, False, True, True, True, True],
+            [False, False, False, False, False, False, True, True, False, True],
         )
 
-    def test_only_manual_denial_is_persisted(self):
+    def test_all_rejections_persist_now_not_just_manual_ones(self):
+        # 2026-08-08: three buckets only -- "if something is rejected it
+        # should fall under hard denied", full stop. An automatic Python
+        # rejection and a manually-protected one now persist identically;
+        # neither gets purged down to a tombstone.
         output = pd.DataFrame([
             {
                 "domain": "automatic.ai",
@@ -85,23 +95,22 @@ class RejectionPersistenceTests(unittest.TestCase):
             patch.object(screening_filter, "atomic_write_csv"),
             patch(
                 "rejection_cleanup.purge_automated_rejections",
-                return_value={"purged_domains": 1},
+                return_value={"purged_domains": 0},
             ) as purge,
             patch.object(
                 screening_filter,
                 "record_automated_exclusions",
-                return_value=1,
+                return_value=0,
             ) as tombstone,
         ):
             screening_filter.persist_screening_output(output)
 
-        self.assertEqual(saved_frames[0]["domain"].tolist(), ["human.ai"])
         self.assertEqual(
-            list(purge.call_args.args[0]),
-            ["automatic.ai"],
+            sorted(saved_frames[0]["domain"].tolist()),
+            ["automatic.ai", "human.ai"],
         )
-        self.assertFalse(purge.call_args.kwargs["clean_csv"])
-        tombstone.assert_called_once()
+        purge.assert_not_called()
+        tombstone.assert_not_called()
 
 
 if __name__ == "__main__":

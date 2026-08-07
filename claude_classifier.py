@@ -19,6 +19,7 @@ from common import (
     FILTERED, LLM, clean, get_model, save_basket_entry, stable_domain,
     upsert_csv,
 )
+from filter import score_text
 from classification_store import upsert_claude_diligence
 from diligence_logic import (
     DILIGENCE_VERSION,
@@ -372,10 +373,36 @@ def prepare_input(
         if "diligence_rank_score" in frame.columns
         else "rule_score"
     )
-    frame["_queue_score"] = pd.to_numeric(
+    stored_score = pd.to_numeric(
         frame.get(score_column, 0),
         errors="coerce",
     ).fillna(0)
+
+    # Confirmed live: the dashboard shows a live rescore of the stored
+    # text (score_text, recomputed at display time so it reflects the
+    # current scoring logic without needing to re-persist every row) --
+    # a real company visibly scoring well above minimum_score on that
+    # live rescore was still "Not reviewed" because this gate only ever
+    # looked at diligence_rank_score, the frozen value from whenever it
+    # was first screened, which is a different formula and can be lower.
+    # Taking the higher of the two means a domain never misses Claude
+    # review just because scoring calibration has since improved. The
+    # disqualification filters above (location/non-English/placeholder/
+    # media/commodity/agency/consumer/mature) already ran before this and
+    # are untouched -- this only affects which score clears the bar.
+    website_copy = (
+        frame.get("page_title", pd.Series("", index=frame.index)).astype(str)
+        + " "
+        + frame.get("meta_description", pd.Series("", index=frame.index)).astype(str)
+        + " "
+        + frame.get("homepage_excerpt", pd.Series("", index=frame.index)).astype(str)
+    ).str.strip()
+    live_rescore = website_copy.map(
+        lambda text: score_text(text)[0] if text else 0
+    )
+    frame["_queue_score"] = pd.concat(
+        [stored_score, live_rescore], axis=1
+    ).max(axis=1)
 
     frame = frame[frame["_queue_score"] >= minimum_score].copy()
 

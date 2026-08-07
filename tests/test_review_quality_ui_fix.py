@@ -144,16 +144,19 @@ class ReviewQualityUiFixTests(unittest.TestCase):
             self.dashboard,
         )
 
-    def test_websites_checked_includes_auto_rejected_domains(self):
-        # "New domains > Classified 100% of the time" -- Websites checked
-        # must equal Investable + Needs Review + Hard Denied + the
-        # auto-rejected count, not just the three visible buckets, since
-        # purged Python rejections are invisible to all three of those.
+    def test_websites_checked_is_the_three_bucket_sum_only(self):
+        # 2026-08-08: no separate "auto-rejected" concept -- a Python
+        # "reject" is retained and counted as real Hard Denied now (see
+        # automated_discard_mask in filter.py), so the three visible
+        # buckets are the complete picture again on their own.
         self.assertIn(
-            "len(investable_candidates)\n    + len(needs_review)\n"
-            "    + len(hard_denied)\n    + funnel_auto_rejected",
+            "funnel_screened = (\n"
+            "    len(investable_candidates) + len(needs_review) + len(hard_denied)\n"
+            ")",
             self.dashboard,
         )
+        self.assertNotIn("auto_rejected", self.dashboard)
+        self.assertNotIn("Auto-rejected", self.dashboard)
         # The old duplicate "Classified" metric (a separate worker-side
         # counter that could show a different number than the funnel's
         # own "Websites checked") is gone -- one definition, not two.

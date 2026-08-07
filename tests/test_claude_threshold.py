@@ -69,6 +69,47 @@ class ClaudeThresholdTests(unittest.TestCase):
         self.assertEqual(set(selected.domain), {"fifty-one.ai", "ninety.ai"})
         self.assertEqual(stats["eligible_above_score"], 2)
 
+    def test_live_rescore_rescues_a_domain_with_a_stale_low_score(self):
+        # Confirmed live: a real company (page_title "Abrient -- Sovereign
+        # AI for Life & Annuity") visibly scored 84 on the dashboard's own
+        # live rescore of the same stored text, but was "Not reviewed" --
+        # diligence_rank_score (a different, frozen formula from whenever
+        # it was first screened) was below minimum_score. The live rescore
+        # must rescue it: never miss Claude review just because scoring
+        # calibration has since improved.
+        selected, _ = self.prepare([
+            {
+                "domain": "abrient.ai",
+                "diligence_rank_score": 40,
+                "rule_score": 40,
+                "location_status": "US",
+                "page_title": "Abrient — Sovereign AI for Life & Annuity",
+                "meta_description": (
+                    "Abrient is agent infrastructure for life and "
+                    "annuity carriers. Our inference infrastructure and "
+                    "model serving platform gives insurance operations "
+                    "teams AI observability into underwriting automation "
+                    "workflows."
+                ),
+                "homepage_excerpt": (
+                    "Customers deploy our production API to reduce "
+                    "manual processing time and integrate with core "
+                    "policy systems."
+                ),
+            },
+            {
+                "domain": "genuinely-low.ai",
+                "diligence_rank_score": 40,
+                "rule_score": 40,
+                "location_status": "US",
+                "page_title": "genuinely-low.ai",
+                "meta_description": "",
+                "homepage_excerpt": "",
+            },
+        ])
+        self.assertIn("abrient.ai", selected.domain.tolist())
+        self.assertNotIn("genuinely-low.ai", selected.domain.tolist())
+
     def test_legacy_uncapped_disqualifier_does_not_consume_claude_call(self):
         selected, _ = self.prepare([
             {

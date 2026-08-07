@@ -101,22 +101,10 @@ class ScreeningBatchTimeoutTests(unittest.TestCase):
         self.assertIn("mark_success(conn, succeeded_domains)", before_except)
         self.assertIn("mark_failure(", before_except)
 
-    def test_auto_rejected_domains_are_not_dropped_from_every_total(self):
-        # Confirmed live: "New domains > Classified 100% of the time" --
-        # parked/agency/non-US/etc. domains get purged down to a minimal
-        # tombstone right after Python routes them "reject", so they never
-        # reach the classifications store and are invisible to all three
-        # visible-bucket frames. Without accumulating storage_discarded
-        # into a real cumulative counter, Investable + Needs Review + Hard
-        # Denied structurally undercounts Websites checked by exactly that
-        # many domains, and the two numbers can never reconcile.
-        self.assertIn(
-            'auto_rejected = (\n'
-            '                int(status.get("auto_rejected", 0) or 0)\n'
-            '                + int(screening_stats.get("storage_discarded", 0) or 0)',
-            self.pipeline,
-        )
-        write_status_call = self.pipeline.split(
-            "write_status(\n                processed=processed,", 1
-        )[1].split(")\n", 1)[0]
-        self.assertIn("auto_rejected=auto_rejected", write_status_call)
+    def test_no_separate_auto_rejected_counter(self):
+        # 2026-08-08: reverted -- a Python "reject" is retained and shows
+        # up as real Hard Denied now (see automated_discard_mask in
+        # filter.py), so there is no separate "auto-rejected" concept for
+        # the worker to track. Three buckets only, no fourth accounting
+        # category standing in for one of them behind the scenes.
+        self.assertNotIn("auto_rejected", self.pipeline)

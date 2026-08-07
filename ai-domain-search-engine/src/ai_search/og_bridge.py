@@ -347,19 +347,23 @@ def pipeline_status_for_corpus(
             """).fetchall()
             result = {str(row["status"]): int(row["count"]) for row in rows}
         result["in_screening_registry"] = sum(result.values())
+        # psycopg's dict_row (the row factory this cross-backend/Postgres
+        # path actually uses, per row["status"]/row["count"] just above)
+        # only supports name-based access, not row[0] -- AS count +
+        # ["count"] works regardless of backend.
         if queue_ready:
             result["not_queued"] = int(conn.execute(f"""
-                SELECT count(*) FROM search_corpus.domains s
+                SELECT count(*) AS count FROM search_corpus.domains s
                 WHERE 1=1 {crawl_filter}
                 AND
                 NOT EXISTS (
                     SELECT 1 FROM domains q WHERE q.domain=s.domain
                 )
-            """).fetchone()[0])
+            """).fetchone()["count"])
         else:
             result["not_queued"] = int(conn.execute(f"""
-                SELECT count(*) FROM search_corpus.domains s WHERE 1=1 {crawl_filter}
-            """).fetchone()[0])
+                SELECT count(*) AS count FROM search_corpus.domains s WHERE 1=1 {crawl_filter}
+            """).fetchone()["count"])
         return result
     finally:
         conn.close()

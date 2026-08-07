@@ -4412,11 +4412,18 @@ def automated_discard_mask(output: pd.DataFrame) -> pd.Series:
     # routing_bucket via a manual override now, which is already separately
     # protected via manually_protected below -- kept here too as a second,
     # harmless line of defense against ever silently purging one.
+    #
+    # "reject" is protected too (2026-08-08): there are only 3 buckets --
+    # Investable, Needs Review, Hard Denied. If Python rejects a domain, it
+    # must actually show up as Hard Denied, not get purged down to a
+    # tombstone while a separate "auto-rejected" counter tries to account
+    # for it after the fact. Only "ghost" (a genuinely blank/unreachable
+    # page -- nothing to review either way) still gets purged.
     protected_buckets = buckets.isin(
-        {"priority", "coming_soon", "review", "comp", "insufficient"}
+        {"priority", "coming_soon", "review", "comp", "insufficient", "reject"}
     )
     return (
-        buckets.isin({"reject", "ghost"})
+        buckets.isin({"ghost"})
         | slop
         | ((ratings < retention_minimum_rating()) & ~protected_buckets)
     )
