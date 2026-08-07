@@ -89,8 +89,8 @@ class BasketRoutingTests(unittest.TestCase):
         })
 
     def test_official_portfolio_seed_is_reviewed_and_unique(self):
-        self.assertEqual(len(GLASSWING_PORTFOLIO_DOMAINS), 61)
-        self.assertEqual(len(set(GLASSWING_PORTFOLIO_DOMAINS)), 61)
+        self.assertEqual(len(GLASSWING_PORTFOLIO_DOMAINS), 62)
+        self.assertEqual(len(set(GLASSWING_PORTFOLIO_DOMAINS)), 62)
         self.assertEqual(len(GLASSWING_PORTFOLIO_EXCLUSIONS), 0)
         self.assertTrue({
             "atlantic-quantum.com",

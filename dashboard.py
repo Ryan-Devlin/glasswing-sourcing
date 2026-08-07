@@ -231,12 +231,6 @@ DEFAULT_RUN_CONFIG = {
     "scraper_workers": 28,
     "scrape_timeout": 6,
     "require_us_evidence": False,
-    "auto_claude": True,
-    "claude_minimum_score": 70,
-    "claude_batch_max": 3,
-    "claude_hourly_limit": 3,
-    "claude_daily_limit": 12,
-    "claude_percentage_cap": 0.10,
     "exceptional_score": 84,
 }
 
@@ -1335,57 +1329,14 @@ with st.expander("Run Filters", expanded=not running):
         "timeouts."
     )
 
-    st.markdown("##### Claude budget")
-    claude_left, claude_mid, claude_right = st.columns(3)
-    with claude_left:
-        saved_claude_threshold = max(
-            0,
-            min(100, int(saved_config.get("claude_minimum_score", 70))),
-        )
-        auto_claude = st.checkbox(
-            "Automatically diligence companies at or above the Claude threshold",
-            value=bool(saved_config.get("auto_claude", True)),
-            disabled=running,
-        )
-        claude_minimum_score = st.slider(
-            "Claude minimum score",
-            min_value=0,
-            max_value=100,
-            value=saved_claude_threshold,
-            step=1,
-            disabled=running or not auto_claude,
-        )
-        if auto_claude:
-            st.caption(
-                f"Claude will review every score ≥ {int(claude_minimum_score)}."
-            )
-        claude_batch_max = st.number_input(
-            "Maximum per processed batch",
-            min_value=0,
-            max_value=10,
-            value=int(saved_config.get("claude_batch_max", 1)),
-            disabled=running or not auto_claude,
-        )
-    with claude_mid:
-        claude_hourly_limit = st.number_input(
-            "Maximum per hour",
-            min_value=0,
-            max_value=100,
-            value=int(
-                saved_config.get("claude_hourly_limit", 3)
-            ),
-            disabled=running or not auto_claude,
-        )
-    with claude_right:
-        claude_daily_limit = st.number_input(
-            "Maximum per day",
-            min_value=0,
-            max_value=500,
-            value=int(
-                saved_config.get("claude_daily_limit", 12)
-            ),
-            disabled=running or not auto_claude,
-        )
+    st.markdown("##### Claude diligence")
+    st.caption(
+        "Fixed, not user-editable: any Needs Review company scoring 70+ "
+        "is sent to Claude automatically. Claude's KEEP decision is the "
+        "only way a company becomes Investable; REJECT confirms Hard "
+        "Denied. There is a fixed daily/hourly call budget so this can "
+        "never run away on cost."
+    )
 
 run_config = {
     "selected_extensions": list(selected_extensions),
@@ -1410,13 +1361,6 @@ run_config = {
     "scraper_workers": int(scraper_workers),
     "scrape_timeout": int(scrape_timeout),
     "require_us_evidence": bool(require_us_evidence),
-    "auto_claude": bool(auto_claude),
-    "claude_minimum_score": int(claude_minimum_score),
-    "claude_batch_max": int(claude_batch_max),
-    "claude_hourly_limit": int(claude_hourly_limit),
-    "claude_daily_limit": int(claude_daily_limit),
-    "claude_percentage_cap": 1.0,
-    "claude_exceptional_score": 80,
 }
 
 start_col, stop_col, reset_col, status_col = st.columns(

@@ -366,5 +366,52 @@ class ClaudeDecisionViewsTests(unittest.TestCase):
         )
 
 
+class ClaudePipelineIsFixedNotEditableTests(unittest.TestCase):
+    """"I don't want users to be able to edit the Claude stuff" -- the
+    score gate and budget are fixed constants in code, not a dashboard
+    setting or a shared-config lookup."""
+
+    def test_allowance_ignores_run_config_entirely(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("CREATE TABLE claude_calls (called_at TEXT, domain TEXT)")
+        conn.commit()
+        # No load_run_config() call at all -- even a config that would have
+        # disabled Claude under the old auto_claude toggle must not matter.
+        with patch.object(
+            continuous_pipeline, "load_run_config",
+            return_value={"auto_claude": False, "claude_hourly_limit": 0},
+        ):
+            allowance = continuous_pipeline.claude_allowance(conn)
+        self.assertEqual(allowance, continuous_pipeline.CLAUDE_HOURLY_LIMIT)
+
+    def test_fixed_constants_match_the_specified_pipeline(self):
+        self.assertEqual(continuous_pipeline.CLAUDE_MINIMUM_SCORE, 70)
+        self.assertGreater(
+            continuous_pipeline.CLAUDE_EXCEPTIONAL_SCORE,
+            continuous_pipeline.CLAUDE_MINIMUM_SCORE,
+        )
+
+    def test_maybe_run_claude_command_uses_fixed_constants(self):
+        source = Path("continuous_pipeline.py").read_text(encoding="utf-8")
+        body = source.split("def maybe_run_claude(", 1)[1].split(
+            "\ndef ", 1
+        )[0]
+        self.assertIn("str(CLAUDE_MINIMUM_SCORE)", body)
+        self.assertIn("str(CLAUDE_EXCEPTIONAL_SCORE)", body)
+        self.assertIn("CLAUDE_BATCH_MAX", body)
+        self.assertNotIn('config.get("claude_', body)
+        self.assertNotIn('config.get("auto_claude"', body)
+
+    def test_dashboard_has_no_editable_claude_controls(self):
+        dashboard = Path("dashboard.py").read_text(encoding="utf-8")
+        self.assertNotIn("Claude minimum score", dashboard)
+        self.assertNotIn("claude_minimum_score", dashboard)
+        self.assertNotIn("claude_hourly_limit", dashboard)
+        self.assertNotIn("claude_daily_limit", dashboard)
+        self.assertNotIn("claude_batch_max", dashboard)
+        self.assertIn("Fixed, not user-editable", dashboard)
+
+
 if __name__ == "__main__":
     unittest.main()

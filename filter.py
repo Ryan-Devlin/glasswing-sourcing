@@ -373,6 +373,12 @@ PARKED = [
     "parked domain", "parked by the owner", "is currently parked",
     "parked free", "domain is parked", "may be for sale on the",
     "speeder marketplace", "browse other businesses for sale",
+    # Generic ad-supported domain-parking/SEO-filler templates -- the
+    # actual site name gets interpolated into the template, but the
+    # surrounding boilerplate phrase itself is a fixed, real signal.
+    "your first and best source for information about",
+    "find the best information and most relevant links",
+    "here you will also find topics relating to issues of general interest",
 ]
 
 DOMAIN_SALE_PATTERNS = [
@@ -458,6 +464,18 @@ B2C_USE_CASE = [
     "fitness coach", "wellness coach", "personal finance assistant",
     "sports betting picks", "betting picks", "fan loyalty game",
     "loyalty arena", "personal trading assistant",
+    # Confirmed live (2026-08-08): real consumer apps with none of the
+    # vocabulary above -- habit tracking, personal money transfer, a
+    # reading/news personalization app, a cannabis lifestyle guide, and a
+    # message-tone checker -- all scored 0 and were indistinguishable from
+    # a real B2B product with this list as it stood.
+    "habit tracker", "habit tracking", "track your habits",
+    "build better habits", "earn xp", "track habits",
+    "instant funds transfer", "send money to friends",
+    "money transfer app", "peer-to-peer payments",
+    "read smarter, not harder", "personalized reading",
+    "cannabis guide", "dispensary finder", "strain guide",
+    "how your message sounds", "message tone checker",
 ]
 
 MEDIA_NEWSLETTER = [
@@ -1633,6 +1651,13 @@ def media_newsletter_assessment(text: str) -> tuple[bool, list[str]]:
         "this is my personal site", "i'm a freelance", "i am a freelance",
         "freelance portfolio", "my resume", "hire me",
         "thanks for visiting my site",
+        # A hobby open-source project, not a company to invest in --
+        # confirmed live: "A modern open-source CRM" (an OSS client for an
+        # existing project) reached Needs Review with nothing to evaluate.
+        # An open-core company still survives this: it pairs the same
+        # phrase with real company_signals (pricing/enterprise/customers).
+        "open-source", "open source project", "fully open-source",
+        "is open source", "an open-source alternative",
     ]
     company_signals = [
         "our platform", "our product", "our customers", "our team",
@@ -1643,7 +1668,33 @@ def media_newsletter_assessment(text: str) -> tuple[bool, list[str]]:
         term for term in personal_site_terms if term in leading_copy
     ]
     company_hits = [term for term in company_signals if term in lower]
-    is_personal_site = bool(personal_site_hits) and not company_hits
+
+    # Terse personal-bio openers (a bare job title as the entire identity,
+    # no explicit "my portfolio"/"hire me" self-identification at all) --
+    # confirmed live: "Full stack engineer. Builder of systems that run."
+    # and "Frontend engineer building scalable platforms. Currently at
+    # Dream11, serving 150M+ users." are real examples the checks above
+    # missed. Gated on very short overall content so a real careers page
+    # (much longer -- describes the company, role, and benefits) can't
+    # accidentally match.
+    word_count = len(lower.split())
+    job_title_bio = bool(
+        re.search(
+            r"\b(?:senior |lead |staff |principal |junior )?"
+            r"(?:full[\s-]?stack|frontend|front-end|backend|back-end|"
+            r"software|mobile|ios|android|devops|platform|systems?)"
+            r" engineer(?:ing consultant)?\b",
+            leading_copy,
+        )
+        and word_count <= 40
+        and not company_hits
+    )
+    if job_title_bio:
+        personal_site_hits.append("bare job title bio, no company framing")
+
+    is_personal_site = (
+        bool(personal_site_hits) or job_title_bio
+    ) and not company_hits
 
     is_media = (
         bool(education_identity_hits)
@@ -3633,7 +3684,9 @@ async def process(
         )
 
         substantive_no_fit_evidence = bool(
-            domain not in set(GLASSWING_PORTFOLIO_DOMAINS)
+            domain not in {
+                stable_domain(item) for item in GLASSWING_PORTFOLIO_DOMAINS
+            }
             and
             not page.error
             and page.status is not None

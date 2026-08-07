@@ -93,6 +93,17 @@ _last_shared_status_publish = 0.0
 _shared_config_checked_at = 0.0
 _shared_config_cache: dict[str, object] = {}
 
+# Claude diligence pipeline (2026-08-08): fixed, not user-editable. A Needs
+# Review company only ever reaches Claude at score 70+; KEEP is the only
+# decision that ever becomes Investable. No dashboard toggle disables this
+# -- "the website should be as easy as possible to use" means one correct
+# pipeline, not a budget knob someone has to remember to tune.
+CLAUDE_MINIMUM_SCORE = 70
+CLAUDE_EXCEPTIONAL_SCORE = 90
+CLAUDE_BATCH_MAX = 10
+CLAUDE_HOURLY_LIMIT = 60
+CLAUDE_DAILY_LIMIT = 400
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -1013,10 +1024,6 @@ def load_run_config() -> dict:
         return {}
 
 def claude_allowance(conn: sqlite3.Connection) -> int:
-    config = load_run_config()
-    if not bool(config.get("auto_claude", True)):
-        return 0
-
     now = datetime.now(timezone.utc)
     hour_cutoff = (
         now - timedelta(hours=1)
@@ -1033,22 +1040,20 @@ def claude_allowance(conn: sqlite3.Connection) -> int:
         (day_cutoff,),
     ).fetchone()["count"]
 
-    hourly_limit = int(config.get("claude_hourly_limit", 3))
-    daily_limit = int(config.get("claude_daily_limit", 12))
     allowance = max(
         0,
         min(
-            hourly_limit - hour_count,
-            daily_limit - day_count,
+            CLAUDE_HOURLY_LIMIT - hour_count,
+            CLAUDE_DAILY_LIMIT - day_count,
         ),
     )
-    if allowance <= 0 and bool(config.get("auto_claude", True)):
+    if allowance <= 0:
         write_status(
             claude_warning=(
-                "Auto-Claude is paused by its budget: "
-                f"{hour_count}/{hourly_limit} calls this hour and "
-                f"{day_count}/{daily_limit} calls today. "
-                "Raise the Claude hourly/daily limits after stopping the run."
+                "Claude diligence is paused by its fixed budget: "
+                f"{hour_count}/{CLAUDE_HOURLY_LIMIT} calls this hour and "
+                f"{day_count}/{CLAUDE_DAILY_LIMIT} calls today. Resumes "
+                "automatically once the window rolls over."
             ),
             updated_at=utc_now(),
         )
@@ -1096,16 +1101,7 @@ def maybe_run_claude(batch_path: Path) -> int:
         if not candidates.exists() or candidates.stat().st_size == 0:
             return 0
 
-        config = load_run_config()
-        minimum_score = str(config.get("claude_minimum_score", 70))
-        exceptional_score = str(
-            int(config.get("claude_exceptional_score", 80))
-        )
-        cap = "1.0"
-        calls = min(
-            allowance,
-            int(config.get("claude_batch_max", 1)),
-        )
+        calls = min(allowance, CLAUDE_BATCH_MAX)
         if calls <= 0:
             return 0
 
@@ -1114,11 +1110,11 @@ def maybe_run_claude(batch_path: Path) -> int:
             "claude_classifier.py",
             str(candidates),
             "--minimum-score",
-            minimum_score,
+            str(CLAUDE_MINIMUM_SCORE),
             "--exceptional-score",
-            exceptional_score,
+            str(CLAUDE_EXCEPTIONAL_SCORE),
             "--percentage-cap",
-            cap,
+            "1.0",
             "--max-calls",
             str(calls),
         ]

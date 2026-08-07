@@ -7,6 +7,7 @@ even when Glasswing's current card points to an acquirer or social profile.
 
 GLASSWING_PORTFOLIO_DOMAINS = (
     "alluresecurity.com",
+    "neyon.ai",
     "asepha.ai",
     "basetwo.ai",
     "beacon.dev",

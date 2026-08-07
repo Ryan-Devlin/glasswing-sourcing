@@ -4,6 +4,7 @@ from pathlib import Path
 
 from filter import (
     agency_assessment,
+    b2c_assessment,
     explicit_non_us_identity_assessment,
     high_conviction_fit_assessment,
     hosting_provider_assessment,
@@ -174,6 +175,70 @@ class RuleCalibrationTests(unittest.TestCase):
         )
         self.assertFalse(founder_site)
 
+    def test_bare_job_title_bio_is_a_personal_site_not_a_company(self):
+        # Confirmed live: real examples with no explicit "my portfolio" /
+        # "hire me" self-identification at all -- just a bare job title as
+        # the entire visible content -- were landing in Needs Review as if
+        # they were real companies to screen.
+        engineer_bio, evidence = media_newsletter_assessment(
+            "Full stack engineer. Builder of systems that run."
+        )
+        self.assertTrue(engineer_bio)
+        self.assertIn("bare job title bio, no company framing", evidence)
+
+        consultant_bio, _ = media_newsletter_assessment(
+            "Frontend engineer building scalable platforms. Currently at "
+            "Dream11, serving 150M+ users."
+        )
+        self.assertTrue(consultant_bio)
+
+    def test_habit_tracker_consumer_app_is_caught(self):
+        # Confirmed live: real consumer apps (habit tracking, personal
+        # money transfer, a reading app, a cannabis guide, a message-tone
+        # checker) all scored 0 on b2c_assessment -- none of their real
+        # vocabulary was in B2C_USE_CASE at all.
+        is_junk, score, evidence = b2c_assessment(
+            "Upmode - Track habits. Earn XP. Upmode is a free habit "
+            "tracker with XP and levels. Track your daily habits, earn "
+            "XP, and level up. Make discipline measurable."
+        )
+        self.assertTrue(is_junk)
+        self.assertIn("habit tracker", evidence)
+
+    def test_hobby_open_source_project_is_not_a_company(self):
+        # Confirmed live: "A modern open-source CRM" (an OSS client, no
+        # pricing/customers/team anywhere) reached Needs Review with
+        # nothing an investor could actually evaluate.
+        oss_project, evidence = media_newsletter_assessment(
+            "Twenty. A modern open-source CRM."
+        )
+        self.assertTrue(oss_project)
+        self.assertIn("open-source", evidence)
+
+    def test_open_core_company_with_pricing_is_not_flagged(self):
+        # An open-core company is a real, investable business even though
+        # it also describes itself as open-source -- company_signals
+        # (pricing/enterprise/customers) must keep this one out.
+        open_core, _ = media_newsletter_assessment(
+            "Our open-source platform is trusted by enterprise customers "
+            "worldwide. Our team offers pricing plans for every stage, "
+            "with case studies from our largest customers."
+        )
+        self.assertFalse(open_core)
+
+    def test_careers_page_job_title_is_not_a_personal_site(self):
+        # The job-title-bio check must not fire on a real company's careers
+        # page just because it mentions an engineering role -- it's much
+        # longer and carries real company framing (pricing/team/customers).
+        careers_page, _ = media_newsletter_assessment(
+            "We're hiring a Senior Software Engineer to join our team. "
+            "Our platform serves thousands of customers with enterprise "
+            "pricing plans, and this role will help scale our product "
+            "across every stage of our growing company. Apply today to "
+            "join our team and help build the future of our platform."
+        )
+        self.assertFalse(careers_page)
+
     def test_positive_fit_requires_a_phrase_bundle(self):
         matched, evidence = high_conviction_fit_assessment(
             "Evaluation infrastructure for application-layer robotics with "
@@ -234,6 +299,25 @@ class RuleCalibrationTests(unittest.TestCase):
         text = (
             "This domain name has been registered with Gandi.net. It is "
             "currently parked by the owner."
+        )
+        detected, reason, _ = placeholder_assessment(
+            text,
+            word_count=len(text.split()),
+        )
+        self.assertTrue(detected)
+        self.assertEqual(reason, "parked_or_for_sale")
+
+    def test_generic_domain_aggregator_template_is_caught(self):
+        # Confirmed live: real examples like "asteriskrd.app is your first
+        # and best source for information about asteriskrd" and "Find the
+        # best information and most relevant links on all topics related
+        # to..." are ad-supported SEO-filler parking templates, not real
+        # content, but didn't match any existing parked/placeholder phrase.
+        text = (
+            "asteriskrd.app is your first and best source for information "
+            "about asteriskrd. Here you will also find topics relating to "
+            "issues of general interest. We hope you find what you are "
+            "looking for!"
         )
         detected, reason, _ = placeholder_assessment(
             text,
