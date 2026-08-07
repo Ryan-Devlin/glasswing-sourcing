@@ -6,6 +6,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+from common import stable_domain
 from db_backend import PostgresConnection, connect_postgres
 from db_backend import using_postgres as _using_postgres
 
@@ -464,6 +465,17 @@ def enqueue_for_screening(
     requeue_existing: bool = False,
 ) -> dict[str, int]:
     """Insert only unknown domains; preserve every existing queue record."""
+    # Normalize here, not just at each call site -- register_domain_event
+    # (the other entry point into this same queue) already normalizes on
+    # its own, and this function must guarantee the same regardless of
+    # what any caller passes in. An un-normalized variant ("Www.Foo.com"
+    # vs "foo.com") would otherwise pass this function's own dedup
+    # (dict.fromkeys on the raw strings) and insert as a second row for
+    # what is really the same domain, inflating the total domain count.
+    domains = [
+        domain for domain in (stable_domain(value) for value in domains)
+        if domain
+    ]
     if not domains:
         return {"requested": 0, "queued": 0, "already_known": 0}
     conn = screening_queue_connection(queue_db)

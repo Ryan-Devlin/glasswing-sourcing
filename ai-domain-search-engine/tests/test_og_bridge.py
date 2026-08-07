@@ -133,6 +133,31 @@ def test_successful_new_crawl_requeues_stale_ghost(tmp_path):
     assert row == ("pending", 0, "")
 
 
+def test_enqueue_normalizes_so_variants_never_double_count(tmp_path):
+    # register_domain_event (the other entry point into this same queue)
+    # already normalizes on its own -- this function must guarantee the
+    # same regardless of what any caller passes in, or "Www.Foo.com" and
+    # "foo.com/" pass this function's own dedup (dict.fromkeys on the raw
+    # strings) as two different domains and insert as two rows for what
+    # is really the same one, inflating the total domain count.
+    queue_db = tmp_path / "queue.sqlite3"
+    create_queue(queue_db).close()
+
+    result = enqueue_for_screening(
+        queue_db,
+        ["Www.Foo.com", "https://foo.com/", "foo.com", "bar.io"],
+    )
+
+    assert result["queued"] == 2
+    queue_conn = sqlite3.connect(queue_db)
+    domains = {
+        row[0] for row in
+        queue_conn.execute("SELECT domain FROM domains").fetchall()
+    }
+    queue_conn.close()
+    assert domains == {"foo.com", "bar.io"}
+
+
 def test_direct_classification_completes_canonical_queue_record(tmp_path):
     queue_db = tmp_path / "queue.sqlite3"
     queue_conn = create_queue(queue_db)
