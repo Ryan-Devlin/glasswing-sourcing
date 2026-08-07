@@ -39,6 +39,7 @@ class Settings:
     max_response_bytes: int
     minimum_free_gb: float
     retain_raw_html: bool
+    html_archive_minimum_score: int
     html_archive: Path
     max_pages_per_domain: int
     max_crawl_priority: int
@@ -129,6 +130,14 @@ def load_settings() -> Settings:
             "ZONE_UNIVERSE_RETAIN_RAW_HTML",
             "0",
         ).strip().lower() not in {"0", "false", "no"},
+        # At this scale (~170M .com/.app names), archiving raw HTML for
+        # every single crawl is not viable -- only domains that clear this
+        # Python rule-based score get the raw HTML actually archived.
+        # Metadata (title/description/cleaned_text) is always saved
+        # regardless, since scoring itself depends on it.
+        html_archive_minimum_score=int(
+            os.getenv("ZONE_UNIVERSE_HTML_ARCHIVE_MINIMUM_SCORE", "75")
+        ),
         html_archive=Path(
             os.getenv("ZONE_UNIVERSE_HTML_ARCHIVE", str(HTML_ARCHIVE))
         ).expanduser(),

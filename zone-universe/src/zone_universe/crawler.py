@@ -934,7 +934,7 @@ async def classify_cached_successes(
         persist=True,
     )
     if output.empty:
-        return {"classified": 0, **result}
+        return {"classified": 0, "scores": {}, **result}
     from classification_store import classification_map
 
     classifications = classification_map(domains)
@@ -945,9 +945,23 @@ async def classify_cached_successes(
     from ai_search.og_bridge import complete_screening_records
 
     complete_screening_records(settings.screening_queue, classifications)
+    # Caller (crawl_once) uses this to decide which successful crawls are
+    # worth backfilling a raw HTML archive for -- see
+    # html_archive_minimum_score. Real venture-quality score, not a
+    # display-only recompute.
+    import pandas as pd
+
+    scores = dict(zip(
+        output["domain"],
+        pd.to_numeric(
+            output.get("diligence_rank_score", output.get("rule_score", 0)),
+            errors="coerce",
+        ).fillna(0).astype(int),
+    ))
     return {
         "classified": len(classifications),
         "registration_queued": registration_queued,
+        "scores": scores,
         **result,
     }
 
@@ -1202,10 +1216,17 @@ async def crawl_once(
         conn.execute("BEGIN IMMEDIATE")
     for outcome in outcomes:
         if outcome.status == "success":
+            # Always defer raw HTML at this point, regardless of
+            # settings.retain_raw_html -- at ~170M .com/.app names,
+            # archiving every crawl outright isn't viable. Metadata
+            # (title/description/cleaned_text) is saved unconditionally
+            # either way, since scoring itself depends on it; the actual
+            # HTML bytes only get backfilled below for domains that clear
+            # html_archive_minimum_score.
             save_success(
                 conn,
                 outcome,
-                retain_raw_html=settings.retain_raw_html,
+                retain_raw_html=False,
                 archive_root=settings.html_archive,
             )
         update_retry_state(
@@ -1310,6 +1331,29 @@ async def crawl_once(
             settings,
         )
         set_state(conn, "last_python_classification", classification)
+        if settings.retain_raw_html:
+            scores = classification.get("scores", {})
+            archived = 0
+            for outcome in outcomes:
+                if outcome.status != "success":
+                    continue
+                if scores.get(outcome.domain, 0) < settings.html_archive_minimum_score:
+                    continue
+                # Re-saving with retain_raw_html=True is intentionally the
+                # same save_success() path as the initial (deferred) save
+                # -- ON CONFLICT(domain) DO UPDATE means this just fills in
+                # the archive-pointer columns that were left empty above,
+                # for this one domain that actually cleared the bar.
+                save_success(
+                    conn,
+                    outcome,
+                    retain_raw_html=True,
+                    archive_root=settings.html_archive,
+                )
+                archived += 1
+            if archived:
+                conn.commit()
+            set_state(conn, "last_batch_html_archived", archived)
     except Exception as exc:
         set_state(
             conn,
