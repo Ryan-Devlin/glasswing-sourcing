@@ -95,14 +95,14 @@ _shared_config_checked_at = 0.0
 _shared_config_cache: dict[str, object] = {}
 
 # Claude diligence pipeline (2026-08-08): fixed, not user-editable. A Needs
-# Review company only ever reaches Claude at score 70+; KEEP is the only
+# Review company only ever reaches Claude at score 60+; KEEP is the only
 # decision that ever becomes Investable. No dashboard toggle disables this
 # -- "the website should be as easy as possible to use" means one correct
 # pipeline, not a budget knob someone has to remember to tune.
-CLAUDE_MINIMUM_SCORE = 70
+CLAUDE_MINIMUM_SCORE = 60
 CLAUDE_EXCEPTIONAL_SCORE = 90
 CLAUDE_BATCH_MAX = 10
-CLAUDE_HOURLY_LIMIT = 60
+CLAUDE_HOURLY_LIMIT = 100
 CLAUDE_DAILY_LIMIT = 400
 
 def utc_now() -> str:

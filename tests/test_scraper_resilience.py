@@ -386,7 +386,7 @@ class ClaudePipelineIsFixedNotEditableTests(unittest.TestCase):
         self.assertEqual(allowance, continuous_pipeline.CLAUDE_HOURLY_LIMIT)
 
     def test_fixed_constants_match_the_specified_pipeline(self):
-        self.assertEqual(continuous_pipeline.CLAUDE_MINIMUM_SCORE, 70)
+        self.assertEqual(continuous_pipeline.CLAUDE_MINIMUM_SCORE, 60)
         self.assertGreater(
             continuous_pipeline.CLAUDE_EXCEPTIONAL_SCORE,
             continuous_pipeline.CLAUDE_MINIMUM_SCORE,
