@@ -31,6 +31,13 @@ def test_upload_normalizes_and_dedupes_before_enqueueing():
     assert "seen_domains" in upload_section
 
 
+def test_upload_accepts_plain_txt_domain_lists_too():
+    ai_search = Path("pages/ai_search.py").read_text(encoding="utf-8")
+    assert '"csv", "txt"' in ai_search
+    upload_section = ai_search.split("def domain_column_in(", 1)[1]
+    assert 'endswith(".txt")' in upload_section
+
+
 def test_domain_column_detection_accepts_common_header_names():
     ai_search = Path("pages/ai_search.py").read_text(encoding="utf-8")
     body = ai_search.split("def domain_column_in(", 1)[1].split(

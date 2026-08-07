@@ -145,25 +145,36 @@ def domain_column_in(frame: pd.DataFrame) -> str | None:
 
 st.markdown("#### Upload domains")
 st.caption(
-    "Upload a CSV of domains, any extension. New domains are added to "
-    "the Discovered count below and go through the same Python scorer "
-    "as every other source -- existing domains are never touched or "
-    "re-queued, so this is always additive. Coverage will drop below "
-    "100% right after an upload, since the newly-added domains haven't "
-    "been crawled yet."
+    "Upload a CSV or plain text list of domains, any extension. New "
+    "domains are added to the Discovered count below and go through "
+    "the same Python scorer as every other source -- existing domains "
+    "are never touched or re-queued, so this is always additive. "
+    "Coverage will drop below 100% right after an upload, since the "
+    "newly-added domains haven't been crawled yet."
 )
 uploaded_csv = st.file_uploader(
-    "CSV file",
-    type=["csv"],
+    "CSV or TXT file",
+    type=["csv", "txt"],
     key="domain_csv_uploader",
     label_visibility="collapsed",
 )
 if uploaded_csv is not None:
     try:
-        uploaded_frame = pd.read_csv(uploaded_csv, dtype=str)
+        if uploaded_csv.name.lower().endswith(".txt"):
+            # A plain domain-per-line list has no header row to key off
+            # of -- reading it as one unnamed column keeps every line as
+            # data instead of losing the first domain to a phantom header.
+            lines = uploaded_csv.read().decode(
+                "utf-8", errors="ignore"
+            ).splitlines()
+            uploaded_frame = pd.DataFrame(
+                {"domain": [line.strip() for line in lines if line.strip()]}
+            )
+        else:
+            uploaded_frame = pd.read_csv(uploaded_csv, dtype=str)
     except Exception as exc:
         uploaded_frame = None
-        st.error(f"Could not read that CSV: {type(exc).__name__}: {exc}")
+        st.error(f"Could not read that file: {type(exc).__name__}: {exc}")
 
     if uploaded_frame is not None and not uploaded_frame.empty:
         domain_column = domain_column_in(uploaded_frame)
