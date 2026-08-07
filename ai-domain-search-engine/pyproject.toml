@@ -14,7 +14,7 @@ dependencies = [
   "python-dotenv>=1.0,<2",
   "streamlit>=1.46,<2",
   "streamlit-autorefresh>=1.0.1,<2",
-  "websockets>=12,<17",
+  "websockets>=12,<18",
 ]
 
 [project.optional-dependencies]
