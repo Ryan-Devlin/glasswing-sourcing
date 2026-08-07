@@ -367,6 +367,18 @@ def prepare_input(
             regex=True,
         )
         frame = frame[~capped_reason].copy()
+    if "content_source" in frame.columns:
+        # Zone Universe's .com/.app zone crawl is orders of magnitude
+        # larger than every other source combined (~170M candidate
+        # domains) -- explicit user direction: that dataset never goes to
+        # Claude, Python rule-based scoring is enough given the volume.
+        # content_source reflects where the page content was actually
+        # fetched from (zone_universe's own cache), which only ever
+        # matches for .com/.app domains zone_universe has crawled -- a
+        # CertStream .ai domain can never collide with that cache.
+        frame = frame[
+            frame["content_source"] != "zone_universe_cache"
+        ].copy()
 
     score_column = (
         "diligence_rank_score"
