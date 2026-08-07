@@ -334,15 +334,19 @@ with tabs[1]:
         SEARCH_DB, QUEUE_DB, crawled_only=True
     )
     raw_bucket_counts = corpus_bucket_counts(SEARCH_DB, connect_fn=ai_search_connect)
+    # "coming_soon"/"insufficient"/"ghost"/"screened_out" are legacy stored
+    # values from before 2026-08-08 -- route_company only produces "review"
+    # or "reject" now, folded into Needs Review here for the same reason.
     bucket_counts = {
         "Investable": raw_bucket_counts.get("priority", 0),
-        "Coming Soon": raw_bucket_counts.get("coming_soon", 0),
-        "Needs Review": raw_bucket_counts.get("review", 0),
-        "Potential Comp": raw_bucket_counts.get("comp", 0),
-        "Insufficient": sum(
+        "Needs Review": sum(
             raw_bucket_counts.get(bucket, 0)
-            for bucket in ["insufficient", "ghost", "screened_out"]
+            for bucket in (
+                "review", "coming_soon", "insufficient", "ghost",
+                "screened_out",
+            )
         ),
+        "Potential Comp": raw_bucket_counts.get("comp", 0),
         "Hard Denied": raw_bucket_counts.get("reject", 0),
     }
     bucketed_records = sum(raw_bucket_counts.values())
@@ -371,11 +375,13 @@ with tabs[1]:
 
     bucket_specs = [
         ("Investable", ["priority"]),
-        ("Coming Soon", ["coming_soon"]),
-        # "insufficient"/"ghost"/"screened_out" are legacy stored values
-        # from before 2026-08-08 -- route_company only produces "review"
-        # or "reject" now, with no separate Insufficient Evidence limbo.
-        ("Needs Review", ["review", "insufficient", "ghost", "screened_out"]),
+        # "coming_soon"/"insufficient"/"ghost"/"screened_out" are legacy
+        # stored values from before 2026-08-08 -- route_company only
+        # produces "review" or "reject" now, with no separate Coming Soon
+        # or Insufficient Evidence outcome.
+        ("Needs Review", [
+            "review", "coming_soon", "insufficient", "ghost", "screened_out",
+        ]),
         ("Potential Comp", ["comp"]),
         ("Hard Denied", ["reject"]),
     ]

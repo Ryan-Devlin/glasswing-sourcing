@@ -215,6 +215,33 @@ class RuleCalibrationTests(unittest.TestCase):
         self.assertEqual(reason, "parked_or_for_sale")
         self.assertIn("domain_for_sale", evidence)
 
+    def test_short_registrar_parking_text_is_still_caught(self):
+        # Confirmed live: word_count<=2 used to return early (not parked)
+        # before the parked-phrase check ever ran -- real registrar parking
+        # pages are often only a handful of words, so this exact case fell
+        # through to Needs Review instead of Hard Denied.
+        detected, reason, _ = placeholder_assessment(
+            "porkbun.com parked domain",
+            word_count=3,
+        )
+        self.assertTrue(detected)
+        self.assertEqual(reason, "parked_or_for_sale")
+
+    def test_gandi_parked_by_owner_phrasing_is_caught(self):
+        # Confirmed live: this exact Gandi.net parking template ("is
+        # currently parked by the owner") didn't match the old, narrower
+        # "this domain is parked" phrase.
+        text = (
+            "This domain name has been registered with Gandi.net. It is "
+            "currently parked by the owner."
+        )
+        detected, reason, _ = placeholder_assessment(
+            text,
+            word_count=len(text.split()),
+        )
+        self.assertTrue(detected)
+        self.assertEqual(reason, "parked_or_for_sale")
+
     def test_domain_specific_software_is_not_a_sales_page(self):
         text = (
             "Domain-specific enterprise AI software for manufacturing teams. "

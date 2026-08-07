@@ -231,9 +231,8 @@ DEFAULT_RUN_CONFIG = {
     "scraper_workers": 28,
     "scrape_timeout": 6,
     "require_us_evidence": False,
-    "include_coming_soon": True,
     "auto_claude": True,
-    "claude_minimum_score": 51,
+    "claude_minimum_score": 70,
     "claude_batch_max": 3,
     "claude_hourly_limit": 3,
     "claude_daily_limit": 12,
@@ -1255,16 +1254,6 @@ with st.expander("Run Filters", expanded=not running):
             ),
             disabled=running,
         )
-        include_coming_soon = st.checkbox(
-            "Include legitimate Coming Soon companies",
-            value=bool(
-                saved_config.get(
-                    "include_coming_soon",
-                    True,
-                )
-            ),
-            disabled=running,
-        )
 
     st.markdown("##### Screening speed")
     speed_preset = st.selectbox(
@@ -1351,7 +1340,7 @@ with st.expander("Run Filters", expanded=not running):
     with claude_left:
         saved_claude_threshold = max(
             0,
-            min(100, int(saved_config.get("claude_minimum_score", 51))),
+            min(100, int(saved_config.get("claude_minimum_score", 70))),
         )
         auto_claude = st.checkbox(
             "Automatically diligence companies at or above the Claude threshold",
@@ -1421,7 +1410,6 @@ run_config = {
     "scraper_workers": int(scraper_workers),
     "scrape_timeout": int(scrape_timeout),
     "require_us_evidence": bool(require_us_evidence),
-    "include_coming_soon": bool(include_coming_soon),
     "auto_claude": bool(auto_claude),
     "claude_minimum_score": int(claude_minimum_score),
     "claude_batch_max": int(claude_batch_max),
@@ -1767,7 +1755,6 @@ python_shortlist = read_csv_safely(
 )
 llm_denied = read_csv_safely(LLM / "llm_denied_master.csv")
 python_denied = read_csv_safely(FILTERED / "python_denied_master.csv")
-coming = read_csv_safely(FILTERED / "coming_soon_master.csv")
 
 try:
     all_screened = read_screened_classifications()
@@ -2028,11 +2015,12 @@ def visible_classification_frame(frame: pd.DataFrame) -> pd.DataFrame:
     # Two outcomes only (2026-08-08): Needs Review is the default for
     # everything that isn't a specific, factual disqualifier -- there is
     # no more low-attention "insufficient evidence" limbo that a
-    # thesis-fit judgment quietly falls into. "priority"/"coming_soon" are
-    # only ever reached now via a manual override or a Claude KEEP -- kept
-    # here too so already-stored historical rows from before this change
-    # still display the same way rather than silently reappearing as
-    # Needs Review.
+    # thesis-fit judgment quietly falls into. "priority" is only ever
+    # reached now via a manual override or a Claude KEEP -- kept here too
+    # so already-stored historical rows from before this change still
+    # display the same way rather than silently reappearing as Needs
+    # Review. Coming Soon is gone entirely, including for legacy rows --
+    # a prelaunch page is just a Needs Review company like any other.
     visible = pd.Series(
         "needs_review",
         index=result.index,
@@ -2040,7 +2028,6 @@ def visible_classification_frame(frame: pd.DataFrame) -> pd.DataFrame:
     )
     visible.loc[routing.eq("reject")] = "hard_denied"
     visible.loc[routing.eq("priority")] = "investable"
-    visible.loc[routing.eq("coming_soon")] = "coming_soon"
 
     legacy_reasons = result.get(
         "screened_out_reasons",
@@ -2072,7 +2059,7 @@ def visible_classification_frame(frame: pd.DataFrame) -> pd.DataFrame:
     visible.loc[explicit_denial] = "hard_denied"
 
     # Claude decisions and manual overrides can promote a Needs Review
-    # company to Investable/Coming Soon, or confirm a Hard Denied.
+    # company to Investable, or confirm a Hard Denied.
     visible.loc[decisions.eq("KEEP")] = "investable"
     visible.loc[decisions.eq("MAYBE")] = "needs_review"
     visible.loc[decisions.eq("REJECT")] = "hard_denied"
@@ -2081,7 +2068,6 @@ def visible_classification_frame(frame: pd.DataFrame) -> pd.DataFrame:
     visible.loc[overrides.eq("Review Candidate")] = "needs_review"
     visible.loc[overrides.eq("Potential Comp")] = "needs_review"
     visible.loc[overrides.eq("Hard Denied")] = "hard_denied"
-    visible.loc[overrides.eq("Coming Soon")] = "coming_soon"
 
     result["_visible_bucket"] = visible
     result["_review_score_floor"] = review_floor
@@ -2134,13 +2120,11 @@ def classification_reason_summary(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 investable_candidates = visible_bucket_frame("investable")
-coming_soon = visible_bucket_frame("coming_soon")
 needs_review = visible_bucket_frame("needs_review")
 hard_denied = visible_bucket_frame("hard_denied")
 
 for visible_frame_name in (
     "investable_candidates",
-    "coming_soon",
     "needs_review",
     "hard_denied",
 ):
@@ -2172,7 +2156,7 @@ claude_rejected = hard_denied[
 ].copy()
 
 st.markdown("#### Sourcing funnel")
-funnel_1, funnel_2, funnel_3 = st.columns(3)
+funnel_1, funnel_2 = st.columns(2)
 
 if result_scope == "Current Run":
     funnel_received = int(
@@ -2188,7 +2172,6 @@ else:
 visible_screened = pd.concat(
     [
         investable_candidates,
-        coming_soon,
         needs_review,
         hard_denied,
     ],
@@ -2198,52 +2181,39 @@ visible_screened = pd.concat(
 if not visible_screened.empty and "domain" in visible_screened.columns:
     visible_screened = visible_screened.drop_duplicates("domain", keep="last")
 
-if result_scope == "Current Run":
-    funnel_screened = int(stream_status.get("processed", 0) or 0)
-else:
-    funnel_screened = len(all_history_screened)
-raw_routing = all_screened.get(
-    "routing_bucket",
-    pd.Series("", index=all_screened.index),
-).astype(str).str.strip().str.lower()
-inaccessible_count = int(raw_routing.eq("ghost").sum())
-funnel_usable = max(0, funnel_screened - inaccessible_count)
+# Websites checked is defined as this sum, not a separate worker-side
+# attempt counter -- stream_status["processed"] counts every retry
+# attempt on a domain, not unique resolved domains, so it could drift
+# away from the bucket totals. New domains must always be >= this, since
+# a domain can only reach a bucket after being received.
+funnel_screened = (
+    len(investable_candidates) + len(needs_review) + len(hard_denied)
+)
 
 funnel_1.metric("New domains", funnel_received)
 funnel_2.metric(
     "Websites checked",
     funnel_screened,
-    help="Includes older queued domains processed during this run.",
-)
-funnel_3.metric(
-    "Accessible websites",
-    funnel_usable,
-    help="Checked websites excluding known inaccessible or ghost sites.",
+    help="Investable + Needs Review + Hard Denied -- always equal by definition.",
 )
 
-metric_1, metric_2, metric_3, metric_4 = st.columns(4)
+metric_1, metric_2, metric_3 = st.columns(3)
 metric_1.metric("Investable", len(investable_candidates))
-metric_2.metric("Coming soon", len(coming_soon))
-metric_3.metric("Needs review", len(needs_review))
-metric_4.metric("Hard denied", len(hard_denied))
+metric_2.metric("Needs review", len(needs_review))
+metric_3.metric("Hard denied", len(hard_denied))
 
-retained_total = (
-    len(investable_candidates)
-    + len(coming_soon)
-    + len(needs_review)
-    + len(hard_denied)
-)
+retained_total = funnel_screened
 st.caption(
-    f"The four review tabs contain {retained_total:,} retained records. "
-    "Automatic Python rejections are included in processing totals, but "
-    "their domain data is intentionally deleted and therefore does not "
-    "appear in the tabs. Investable and Coming Soon are Claude/manual "
-    "labels applied on top of Needs Review, not automatic outcomes."
+    f"The three review tabs contain {retained_total:,} retained records, "
+    "equal to Websites checked by definition. Automatic Python rejections "
+    "are included in processing totals, but their domain data is "
+    "intentionally deleted and therefore does not appear here. Investable "
+    "is a Claude/manual label applied on top of Needs Review, not an "
+    "automatic outcome."
 )
 
 tabs = st.tabs([
     "Investable Candidates",
-    "Coming Soon",
     "Needs Review",
     "Hard Denied",
     "Rejected by Claude",
@@ -2487,18 +2457,6 @@ with tabs[0]:
 
 with tabs[1]:
     st.caption(
-        "Legitimate founder-controlled prelaunch pages that match the "
-        "active industry and keyword filters. Squarespace templates and "
-        "pages that only say Coming Soon remain excluded."
-    )
-    render_candidate_table(
-        coming_soon,
-        "No valid coming-soon companies have cleared the filters.",
-        "coming_soon",
-    )
-
-with tabs[2]:
-    st.caption(
         "Credible borderline companies appear here: score 25+ plus "
         "at least one enterprise evidence dimension, or a clear enterprise "
         "signal. Low-signal sites are excluded from this queue."
@@ -2510,7 +2468,7 @@ with tabs[2]:
         show_claude_status=True,
     )
 
-with tabs[3]:
+with tabs[2]:
     st.caption(
         "Only companies with explicit factual disqualifying evidence "
         "appear here. Low score or incomplete evidence is not a denial."
@@ -2573,7 +2531,7 @@ with tabs[3]:
             },
         )
 
-with tabs[4]:
+with tabs[3]:
     st.caption(
         "Companies Claude explicitly marked REJECT after selective "
         "diligence. This is an audit subset of Hard Denied, not a sixth "
@@ -2650,20 +2608,20 @@ with tabs[4]:
             },
         )
 
-with tabs[5]:
+with tabs[4]:
     render_basket_editor(
         basket="yes",
         path=YES_BASKET_DATA,
     )
 
-with tabs[6]:
+with tabs[5]:
     st.caption("Zero is a valid rating for an obvious poor fit.")
     render_basket_editor(
         basket="no",
         path=NO_BASKET_DATA,
     )
 
-with tabs[7]:
+with tabs[6]:
     st.caption(
         "Compact evidence and deterministic splits for small local models. "
         "Missing-page examples are excluded rather than taught as negative fit."
@@ -2811,7 +2769,7 @@ with tabs[7]:
                 st.success(f"Saved {len(selected)} Gold human labels.")
                 st.rerun()
 
-with tabs[8]:
+with tabs[7]:
     left, right = st.columns(2)
     with left:
         st.markdown("#### Pipeline status")
@@ -2862,7 +2820,6 @@ with tabs[8]:
     st.markdown("#### Visible classification reconciliation")
     reconciliation = pd.DataFrame([
         {"Bucket": "Investable", "Count": len(investable_candidates)},
-        {"Bucket": "Coming soon", "Count": len(coming_soon)},
         {"Bucket": "Needs review", "Count": len(needs_review)},
         {"Bucket": "Hard denied", "Count": len(hard_denied)},
         {"Bucket": "Retained total", "Count": retained_total},

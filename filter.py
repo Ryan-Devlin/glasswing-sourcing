@@ -35,6 +35,7 @@ from classification_store import (
 from common import (
     AI_SEARCH_DB,
     FILTERED,
+    LLM,
     NO_BASKET_DATA,
     RAW,
     ROOT,
@@ -141,12 +142,15 @@ def persist_crawled_corpus_views(
         return {
             f"{prefix}all_screened.csv": corpus,
             f"{prefix}investable.csv": corpus[buckets.eq("priority")],
-            f"{prefix}coming_soon.csv": corpus[buckets.eq("coming_soon")],
-            # "insufficient"/"ghost"/"screened_out" are legacy stored values
-            # from before 2026-08-08 -- route_company only produces "review"
-            # or "reject" now, with no separate Insufficient Evidence limbo.
+            # "coming_soon"/"insufficient"/"ghost"/"screened_out" are legacy
+            # stored values from before 2026-08-08 -- route_company only
+            # produces "review" or "reject" now. Coming Soon and Insufficient
+            # Evidence are no longer separate outcomes.
             f"{prefix}needs_review.csv": corpus[
-                buckets.isin(["review", "insufficient", "ghost", "screened_out"])
+                buckets.isin([
+                    "review", "coming_soon", "insufficient", "ghost",
+                    "screened_out",
+                ])
             ],
             f"{prefix}potential_comp.csv": corpus[buckets.eq("comp")],
             f"{prefix}hard_denied.csv": corpus[buckets.eq("reject")],
@@ -155,6 +159,94 @@ def persist_crawled_corpus_views(
     outputs = {
         **datasets(ai_domains, prefix="crawled_"),
         **datasets(zone_domains, prefix="zone_crawled_"),
+    }
+    for filename, frame in outputs.items():
+        atomic_write_csv(FILTERED / filename, frame)
+    return {
+        filename.removesuffix(".csv"): len(frame)
+        for filename, frame in outputs.items()
+    }
+
+
+def persist_claude_decision_views() -> dict[str, int]:
+    """Master + per-source Investable/Hard Denied, keyed on Claude's own
+    decision rather than the Python routing_bucket.
+
+    "If a domain is ever passed through Claude and accepted, it appends
+    straight to the master investable and the local investable" -- KEEP is
+    the only decision that counts as accepted; MAYBE stays a review outcome,
+    never Investable. llm_approved_master.csv/llm_denied_master.csv (written
+    by claude_classifier.py's reconcile_masters via upsert_csv) already
+    accumulate permanently, by domain, across every run and every source --
+    this just derives the master/local KEEP-only and REJECT-only views from
+    them. Deliberately NOT gated behind bulk_compatibility_exports_enabled():
+    these are small, Claude-reviewed-only subsets, not full-corpus mirrors,
+    and are the only durable record of Claude's own decision.
+    """
+    approved_path = LLM / "llm_approved_master.csv"
+    denied_path = LLM / "llm_denied_master.csv"
+    approved = (
+        pd.read_csv(approved_path, dtype=str).fillna("")
+        if approved_path.exists() and approved_path.stat().st_size
+        else pd.DataFrame()
+    )
+    denied = (
+        pd.read_csv(denied_path, dtype=str).fillna("")
+        if denied_path.exists() and denied_path.stat().st_size
+        else pd.DataFrame()
+    )
+    investable = (
+        approved[approved["llm_decision"].eq("KEEP")].copy()
+        if not approved.empty and "llm_decision" in approved.columns
+        else pd.DataFrame()
+    )
+    hard_denied = (
+        denied[denied["llm_decision"].eq("REJECT")].copy()
+        if not denied.empty and "llm_decision" in denied.columns
+        else pd.DataFrame()
+    )
+
+    search_db, zone_db = crawler_database_paths()
+    ai_domains: set[str] = set()
+    if search_db.exists():
+        with sqlite3.connect(search_db, timeout=30) as conn:
+            ai_domains = {
+                str(row[0])
+                for row in conn.execute("""
+                    SELECT domain FROM domains
+                    WHERE last_crawled_at IS NOT NULL
+                """)
+            }
+    zone_domains: set[str] = set()
+    if zone_db.exists():
+        with sqlite3.connect(zone_db, timeout=30) as conn:
+            zone_domains = {
+                str(row[0]) for row in conn.execute("SELECT domain FROM pages")
+            }
+
+    def local_view(frame: pd.DataFrame, domains: set[str]) -> pd.DataFrame:
+        if frame.empty or "domain" not in frame.columns:
+            return frame
+        return frame[frame["domain"].map(stable_domain).isin(domains)]
+
+    def certstream_view(frame: pd.DataFrame) -> pd.DataFrame:
+        # CertStream has no dedicated corpus database of its own to query
+        # membership from -- its "local" view is simply whatever wasn't
+        # discovered through the other two crawlers.
+        if frame.empty or "domain" not in frame.columns:
+            return frame
+        crawled = ai_domains | zone_domains
+        return frame[~frame["domain"].map(stable_domain).isin(crawled)]
+
+    outputs = {
+        "master_investable_claude.csv": investable,
+        "master_hard_denied_claude.csv": hard_denied,
+        "crawled_investable_claude.csv": local_view(investable, ai_domains),
+        "crawled_hard_denied_claude.csv": local_view(hard_denied, ai_domains),
+        "zone_crawled_investable_claude.csv": local_view(investable, zone_domains),
+        "zone_crawled_hard_denied_claude.csv": local_view(hard_denied, zone_domains),
+        "certstream_investable_claude.csv": certstream_view(investable),
+        "certstream_hard_denied_claude.csv": certstream_view(hard_denied),
     }
     for filename, frame in outputs.items():
         atomic_write_csv(FILTERED / filename, frame)
@@ -274,6 +366,13 @@ PARKED = [
     "available for acquisition", "pay in installments",
     "spaceship. secure checkout", "sudos.com", "unstoppable domains",
     "domain availability and pricing", "internet domain registration",
+    # Confirmed live (2026-08-08): real registrar parking pages use
+    # phrasing that didn't match the exact strings above -- Porkbun's
+    # "porkbun.com | parked domain", Gandi's "It is currently parked by
+    # the owner", GoDaddy's own for-sale marketplace redirect copy.
+    "parked domain", "parked by the owner", "is currently parked",
+    "parked free", "domain is parked", "may be for sale on the",
+    "speeder marketplace", "browse other businesses for sale",
 ]
 
 DOMAIN_SALE_PATTERNS = [
@@ -2221,9 +2320,11 @@ def placeholder_assessment(
             ["soft_404_page"],
         )
 
-    if word_count <= 2:
-        return False, "insufficient_visible_content", ["under_3_words"]
-
+    # Confirmed live (2026-08-08): this used to run after the word_count<=2
+    # return below, so a minimal-text parking page (many real ones are
+    # just a couple of words) never even reached the parked check --
+    # it returned "insufficient_visible_content" (not parked) instead of
+    # being correctly flagged, and fell through to Needs Review.
     parked_hits = [term for term in PARKED if term in lower]
     parked_hits.extend(
         label
@@ -2236,6 +2337,9 @@ def placeholder_assessment(
             "parked_or_for_sale",
             list(dict.fromkeys(parked_hits))[:8],
         )
+
+    if word_count <= 2:
+        return False, "insufficient_visible_content", ["under_3_words"]
 
     template_hits = [
         phrase for phrase in HOSTING_TEMPLATE_PHRASES
@@ -4106,10 +4210,6 @@ def apply_persistent_overrides(output: pd.DataFrame) -> pd.DataFrame:
         "Hard Denied": (
             "reject",
             "manual_override_hard_denied",
-        ),
-        "Coming Soon": (
-            "coming_soon",
-            "manual_override_coming_soon",
         ),
         "Ignore Permanently": (
             "screened_out",

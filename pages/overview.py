@@ -204,11 +204,13 @@ st.caption(
 
 MASTER_BUCKETS = [
     ("Investable", ("priority",)),
-    ("Coming Soon", ("coming_soon",)),
-    # "insufficient"/"ghost"/"screened_out" are legacy stored values from
-    # before 2026-08-08 -- route_company only produces "review" or "reject"
-    # now, with no separate low-attention Insufficient Evidence limbo.
-    ("Needs Review", ("review", "insufficient", "ghost", "screened_out")),
+    # "coming_soon"/"insufficient"/"ghost"/"screened_out" are legacy stored
+    # values from before 2026-08-08 -- route_company only produces "review"
+    # or "reject" now. Coming Soon and Insufficient Evidence are no longer
+    # separate outcomes; a prelaunch page is just a Needs Review company.
+    ("Needs Review", (
+        "review", "coming_soon", "insufficient", "ghost", "screened_out",
+    )),
     ("Potential Comp", ("comp",)),
     ("Hard Denied", ("reject",)),
 ]

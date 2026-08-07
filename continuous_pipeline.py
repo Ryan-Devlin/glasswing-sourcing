@@ -1097,7 +1097,7 @@ def maybe_run_claude(batch_path: Path) -> int:
             return 0
 
         config = load_run_config()
-        minimum_score = str(config.get("claude_minimum_score", 51))
+        minimum_score = str(config.get("claude_minimum_score", 70))
         exceptional_score = str(
             int(config.get("claude_exceptional_score", 80))
         )
@@ -1161,8 +1161,20 @@ def maybe_run_claude(batch_path: Path) -> int:
             ],
         )
         conn.commit()
+        # Master/local Investable-by-Claude views are a downstream
+        # convenience export, not the diligence result itself -- a failure
+        # here must never make a real Claude call look like it didn't
+        # happen, so it only ever sets a warning, never blocks the return.
+        views_warning = ""
+        try:
+            screening_filter.persist_claude_decision_views()
+        except Exception as exc:
+            views_warning = (
+                "Claude ran, but updating the master/local Investable "
+                f"views failed: {type(exc).__name__}: {exc}"
+            )[:500]
         write_status(
-            claude_warning="",
+            claude_warning=views_warning,
             updated_at=utc_now(),
         )
         return len(domains)

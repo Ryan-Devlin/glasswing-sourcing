@@ -109,7 +109,7 @@ class ReviewQualityUiFixTests(unittest.TestCase):
         self.assertIn('rejected["Claude Reasoning"]', self.dashboard)
         self.assertIn('rejected["Claude Concerns"]', self.dashboard)
         self.assertIn("claude_reject_overrides.eq(\"\")", self.dashboard)
-        self.assertIn("with tabs[6]:", self.dashboard)
+        self.assertIn("with tabs[3]:", self.dashboard)
 
     def test_human_baskets_have_live_editable_tables(self):
         self.assertIn('"Yes Basket"', self.dashboard)
@@ -118,7 +118,7 @@ class ReviewQualityUiFixTests(unittest.TestCase):
         self.assertIn('"Save table edits"', self.dashboard)
         self.assertIn("save_basket_entry", self.dashboard)
         self.assertIn("save_basket_entries", self.ui_theme)
-        self.assertIn("with tabs[8]:", self.dashboard)
+        self.assertIn("with tabs[4]:", self.dashboard)
 
     def test_training_labels_do_not_create_manual_classification_moves(self):
         self.assertNotIn("record_manual_move", self.dashboard)

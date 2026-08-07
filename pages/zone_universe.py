@@ -701,15 +701,19 @@ with tabs[1]:
         search_db_env_var=ZONE_UNIVERSE_DATABASE_ENV_VAR,
     )
     raw_bucket_counts = corpus_bucket_counts(DATABASE, connect_fn=connect)
+    # "coming_soon"/"insufficient"/"ghost"/"screened_out" are legacy stored
+    # values from before 2026-08-08 -- route_company only produces "review"
+    # or "reject" now, folded into Needs Review here for the same reason.
     bucket_counts = {
         "Investable": raw_bucket_counts.get("priority", 0),
-        "Coming Soon": raw_bucket_counts.get("coming_soon", 0),
-        "Needs Review": raw_bucket_counts.get("review", 0),
-        "Potential Comp": raw_bucket_counts.get("comp", 0),
-        "Insufficient": sum(
+        "Needs Review": sum(
             raw_bucket_counts.get(bucket, 0)
-            for bucket in ("insufficient", "ghost", "screened_out")
+            for bucket in (
+                "review", "coming_soon", "insufficient", "ghost",
+                "screened_out",
+            )
         ),
+        "Potential Comp": raw_bucket_counts.get("comp", 0),
         "Hard Denied": raw_bucket_counts.get("reject", 0),
     }
     processing_metrics = st.columns(3)
@@ -736,7 +740,7 @@ with tabs[1]:
         "Screening happens automatically after a website is saved. It uses the "
         "locally retained HTML, so the same website is not downloaded twice. "
         "Registration dates are then added in the background for Investable, "
-        "Coming Soon, Needs Review, and Potential Comp companies."
+        "Needs Review, and Potential Comp companies."
     )
     st.caption(
         f"Registration enrichment: {stats['registration_dates']:,} dates "
@@ -748,19 +752,20 @@ with tabs[1]:
         st.markdown(
             """
 - **Investable:** a Claude decision or manual override on top of a Needs Review company; not something Python auto-declares on its own.
-- **Coming Soon:** credible company or product that has not fully launched; also a Claude/manual label on top of Needs Review.
-- **Needs Review:** the default outcome for everything that isn't a specific, factual disqualifier -- includes legacy Insufficient Evidence/Ghost/Screened Out records from before 2026-08-08.
+- **Needs Review:** the default outcome for everything that isn't a specific, factual disqualifier -- includes legacy Coming Soon/Insufficient Evidence/Ghost/Screened Out records from before 2026-08-08.
 - **Potential Comp:** relevant but already mature, scaled, acquired, or overfunded.
 - **Hard Denied:** explicit disqualifier, parked/template site, or clear mismatch; also enters the main No list.
             """
         )
     bucket_specs = [
         ("Investable", ["priority"]),
-        ("Coming Soon", ["coming_soon"]),
-        # "insufficient"/"ghost"/"screened_out" are legacy stored values
-        # from before 2026-08-08 -- route_company only produces "review"
-        # or "reject" now, with no separate Insufficient Evidence limbo.
-        ("Needs Review", ["review", "insufficient", "ghost", "screened_out"]),
+        # "coming_soon"/"insufficient"/"ghost"/"screened_out" are legacy
+        # stored values from before 2026-08-08 -- route_company only
+        # produces "review" or "reject" now, with no separate Coming Soon
+        # or Insufficient Evidence outcome.
+        ("Needs Review", [
+            "review", "coming_soon", "insufficient", "ghost", "screened_out",
+        ]),
         ("Potential Comp", ["comp"]),
         ("Hard Denied", ["reject"]),
     ]

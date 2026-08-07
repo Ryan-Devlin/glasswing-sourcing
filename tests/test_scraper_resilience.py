@@ -1,8 +1,12 @@
 import asyncio
+import sqlite3
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+import pandas as pd
 
 import filter as screening_filter
 import continuous_pipeline
@@ -269,6 +273,97 @@ class ScraperResilienceTests(unittest.TestCase):
         )[0]
         self.assertIn("_read_html_capped(", fetch_html_body)
         self.assertNotIn("response.text(", fetch_html_body)
+
+
+class ClaudeDecisionViewsTests(unittest.TestCase):
+    """"If a domain is ever passed through Claude and accepted, it appends
+    straight to the master investable and the local investable" -- MAYBE
+    must never count, and each source's local view must only ever contain
+    that source's own domains."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self.filtered = root / "filtered"
+        self.filtered.mkdir()
+        self.llm = root / "llm"
+        self.llm.mkdir()
+        self.ai_db = root / "ai_search.sqlite3"
+        self.zone_db = root / "zone_universe.sqlite3"
+
+        with sqlite3.connect(self.ai_db) as conn:
+            conn.execute(
+                "CREATE TABLE domains (domain TEXT, last_crawled_at TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO domains VALUES ('ai-keep.ai', '2026-08-08')"
+            )
+        with sqlite3.connect(self.zone_db) as conn:
+            conn.execute("CREATE TABLE pages (domain TEXT)")
+            conn.execute("INSERT INTO pages VALUES ('zone-reject.com')")
+
+        pd.DataFrame([
+            {"domain": "ai-keep.ai", "llm_decision": "KEEP"},
+            {"domain": "cert-keep.ai", "llm_decision": "KEEP"},
+            {"domain": "cert-maybe.ai", "llm_decision": "MAYBE"},
+        ]).to_csv(self.llm / "llm_approved_master.csv", index=False)
+        pd.DataFrame([
+            {"domain": "zone-reject.com", "llm_decision": "REJECT"},
+        ]).to_csv(self.llm / "llm_denied_master.csv", index=False)
+
+        self.patches = [
+            patch.object(screening_filter, "FILTERED", self.filtered),
+            patch.object(screening_filter, "LLM", self.llm),
+            patch.object(
+                screening_filter,
+                "crawler_database_paths",
+                return_value=(self.ai_db, self.zone_db),
+            ),
+        ]
+        for p in self.patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _domains(self, filename: str) -> set[str]:
+        path = self.filtered / filename
+        if not path.exists() or path.stat().st_size == 0:
+            return set()
+        frame = pd.read_csv(path, dtype=str).fillna("")
+        return set(frame.get("domain", []))
+
+    def test_maybe_never_counts_as_master_investable(self):
+        screening_filter.persist_claude_decision_views()
+        master = self._domains("master_investable_claude.csv")
+        self.assertIn("ai-keep.ai", master)
+        self.assertIn("cert-keep.ai", master)
+        self.assertNotIn("cert-maybe.ai", master)
+
+    def test_master_hard_denied_is_reject_only(self):
+        screening_filter.persist_claude_decision_views()
+        self.assertEqual(
+            self._domains("master_hard_denied_claude.csv"),
+            {"zone-reject.com"},
+        )
+
+    def test_local_views_only_contain_that_sources_own_domains(self):
+        screening_filter.persist_claude_decision_views()
+        self.assertEqual(
+            self._domains("crawled_investable_claude.csv"), {"ai-keep.ai"}
+        )
+        self.assertEqual(
+            self._domains("zone_crawled_hard_denied_claude.csv"),
+            {"zone-reject.com"},
+        )
+        # cert-keep.ai belongs to neither crawler's own corpus database --
+        # CertStream's local view is everything left over.
+        self.assertEqual(
+            self._domains("certstream_investable_claude.csv"),
+            {"cert-keep.ai"},
+        )
+        self.assertNotIn(
+            "ai-keep.ai", self._domains("certstream_investable_claude.csv")
+        )
 
 
 if __name__ == "__main__":
