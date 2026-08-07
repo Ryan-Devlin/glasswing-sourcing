@@ -9,7 +9,7 @@ description = "ICANN zone-file domain discovery, crawling, and search engine"
 requires-python = ">=3.11"
 dependencies = [
   "aiohttp>=3.10,<4",
-  "aiodns>=3.2,<4",
+  "aiodns>=3.2,<5",
 ]
 
 [project.optional-dependencies]
