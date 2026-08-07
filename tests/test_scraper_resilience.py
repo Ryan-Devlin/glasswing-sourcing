@@ -50,7 +50,11 @@ class ScraperResilienceTests(unittest.TestCase):
             base_timeout=6,
         )
         self.assertEqual(profile["workers"], 4)
-        self.assertEqual(profile["batch_size"], 10)
+        # batch_size must match workers -- confirmed live: a fixed 10
+        # against a 4-worker cap meant ~3 sequential rounds per batch
+        # (up to 75s at this mode's 25s ceiling) before the last domain
+        # in even the first batch after a reset got attempted.
+        self.assertEqual(profile["batch_size"], 4)
         self.assertGreaterEqual(profile["timeout"], 15)
 
     def test_timeout_rows_are_retried_before_persistence(self):

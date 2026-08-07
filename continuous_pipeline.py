@@ -1467,9 +1467,15 @@ def adaptive_screening_profile(
             "timeout": max(12.0, min(base_timeout, 18.0)),
             "homepage_only": True,
         }
+    # batch_size used to be a fixed 10 against safe_workers's cap of 4 --
+    # the exact same mismatch fixed for surge/catch_up below, just left
+    # unfixed here: 10/4 meant ~3 sequential rounds per batch (up to 75s
+    # at this mode's 25s ceiling) before the last domain in even the
+    # *first* batch after a reset got attempted. Matching batch size to
+    # worker count means one round, not several queued behind each other.
     return {
         "mode": "normal",
-        "batch_size": 10,
+        "batch_size": safe_workers,
         "workers": safe_workers,
         "timeout": max(15.0, min(base_timeout, 25.0)),
         "homepage_only": True,
