@@ -653,7 +653,7 @@ def upsert_claude_diligence(
             if key.startswith("llm_")
         }
         decision = clean(result.get("decision", "")).upper()
-        if decision not in {"KEEP", "MAYBE", "REJECT"}:
+        if decision not in {"KEEP", "REJECT"}:
             continue
         values.append((
             domain,

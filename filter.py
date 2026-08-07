@@ -174,8 +174,9 @@ def persist_claude_decision_views() -> dict[str, int]:
 
     "If a domain is ever passed through Claude and accepted, it appends
     straight to the master investable and the local investable" -- KEEP is
-    the only decision that counts as accepted; MAYBE stays a review outcome,
-    never Investable. llm_approved_master.csv/llm_denied_master.csv (written
+    the only decision that counts as accepted. There is no MAYBE: every
+    Claude call resolves to KEEP or REJECT, never an in-between outcome.
+    llm_approved_master.csv/llm_denied_master.csv (written
     by claude_classifier.py's reconcile_masters via upsert_csv) already
     accumulate permanently, by domain, across every run and every source --
     this just derives the master/local KEEP-only and REJECT-only views from

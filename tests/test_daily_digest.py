@@ -164,13 +164,15 @@ def test_digest_content_is_evidence_backed_and_escaped(tmp_path):
     assert "Review in Glasswing" in rich
 
 
-def test_maybe_and_stale_claude_results_are_never_emailed(tmp_path):
+def test_rejected_and_stale_claude_results_are_never_emailed(tmp_path):
+    # No MAYBE exists anymore -- every Claude call resolves to KEEP or
+    # REJECT. Only KEEP should ever qualify for the digest.
     database = tmp_path / "classifications.sqlite3"
     seed(database)
     upsert_claude_diligence(
         [{
             "domain": "strong.ai",
-            "llm_decision": "MAYBE",
+            "llm_decision": "REJECT",
             "llm_fit_score": 90,
             "llm_diligence_version": DILIGENCE_VERSION,
         }],

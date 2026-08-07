@@ -44,13 +44,14 @@ AI infrastructure, enterprise defense, collaborative intelligence, or compute.
 Search once using exact name+domain to verify U.S. base, funding/stage/rounds,
 ownership, acquisition/public status. REJECT if non-U.S., consumer, agency,
 generic wrapper/weak moat, >$8M, Series A+, >2 institutional rounds, acquired,
-subsidiary, public, large, or established. MAYBE (never KEEP) if U.S., funding,
-or ownership remains unclear. KEEP requires verified independence, credible
-enterprise/government buyer, and technical/workflow/business-value depth.
-Scores >90 are exceptional.
+subsidiary, public, large, or established. Also REJECT (never KEEP) if U.S.,
+funding, or ownership remains unclear -- unverified is not a pass. KEEP
+requires verified independence, credible enterprise/government buyer, and
+technical/workflow/business-value depth. Scores >90 are exceptional. There is
+no third option: every call resolves to KEEP or REJECT, never an in-between.
 
 Return ONLY these tags, with no prose before or after:
-<decision>KEEP|MAYBE|REJECT</decision>
+<decision>KEEP|REJECT</decision>
 <score>integer 0-95</score>
 <category>official category</category>
 <us_based>yes|no|unclear</us_based>
@@ -170,7 +171,7 @@ def response_text_and_urls(response: Any) -> tuple[str, list[str]]:
 
 def dry_assessment(row: dict) -> dict:
     return apply_hard_guards({
-        "decision": "MAYBE",
+        "decision": "REJECT",
         "fit_score": min(to_int(row.get("rule_score", 0), 0), 69),
         "category": clean(row.get("rule_thesis_pillar", "unclear")),
         "us_based": "yes" if row.get("location_status") == "US" else "unclear",
@@ -193,9 +194,13 @@ def dry_assessment(row: dict) -> dict:
 
 
 def failed_assessment(row: dict, exc: Exception) -> dict:
-    """Keep one bad API response from crashing the entire pipeline."""
+    """Keep one bad API response from crashing the entire pipeline.
+
+    No MAYBE to fall back on -- a failed call must resolve to REJECT, never
+    an accidental KEEP.
+    """
     return {
-        "decision": "MAYBE",
+        "decision": "REJECT",
         "fit_score": min(to_int(row.get("rule_score", 0), 0), 50),
         "category": clean(row.get("rule_thesis_pillar", "unclear")),
         "us_based": "yes" if row.get("location_status") == "US" else "unclear",
@@ -253,21 +258,22 @@ async def classify(
         max_institutional_rounds=MAX_INSTITUTIONAL_ROUNDS,
     )
 
-    # Very early companies may have no external coverage. Preserve them for
-    # manual review rather than treating missing information as negative proof.
+    # Very early companies may have no external coverage -- but with no
+    # MAYBE to fall back on, unverifiable is not a pass. REJECT rather than
+    # treat missing information as anything other than not-yet-qualified.
     if not urls:
-        assessment["decision"] = "MAYBE"
+        assessment["decision"] = "REJECT"
         assessment["fit_score"] = min(assessment["fit_score"], 55)
         assessment["concerns"] = "No external coverage"
 
     # KEEP is a notification-grade approval, not merely a positive model
-    # impression. It requires Claude's external diligence to verify the U.S.
-    # location; unclear results remain MAYBE and can never enter email.
+    # impression. It requires Claude's external diligence to verify the
+    # U.S. location; unverified resolves to REJECT, never KEEP.
     if (
         assessment.get("decision") == "KEEP"
         and assessment.get("us_based") != "yes"
     ):
-        assessment["decision"] = "MAYBE"
+        assessment["decision"] = "REJECT"
         assessment["fit_score"] = min(
             to_int(assessment.get("fit_score", 0), 0), 69
         )
@@ -587,9 +593,12 @@ async def run() -> None:
         output["llm_fit_score"], errors="coerce"
     ).fillna(0)
 
+    # No MAYBE: KEEP is only allowed when U.S. status is verified and
+    # funding is within thesis. Anything else -- including a raw KEEP with
+    # unclear U.S. status -- resolves to REJECT, never an in-between.
     approved = output[
-        output["llm_decision"].isin(["KEEP", "MAYBE"])
-        & (output["llm_us_based"] != "no")
+        output["llm_decision"].eq("KEEP")
+        & (output["llm_us_based"] == "yes")
         & (
             pd.to_numeric(
                 output["llm_funding_millions_usd"], errors="coerce"
@@ -598,31 +607,19 @@ async def run() -> None:
         )
     ].copy()
 
-    # KEEP is only allowed when U.S. status is verified.
-    unclear_keep = (
-        (approved["llm_decision"] == "KEEP")
-        & (approved["llm_us_based"] != "yes")
-    )
-    approved.loc[unclear_keep, "llm_decision"] = "MAYBE"
-    approved.loc[unclear_keep, "llm_fit_score"] = approved.loc[
-        unclear_keep, "llm_fit_score"
-    ].clip(upper=69)
-
     denied = output[~output.index.isin(approved.index)].copy()
+    denied.loc[denied["llm_decision"].ne("REJECT"), "llm_decision"] = "REJECT"
 
-    # Persist only after every post-response hard guard has run. In
-    # particular, an initially returned KEEP with unclear U.S. status is
-    # downgraded above and must never reach the email gate as a raw KEEP.
     final_results = pd.concat(
         [approved, denied], ignore_index=True, sort=False
     )
     upsert_claude_diligence(final_results.to_dict(orient="records"))
     approved_master, denied_master = reconcile_masters(approved, denied)
 
-    # Only decisive Claude results become training labels. MAYBE remains an
-    # audit/review outcome so uncertain examples do not contaminate training.
-    keeps = approved[approved["llm_decision"].eq("KEEP")]
-    rejects = denied[denied["llm_decision"].eq("REJECT")]
+    # Every approved row is a KEEP and every denied row is a REJECT by
+    # construction above -- these become training labels directly.
+    keeps = approved
+    rejects = denied
     protected_portfolio = set(GLASSWING_PORTFOLIO_DOMAINS)
     for _, row in keeps.iterrows():
         domain = stable_domain(row.get("domain", ""))

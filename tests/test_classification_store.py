@@ -86,7 +86,7 @@ def test_claude_diligence_is_shared_and_upserted(tmp_path):
     database = tmp_path / "classifications.sqlite3"
     first = {
         "domain": "company.ai",
-        "llm_decision": "MAYBE",
+        "llm_decision": "REJECT",
         "llm_fit_score": 60,
         "llm_product_summary": "Initial review",
         "llm_diligence_version": "v1",

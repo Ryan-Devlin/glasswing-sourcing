@@ -857,7 +857,6 @@ def format_candidate_table(frame: pd.DataFrame) -> pd.DataFrame:
         decisions = result["llm_decision"].astype(str).str.upper()
         output["Classification"] = decisions.map({
             "KEEP": "Verified Lead",
-            "MAYBE": "Manual Review",
             "REJECT": "Denied",
         }).fillna("Needs Review")
     else:
@@ -1663,6 +1662,7 @@ with scope_col:
     result_scope = st.radio(
         "Results view",
         ["Current Run", "All History"],
+        index=1,
         horizontal=True,
         label_visibility="collapsed",
         key="result_scope",
@@ -1693,7 +1693,7 @@ def _claude_master_frames() -> tuple[pd.DataFrame, pd.DataFrame]:
     if not shared.empty:
         decisions = shared["llm_decision"].astype(str).str.upper()
         return (
-            shared[decisions.isin(["KEEP", "MAYBE"])].copy(),
+            shared[decisions.eq("KEEP")].copy(),
             shared[decisions.eq("REJECT")].copy(),
         )
     return (
@@ -1706,13 +1706,6 @@ approved_all, llm_denied = _claude_master_frames()
 verified_leads = (
     approved_all[
         approved_all.get("llm_decision", "").astype(str).str.upper() == "KEEP"
-    ].copy()
-    if not approved_all.empty and "llm_decision" in approved_all.columns
-    else pd.DataFrame()
-)
-manual_review = (
-    approved_all[
-        approved_all.get("llm_decision", "").astype(str).str.upper() == "MAYBE"
     ].copy()
     if not approved_all.empty and "llm_decision" in approved_all.columns
     else pd.DataFrame()
@@ -2026,9 +2019,9 @@ def visible_classification_frame(frame: pd.DataFrame) -> pd.DataFrame:
     visible.loc[explicit_denial] = "hard_denied"
 
     # Claude decisions and manual overrides can promote a Needs Review
-    # company to Investable, or confirm a Hard Denied.
+    # company to Investable, or confirm a Hard Denied. No MAYBE: every
+    # Claude call resolves to one of these two.
     visible.loc[decisions.eq("KEEP")] = "investable"
-    visible.loc[decisions.eq("MAYBE")] = "needs_review"
     visible.loc[decisions.eq("REJECT")] = "hard_denied"
 
     visible.loc[overrides.eq("Investable Candidate")] = "investable"
@@ -2232,7 +2225,6 @@ def candidate_table(frame: pd.DataFrame) -> pd.DataFrame:
 
     output["Claude Decision"] = decisions.replace({
         "KEEP": "KEEP",
-        "MAYBE": "MAYBE",
         "REJECT": "REJECT",
         "": "Not reviewed",
         "NAN": "Not reviewed",
@@ -2361,7 +2353,7 @@ def manual_claude_panel(frame: pd.DataFrame) -> None:
             "llm_decision"
         ].astype(str).str.upper()
         selectable = selectable[
-            ~decisions.isin({"KEEP", "MAYBE", "REJECT"})
+            ~decisions.isin({"KEEP", "REJECT"})
         ].copy()
 
     if selectable.empty:

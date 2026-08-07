@@ -115,30 +115,31 @@ def apply_hard_guards(
         or assessment["latest_round"] == "unknown"
         or ownership == "unclear"
     ):
-        if assessment["decision"] == "KEEP":
-            assessment["decision"] = "MAYBE"
+        # No middle ground: unverified U.S./funding/ownership status is not
+        # a pass. A KEEP requires the evidence to actually confirm it.
+        assessment["decision"] = "REJECT"
         assessment["fit_score"] = min(int(assessment["fit_score"]), 69)
         if ownership == "unclear":
-            assessment["concerns"] = "Ownership needs manual review"
+            assessment["concerns"] = "Ownership not verified"
         elif assessment["us_based"] == "unclear":
-            assessment["concerns"] = "Location needs manual review"
+            assessment["concerns"] = "Location not verified"
         else:
             assessment["concerns"] = "Funding not verified"
 
     if assessment["decision"] == "KEEP":
         if assessment["fit_score"] < 75:
-            assessment["decision"] = "MAYBE"
+            assessment["decision"] = "REJECT"
         elif assessment.get("category") in {"", "unclear", "other"}:
-            assessment["decision"] = "MAYBE"
-            assessment["concerns"] = "Category needs manual review"
+            assessment["decision"] = "REJECT"
+            assessment["concerns"] = "Category not verified"
         elif not assessment.get("product_summary", "").strip():
-            assessment["decision"] = "MAYBE"
+            assessment["decision"] = "REJECT"
             assessment["concerns"] = "Product summary not verified"
         elif not assessment.get("diligence_sources", "").strip():
-            assessment["decision"] = "MAYBE"
+            assessment["decision"] = "REJECT"
             assessment["concerns"] = "External sources not verified"
         elif funding < 0:
-            assessment["decision"] = "MAYBE"
+            assessment["decision"] = "REJECT"
             assessment["concerns"] = "Funding not verified"
 
     return assessment
@@ -153,7 +154,7 @@ def parse_assessment(
     raw = {name: tag(text, name) for name in FIELDS}
 
     decision = raw["decision"].upper()
-    if decision not in {"KEEP", "MAYBE", "REJECT"}:
+    if decision not in {"KEEP", "REJECT"}:
         decision = "REJECT"
 
     category = raw["category"].lower()
