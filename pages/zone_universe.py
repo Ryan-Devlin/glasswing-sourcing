@@ -747,20 +747,21 @@ with tabs[1]:
     with st.expander("What do these buckets mean?"):
         st.markdown(
             """
-- **Investable:** thesis-aligned real product with a clear wedge and a plausible moat, technical edge, or exceptional frontier team; also enters the main Yes list.
-- **Coming Soon:** credible company or product that has not fully launched.
-- **Needs Review:** thesis-aligned product with a credible wedge or moat signal, but one missing conviction dimension.
+- **Investable:** a Claude decision or manual override on top of a Needs Review company; not something Python auto-declares on its own.
+- **Coming Soon:** credible company or product that has not fully launched; also a Claude/manual label on top of Needs Review.
+- **Needs Review:** the default outcome for everything that isn't a specific, factual disqualifier -- includes legacy Insufficient Evidence/Ghost/Screened Out records from before 2026-08-08.
 - **Potential Comp:** relevant but already mature, scaled, acquired, or overfunded.
-- **Insufficient Evidence:** a real or reachable site without enough evidence.
 - **Hard Denied:** explicit disqualifier, parked/template site, or clear mismatch; also enters the main No list.
             """
         )
     bucket_specs = [
         ("Investable", ["priority"]),
         ("Coming Soon", ["coming_soon"]),
-        ("Needs Review", ["review"]),
+        # "insufficient"/"ghost"/"screened_out" are legacy stored values
+        # from before 2026-08-08 -- route_company only produces "review"
+        # or "reject" now, with no separate Insufficient Evidence limbo.
+        ("Needs Review", ["review", "insufficient", "ghost", "screened_out"]),
         ("Potential Comp", ["comp"]),
-        ("Insufficient Evidence", ["insufficient", "ghost", "screened_out"]),
         ("Hard Denied", ["reject"]),
     ]
     bucket_tabs = st.tabs([name for name, _ in bucket_specs])

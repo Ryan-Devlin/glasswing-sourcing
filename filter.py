@@ -142,11 +142,13 @@ def persist_crawled_corpus_views(
             f"{prefix}all_screened.csv": corpus,
             f"{prefix}investable.csv": corpus[buckets.eq("priority")],
             f"{prefix}coming_soon.csv": corpus[buckets.eq("coming_soon")],
-            f"{prefix}needs_review.csv": corpus[buckets.eq("review")],
-            f"{prefix}potential_comp.csv": corpus[buckets.eq("comp")],
-            f"{prefix}insufficient_evidence.csv": corpus[
-                buckets.isin(["insufficient", "ghost", "screened_out"])
+            # "insufficient"/"ghost"/"screened_out" are legacy stored values
+            # from before 2026-08-08 -- route_company only produces "review"
+            # or "reject" now, with no separate Insufficient Evidence limbo.
+            f"{prefix}needs_review.csv": corpus[
+                buckets.isin(["review", "insufficient", "ghost", "screened_out"])
             ],
+            f"{prefix}potential_comp.csv": corpus[buckets.eq("comp")],
             f"{prefix}hard_denied.csv": corpus[buckets.eq("reject")],
         }
 
@@ -3002,10 +3004,22 @@ def route_company(
     venture_reviewable: bool = False,
     substantive_no_fit_evidence: bool = False,
 ) -> tuple[str, str]:
-    """Route by viability.
+    """Route by viability: exactly two outcomes, Hard Denied or Needs Review.
 
     Hard Denied requires a specific disqualifying fact. Low score, sparse copy,
     unknown location, or missing technical evidence never cause denial alone.
+
+    Confirmed live (2026-08-08): a Python rule-based scorer cannot be
+    trusted to auto-declare "Investable" or auto-dismiss "Insufficient
+    Evidence" on its own -- real companies scored 1-5/100 on the same
+    keyword engine that also let boilerplate through. Investable and
+    Coming Soon are no longer routing outcomes this function can produce;
+    they are labels Claude or a human applies on top of a Needs Review
+    company (see visible_classification_frame in dashboard.py, and the
+    manual-override / Claude-decision paths). Every company that isn't a
+    specific, factual disqualification goes to Needs Review -- there is no
+    more low-attention "insufficient evidence" limbo bucket that a
+    thesis-fit signal quietly falls into and is never looked at again.
     """
     # High-confidence website validity failures.
     if is_parked:
@@ -3039,33 +3053,34 @@ def route_company(
         return "reject", "commodity_ai_wrapper_or_service"
     # A legitimate founder-controlled minimal site is preserved separately.
     if is_coming:
-        return "coming_soon", "verified_prelaunch_watch"
+        return "review", "verified_prelaunch_watch"
 
     # These narrow, multi-phrase product bundles come from trusted human Yes
     # examples. Explicit exclusions above still win, but once a clean site
     # matches one of them the router should not discard the signal.
     if high_conviction_fit:
-        return "priority", "trusted_high_conviction_product_fit"
+        return "review", "trusted_high_conviction_product_fit"
 
     if substantive_no_fit_evidence:
-        return "insufficient", "substantive_site_no_glasswing_fit_signals"
+        return "review", "substantive_site_no_glasswing_fit_signals"
 
-    # Investable requires a credible product, wedge, and moat/technical edge.
+    # A credible product, wedge, and moat/technical edge -- still routed to
+    # human/Claude review rather than auto-declared Investable.
     if strong_multidimensional_fit and score >= 45:
-        return "priority", "venture_quality_investable"
+        return "review", "venture_quality_investable"
     if qualified_for_llm and score >= 55:
-        return "priority", "strong_investable_candidate"
+        return "review", "strong_investable_candidate"
 
-    # Needs Review is reserved for credible thesis-aligned products that show
-    # at least two quality dimensions but are missing full conviction.
+    # Reserved for credible thesis-aligned products that show at least two
+    # quality dimensions but are missing full conviction.
     if venture_reviewable or qualified_for_llm:
         return "review", "credible_venture_candidate_missing_one_dimension"
     if potential_glasswing_fit:
-        return "insufficient", "thesis_fit_missing_wedge_or_moat"
+        return "review", "thesis_fit_missing_wedge_or_moat"
 
     # A readable company without venture evidence is not a Hard Denial, but it
-    # should not consume the human-review queue.
-    return "insufficient", "insufficient_venture_quality_evidence"
+    # still goes to Needs Review rather than a bucket no one looks at.
+    return "review", "insufficient_venture_quality_evidence"
 
 
 def diligence_rank_score(
@@ -3207,7 +3222,6 @@ def viability_label(bucket: str) -> str:
         "comp": "Potential Comp",
         "coming_soon": "Verified Prelaunch",
         "reject": "Hard Denied",
-        "insufficient": "Insufficient Evidence",
         "ghost": "Ghost / Inaccessible",
     }.get(bucket, "Review Candidate")
 
@@ -3828,9 +3842,6 @@ def apply_run_preferences(
     require_us = bool(
         preferences.get("require_us_evidence", False)
     )
-    include_coming_soon = bool(
-        preferences.get("include_coming_soon", True)
-    )
 
     screened_reasons: list[str] = []
 
@@ -3943,45 +3954,6 @@ def apply_run_preferences(
             ) != "US_VERIFIED":
                 reasons.append("explicit_us_evidence_required")
 
-        if bucket == "coming_soon":
-            if not include_coming_soon:
-                reasons.append("coming_soon_disabled_for_run")
-            pillar = str(row.get("rule_thesis_pillar", ""))
-            if selected_industries and pillar not in selected_industries:
-                reasons.append("outside_selected_industries")
-
-            searchable = clean(
-                " ".join([
-                    str(row.get("page_title", "")),
-                    str(row.get("meta_description", "")),
-                    str(row.get("homepage_excerpt", "")),
-                    str(row.get("prelaunch_evidence", "")),
-                ])
-            ).lower()
-            if include_keywords:
-                matches = [
-                    term
-                    for term in include_keywords
-                    if term in searchable
-                ]
-                include_ok = (
-                    len(matches) == len(include_keywords)
-                    if keyword_mode == "all"
-                    else bool(matches)
-                )
-                if not include_ok:
-                    reasons.append("missing_required_keywords")
-            excluded_hits = [
-                term
-                for term in exclude_keywords
-                if term in searchable
-            ]
-            if excluded_hits:
-                reasons.append(
-                    "matched_excluded_keywords:"
-                    + "|".join(excluded_hits[:8])
-                )
-
         if reasons and bucket != "reject":
             score_value = int(
                 pd.to_numeric(
@@ -4076,8 +4048,12 @@ def apply_run_preferences(
                     or status_text.startswith(("4", "5"))
                     or word_count < 3
                 )
-                result.at[index, "routing_bucket"] = "insufficient"
-                result.at[index, "viability_label"] = "Insufficient Evidence"
+                # Still Needs Review, not a separate "insufficient" limbo --
+                # there is no bucket left that a real, factual disqualifier
+                # doesn't route to. This branch only changes the reason
+                # text attached, for context on why it's a weaker candidate.
+                result.at[index, "routing_bucket"] = "review"
+                result.at[index, "viability_label"] = "Needs Review"
                 result.at[index, "routing_reason"] = (
                     "website_unavailable_or_no_usable_company_evidence"
                     if inaccessible
@@ -4134,10 +4110,6 @@ def apply_persistent_overrides(output: pd.DataFrame) -> pd.DataFrame:
         "Coming Soon": (
             "coming_soon",
             "manual_override_coming_soon",
-        ),
-        "Insufficient Evidence": (
-            "insufficient",
-            "manual_override_insufficient",
         ),
         "Ignore Permanently": (
             "screened_out",
@@ -4227,13 +4199,13 @@ def automated_discard_mask(output: pd.DataFrame) -> pd.Series:
     slop = output.get(
         "venture_slop_risk", pd.Series(False, index=output.index)
     ).astype(str).str.lower().isin({"true", "1", "yes"})
-    # "insufficient" is the primary catch-all for real, substantive sites
-    # that just don't have enough evidence yet (filter.py's scoring chain
-    # routes most ambiguous-but-real domains here, not to "review"). Leaving
-    # it out of protected_buckets meant almost everything that wasn't a
-    # priority/coming_soon/review/comp candidate got silently purged before
-    # ever reaching the Insufficient Evidence tab -- confirmed live: a
-    # 600-domain batch classified 162 and retained zero anywhere.
+    # route_company/apply_run_preferences only ever produce "review" or
+    # "reject" now (2026-08-08: Investable/Coming Soon/Insufficient Evidence
+    # collapsed into a single Needs Review outcome -- see route_company's
+    # docstring). "priority"/"coming_soon"/"comp"/"insufficient" only reach
+    # routing_bucket via a manual override now, which is already separately
+    # protected via manually_protected below -- kept here too as a second,
+    # harmless line of defense against ever silently purging one.
     protected_buckets = buckets.isin(
         {"priority", "coming_soon", "review", "comp", "insufficient"}
     )

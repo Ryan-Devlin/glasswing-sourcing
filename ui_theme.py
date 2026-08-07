@@ -113,12 +113,21 @@ div[data-testid="stTabs"] button[aria-selected="true"] p {
     border: 1px solid var(--border-color, rgba(11, 11, 11, 0.10));
     border-radius: 14px;
     padding: 1.1rem 1.25rem 1rem;
+    /* A grid item's default min-width is its content's min-content size,
+       not 0 -- a long unbroken title (a raw domain has no spaces to wrap
+       at) stretches this item past its 1fr track, pushing the whole grid
+       (and the card grid's container) past the right edge of the page.
+       min-width: 0 lets the track actually hold to 1fr; overflow-wrap
+       lets the title itself then wrap instead of overflowing sideways. */
+    min-width: 0;
+    overflow-wrap: anywhere;
 }
 .gw-card-top {
     display: flex;
     align-items: baseline;
     justify-content: space-between;
     gap: 0.5rem;
+    min-width: 0;
 }
 a.gw-card-title, a.gw-card-title:link, a.gw-card-title:visited,
 span.gw-card-title {
@@ -128,6 +137,7 @@ span.gw-card-title {
     line-height: 1.15;
     color: var(--text-color, #0b0b0b) !important;
     text-decoration: none !important;
+    min-width: 0;
 }
 a.gw-card-title:hover { text-decoration: underline !important; }
 .gw-card-meta {

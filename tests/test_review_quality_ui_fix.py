@@ -16,22 +16,25 @@ class ReviewQualityUiFixTests(unittest.TestCase):
         self.assertIn("signal_dimensions >= 1", self.filter)
 
     def test_low_signal_is_not_hard_denied(self):
+        # 2026-08-08: there is no more separate "insufficient" limbo bucket
+        # -- a low-signal, non-disqualified company is Needs Review, the
+        # same as everything else that isn't a factual denial.
         self.assertIn(
             "no_clear_enterprise_or_glasswing_fit",
             self.dashboard,
         )
         self.assertIn(
-            'result.at[index, "routing_bucket"] = "insufficient"',
+            'result.at[index, "routing_bucket"] = "review"',
             self.filter,
         )
-        self.assertIn('"Insufficient Evidence"', self.dashboard)
-        self.assertIn(
-            'routing.eq("ghost")] = "insufficient_evidence"',
-            self.dashboard,
-        )
+        self.assertNotIn('"Insufficient Evidence"', self.dashboard)
 
     def test_hard_denied_requires_explicit_evidence(self):
-        self.assertNotIn(
+        # route_company's "reject" bucket is itself already gated on a
+        # specific factual disqualifier (see its docstring) -- the display
+        # layer trusting it directly is no longer a second, separate
+        # regex-reconstruction of "is this really a denial".
+        self.assertIn(
             'visible.loc[routing.eq("reject")] = "hard_denied"',
             self.dashboard,
         )
@@ -40,10 +43,12 @@ class ReviewQualityUiFixTests(unittest.TestCase):
             self.dashboard,
         )
 
-    def test_enterprise_rescue_still_requires_objective_score_floor(self):
+    def test_enterprise_rescue_signal_is_still_computed(self):
+        # Enterprise rescue no longer gates promotion into Needs Review --
+        # everything not a factual denial is Needs Review regardless. It's
+        # kept only as an informational reason attached to the row.
         self.assertIn("enterprise_rescue_mask", self.dashboard)
-        self.assertIn("scores.ge(review_floor)", self.dashboard)
-        self.assertIn("| enterprise_rescue", self.dashboard)
+        self.assertIn("rescue_promoted = enterprise_rescue", self.dashboard)
         self.assertIn("enterprise_rescue_signal", self.filter)
 
     def test_dashboard_uses_revised_fit_score_without_rewriting_history(self):
@@ -85,9 +90,12 @@ class ReviewQualityUiFixTests(unittest.TestCase):
         self.assertNotIn("human_training_basket_no", self.filter)
         self.assertIn('result.at[idx, "training_basket"]', self.filter)
 
-    def test_required_keyword_miss_cannot_be_promoted_to_review(self):
-        self.assertIn("missing_required_keywords", self.dashboard)
-        self.assertIn('visible.loc[keyword_failed] = "insufficient_evidence"', self.dashboard)
+    def test_required_keyword_miss_is_recorded_as_a_screened_out_reason(self):
+        # 2026-08-08: a keyword miss no longer hides a company in a separate
+        # limbo bucket -- there is none left. It still shows up as a
+        # persisted reason for context, but the company remains visible in
+        # Needs Review like anything else that isn't a factual denial.
+        self.assertIn("missing_required_keywords", self.filter)
 
     def test_classification_quality_diagnostics(self):
         self.assertIn('"#### Classification quality"', self.dashboard)

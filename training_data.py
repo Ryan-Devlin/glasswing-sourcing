@@ -381,8 +381,10 @@ def build_active_review_queue(limit: int = 250) -> pd.DataFrame:
         "priority": "Investable",
         "review": "Needs Review",
         "comp": "Potential Comp",
-        "insufficient": "Insufficient Evidence",
-        "ghost": "Insufficient Evidence",
+        # Legacy stored values from before 2026-08-08 -- route_company
+        # only produces "review" or "reject" now.
+        "insufficient": "Needs Review",
+        "ghost": "Needs Review",
     }).fillna(routing.str.replace("_", " ").str.title())
     queue["Why review"] = why
     queue["Claude"] = claude.replace("", "Not reviewed")

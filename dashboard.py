@@ -1877,11 +1877,12 @@ def merge_claude_results(frame: pd.DataFrame) -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False, max_entries=4)
 def visible_classification_frame(frame: pd.DataFrame) -> pd.DataFrame:
-    """Assign every screened row to one useful visible outcome.
+    """Assign every screened row to one of two outcomes.
 
-    Needs Review is intentionally narrow: a company must have meaningful
-    score and enterprise evidence. Uncertain rows remain visible as
-    Insufficient Evidence; Hard Denied requires a factual disqualifier.
+    Needs Review is the default for everything that isn't a specific,
+    factual disqualifier -- Investable and Coming Soon are labels Claude
+    or a human applies on top of it, not something this function decides
+    on its own. Hard Denied requires a factual disqualifier.
     """
     if frame.empty:
         result = frame.copy()
@@ -2007,23 +2008,6 @@ def visible_classification_frame(frame: pd.DataFrame) -> pd.DataFrame:
         ).fillna(0)
         signal_dimensions += values.gt(0).astype(int)
 
-    clear_enterprise = pd.Series(
-        False,
-        index=result.index,
-        dtype="bool",
-    )
-    for column in (
-        "clear_enterprise_idea",
-        "sparse_deep_tech_idea",
-        "sparse_vertical_workflow_idea",
-        "potential_glasswing_fit",
-    ):
-        values = result.get(
-            column,
-            pd.Series("", index=result.index),
-        ).astype(str).str.strip().str.lower()
-        clear_enterprise |= values.isin({"true", "1", "yes"})
-
     saved_rescue = result.get(
         "enterprise_rescue_signal",
         pd.Series("", index=result.index),
@@ -2040,29 +2024,23 @@ def visible_classification_frame(frame: pd.DataFrame) -> pd.DataFrame:
     enterprise_rescue = saved_rescue | inferred_rescue
 
     review_floor = 25
-    review_eligible = (
-        scores.ge(review_floor)
-        & (
-            signal_dimensions.ge(1)
-            | clear_enterprise
-            | enterprise_rescue
-        )
-    )
 
+    # Two outcomes only (2026-08-08): Needs Review is the default for
+    # everything that isn't a specific, factual disqualifier -- there is
+    # no more low-attention "insufficient evidence" limbo that a
+    # thesis-fit judgment quietly falls into. "priority"/"coming_soon" are
+    # only ever reached now via a manual override or a Claude KEEP -- kept
+    # here too so already-stored historical rows from before this change
+    # still display the same way rather than silently reappearing as
+    # Needs Review.
     visible = pd.Series(
-        "insufficient_evidence",
+        "needs_review",
         index=result.index,
         dtype="object",
     )
-
+    visible.loc[routing.eq("reject")] = "hard_denied"
     visible.loc[routing.eq("priority")] = "investable"
     visible.loc[routing.eq("coming_soon")] = "coming_soon"
-    visible.loc[routing.eq("comp")] = "needs_review"
-    visible.loc[
-        routing.isin({"review", "screened_out", "insufficient", "reject"})
-        & review_eligible
-    ] = "needs_review"
-    visible.loc[routing.eq("ghost")] = "insufficient_evidence"
 
     legacy_reasons = result.get(
         "screened_out_reasons",
@@ -2073,99 +2051,32 @@ def visible_classification_frame(frame: pd.DataFrame) -> pd.DataFrame:
         pd.Series("", index=result.index),
     ).astype(str).str.lower()
     combined_reasons = legacy_reasons + ";" + routing_reasons
-    keyword_failed = combined_reasons.str.contains(
-        "missing_required_keywords",
-        case=False,
-        regex=False,
-    )
-    # Re-apply the current run's keyword constraint to historical rows too.
-    # Older rows may predate the setting and therefore have no persisted
-    # screened-out reason yet.
-    current_keywords = [
-        str(term).strip().lower()
-        for term in saved_config.get("include_keywords", [])
-        if str(term).strip()
-    ]
-    if current_keywords:
-        searchable = (
-            result.get("page_title", pd.Series("", index=result.index)).astype(str)
-            + " " + result.get("meta_description", pd.Series("", index=result.index)).astype(str)
-            + " " + result.get("homepage_excerpt", pd.Series("", index=result.index)).astype(str)
-            + " " + result.get("rule_evidence", pd.Series("", index=result.index)).astype(str)
-            + " " + result.get("prelaunch_evidence", pd.Series("", index=result.index)).astype(str)
-        ).str.lower()
-        keyword_matches = searchable.map(
-            lambda value: [term for term in current_keywords if term in value]
-        )
-        current_keyword_failed = (
-            keyword_matches.map(len).eq(len(current_keywords))
-            if str(saved_config.get("keyword_mode", "any")).lower() == "all"
-            else keyword_matches.map(bool).eq(False)
-        )
-        keyword_failed |= current_keyword_failed
-    # Required-keyword filtering is an explicit user constraint.  It must
-    # outrank the generic score/evidence rescue below; otherwise a historical
-    # row can incorrectly reappear in Needs Review after dashboard reload.
-    visible.loc[keyword_failed] = "insufficient_evidence"
 
+    # Only real factual disqualifiers count as Hard Denied here --
+    # "substantive_site_no_glasswing_fit_signals" used to also promote a
+    # weak-fit-but-readable site straight to Hard Denied, which is exactly
+    # the same low-confidence auto-judgment problem Insufficient Evidence
+    # had, just under a different label. That's now a Needs Review company
+    # like any other uncertain one, not a denial.
     factual_denial_terms = (
         "parked_or_for_sale|generic_hosting_or_registrar_placeholder|"
         "confirmed_non_us|predominantly_non_english|consumer_b2c_product|"
         "agency_or_consultancy|media_newsletter_or_aggregator|"
-        "commodity_ai_wrapper_or_service|mature_or_funded_company|"
-        "substantive_site_no_glasswing_fit_signals"
+        "commodity_ai_wrapper_or_service|mature_or_funded_company"
     )
     explicit_denial = combined_reasons.str.contains(
         factual_denial_terms,
         regex=True,
         na=False,
     )
-
-    # Historical rows receive the same conservative, evidence-based rule as
-    # newly screened rows. Fetch failures and sparse sites remain insufficient.
-    fetch_errors = result.get(
-        "fetch_error",
-        pd.Series("", index=result.index),
-    ).fillna("").astype(str).str.strip()
-    http_statuses = pd.to_numeric(
-        result.get("http_status", pd.Series(0, index=result.index)),
-        errors="coerce",
-    ).fillna(0)
-    word_counts = pd.to_numeric(
-        result.get("word_count", pd.Series(0, index=result.index)),
-        errors="coerce",
-    ).fillna(0)
-
-    substantive_no_fit = (
-        fetch_errors.eq("")
-        & http_statuses.between(200, 399)
-        & word_counts.ge(80)
-        & ~review_eligible
-        & ~result.get(
-            "domain",
-            pd.Series("", index=result.index),
-        ).map(stable_domain).isin(set(GLASSWING_PORTFOLIO_DOMAINS))
-    )
-    result.loc[
-        substantive_no_fit,
-        "routing_reason",
-    ] = "substantive_site_no_glasswing_fit_signals"
-    explicit_denial |= substantive_no_fit
     visible.loc[explicit_denial] = "hard_denied"
 
-    # Claude decisions override automatic routing.
+    # Claude decisions and manual overrides can promote a Needs Review
+    # company to Investable/Coming Soon, or confirm a Hard Denied.
     visible.loc[decisions.eq("KEEP")] = "investable"
-    visible.loc[
-        decisions.eq("MAYBE")
-        & review_eligible
-    ] = "needs_review"
-    visible.loc[
-        decisions.eq("MAYBE")
-        & ~review_eligible
-    ] = "insufficient_evidence"
+    visible.loc[decisions.eq("MAYBE")] = "needs_review"
     visible.loc[decisions.eq("REJECT")] = "hard_denied"
 
-    # Persistent manual decisions are final.
     visible.loc[overrides.eq("Investable Candidate")] = "investable"
     visible.loc[overrides.eq("Review Candidate")] = "needs_review"
     visible.loc[overrides.eq("Potential Comp")] = "needs_review"
@@ -2186,55 +2097,6 @@ def visible_classification_frame(frame: pd.DataFrame) -> pd.DataFrame:
         rescue_promoted,
         "routing_reason",
     ] = "enterprise_rescue_requires_human_review"
-
-    low_signal_mask = (
-        visible.eq("insufficient_evidence")
-        & ~routing.eq("reject")
-        & ~explicit_denial
-        & ~decisions.eq("REJECT")
-        & ~overrides.eq("Hard Denied")
-    )
-    page_errors = result.get(
-        "fetch_error",
-        pd.Series("", index=result.index),
-    ).astype(str).str.strip()
-    statuses = result.get(
-        "http_status",
-        pd.Series("", index=result.index),
-    ).astype(str).str.strip()
-    word_counts = pd.to_numeric(
-        result.get(
-            "word_count",
-            pd.Series(0, index=result.index),
-        ),
-        errors="coerce",
-    ).fillna(0)
-    inaccessible = (
-        page_errors.ne("")
-        | statuses.str.startswith(("4", "5"))
-        | word_counts.lt(3)
-    )
-
-    result.loc[
-        low_signal_mask & inaccessible,
-        "routing_reason",
-    ] = "website_unavailable_or_no_usable_company_evidence"
-    result.loc[
-        low_signal_mask & ~inaccessible,
-        "routing_reason",
-    ] = "no_clear_enterprise_or_glasswing_fit"
-
-    result.loc[
-        low_signal_mask,
-        "denial_evidence",
-    ] = (
-        "Score "
-        + scores.astype(int).astype(str)
-        + "; enterprise evidence dimensions "
-        + signal_dimensions.astype(str)
-        + "; review requires score 25+ and at least 1 evidence dimension "
-        + "or a clear enterprise signal"
-    )
 
     return result
 
@@ -2274,14 +2136,12 @@ def classification_reason_summary(frame: pd.DataFrame) -> pd.DataFrame:
 investable_candidates = visible_bucket_frame("investable")
 coming_soon = visible_bucket_frame("coming_soon")
 needs_review = visible_bucket_frame("needs_review")
-insufficient_evidence = visible_bucket_frame("insufficient_evidence")
 hard_denied = visible_bucket_frame("hard_denied")
 
 for visible_frame_name in (
     "investable_candidates",
     "coming_soon",
     "needs_review",
-    "insufficient_evidence",
     "hard_denied",
 ):
     visible_frame = locals()[visible_frame_name]
@@ -2312,7 +2172,7 @@ claude_rejected = hard_denied[
 ].copy()
 
 st.markdown("#### Sourcing funnel")
-funnel_1, funnel_2, funnel_3, funnel_4, funnel_5 = st.columns(5)
+funnel_1, funnel_2, funnel_3 = st.columns(3)
 
 if result_scope == "Current Run":
     funnel_received = int(
@@ -2330,7 +2190,6 @@ visible_screened = pd.concat(
         investable_candidates,
         coming_soon,
         needs_review,
-        insufficient_evidence,
         hard_denied,
     ],
     ignore_index=True,
@@ -2349,11 +2208,6 @@ raw_routing = all_screened.get(
 ).astype(str).str.strip().str.lower()
 inaccessible_count = int(raw_routing.eq("ghost").sum())
 funnel_usable = max(0, funnel_screened - inaccessible_count)
-funnel_in_scope = (
-    len(investable_candidates)
-    + len(coming_soon)
-    + len(needs_review)
-)
 
 funnel_1.metric("New domains", funnel_received)
 funnel_2.metric(
@@ -2366,38 +2220,31 @@ funnel_3.metric(
     funnel_usable,
     help="Checked websites excluding known inaccessible or ghost sites.",
 )
-funnel_4.metric("Potential Glasswing fit", funnel_in_scope)
-funnel_5.metric("Investable", len(investable_candidates))
 
-metric_1, metric_2, metric_3, metric_4, metric_5 = st.columns(5)
-metric_1.metric(
-    "Investable candidates",
-    len(investable_candidates),
-)
+metric_1, metric_2, metric_3, metric_4 = st.columns(4)
+metric_1.metric("Investable", len(investable_candidates))
 metric_2.metric("Coming soon", len(coming_soon))
 metric_3.metric("Needs review", len(needs_review))
-metric_4.metric("Insufficient evidence", len(insufficient_evidence))
-metric_5.metric("Hard denied", len(hard_denied))
+metric_4.metric("Hard denied", len(hard_denied))
 
 retained_total = (
     len(investable_candidates)
     + len(coming_soon)
     + len(needs_review)
-    + len(insufficient_evidence)
     + len(hard_denied)
 )
 st.caption(
-    f"The five review tabs contain {retained_total:,} retained records. "
+    f"The four review tabs contain {retained_total:,} retained records. "
     "Automatic Python rejections are included in processing totals, but "
     "their domain data is intentionally deleted and therefore does not "
-    "appear in the tabs."
+    "appear in the tabs. Investable and Coming Soon are Claude/manual "
+    "labels applied on top of Needs Review, not automatic outcomes."
 )
 
 tabs = st.tabs([
     "Investable Candidates",
     "Coming Soon",
     "Needs Review",
-    "Insufficient Evidence",
     "Hard Denied",
     "Rejected by Claude",
     "Yes Basket",
@@ -2665,73 +2512,6 @@ with tabs[2]:
 
 with tabs[3]:
     st.caption(
-        "Sites that are inaccessible, sparse, login-only, or below the "
-        "evidence threshold live here. This is an uncertainty state, not "
-        "an investment rejection."
-    )
-    if insufficient_evidence.empty:
-        st.info("No companies currently have insufficient evidence.")
-    else:
-        readable_mask = insufficient_evidence.get(
-            "homepage_excerpt",
-            pd.Series("", index=insufficient_evidence.index),
-        ).astype(str).str.strip().ne("")
-        evidence_counts = st.columns(2)
-        evidence_counts[0].metric(
-            "Fetched, low signal",
-            int(readable_mask.sum()),
-        )
-        evidence_counts[1].metric(
-            "Website unavailable",
-            int((~readable_mask).sum()),
-        )
-        uncertain = pd.DataFrame(index=insufficient_evidence.index)
-        uncertain["Company"] = insufficient_evidence.get(
-            "page_title",
-            insufficient_evidence.get("domain", ""),
-        )
-        uncertain["Domain"] = insufficient_evidence.get("domain", "")
-        uncertain["Score"] = pd.to_numeric(
-            insufficient_evidence.get("_fit_score_v2", 1),
-            errors="coerce",
-        ).fillna(1).astype(int)
-        uncertain["Evidence Status"] = readable_mask.map({
-            True: "Fetched — insufficient Glasswing signal",
-            False: "Website unreachable after retry",
-        })
-        uncertain["Reason"] = insufficient_evidence.get(
-            "routing_reason",
-            pd.Series("", index=insufficient_evidence.index),
-        ).map(humanize_reason)
-        uncertain["Why it did not advance"] = insufficient_evidence.get(
-            "review_reasons",
-            "",
-        )
-        uncertain["Description"] = insufficient_evidence.get(
-            "meta_description",
-            "",
-        )
-        uncertain["Website"] = insufficient_evidence.get("final_url", "")
-        render_bucket_display(
-            uncertain.reset_index(drop=True),
-            "No companies currently have insufficient evidence.",
-            "insufficient",
-            column_config={
-                "Score": st.column_config.ProgressColumn(
-                    "Score",
-                    min_value=0,
-                    max_value=100,
-                    format="%d",
-                ),
-                "Website": st.column_config.LinkColumn(
-                    "Website",
-                    display_text="Open",
-                ),
-            },
-        )
-
-with tabs[4]:
-    st.caption(
         "Only companies with explicit factual disqualifying evidence "
         "appear here. Low score or incomplete evidence is not a denial."
     )
@@ -2793,7 +2573,7 @@ with tabs[4]:
             },
         )
 
-with tabs[5]:
+with tabs[4]:
     st.caption(
         "Companies Claude explicitly marked REJECT after selective "
         "diligence. This is an audit subset of Hard Denied, not a sixth "
@@ -2870,20 +2650,20 @@ with tabs[5]:
             },
         )
 
-with tabs[6]:
+with tabs[5]:
     render_basket_editor(
         basket="yes",
         path=YES_BASKET_DATA,
     )
 
-with tabs[7]:
+with tabs[6]:
     st.caption("Zero is a valid rating for an obvious poor fit.")
     render_basket_editor(
         basket="no",
         path=NO_BASKET_DATA,
     )
 
-with tabs[8]:
+with tabs[7]:
     st.caption(
         "Compact evidence and deterministic splits for small local models. "
         "Missing-page examples are excluded rather than taught as negative fit."
@@ -3031,7 +2811,7 @@ with tabs[8]:
                 st.success(f"Saved {len(selected)} Gold human labels.")
                 st.rerun()
 
-with tabs[9]:
+with tabs[8]:
     left, right = st.columns(2)
     with left:
         st.markdown("#### Pipeline status")
@@ -3084,10 +2864,6 @@ with tabs[9]:
         {"Bucket": "Investable", "Count": len(investable_candidates)},
         {"Bucket": "Coming soon", "Count": len(coming_soon)},
         {"Bucket": "Needs review", "Count": len(needs_review)},
-        {
-            "Bucket": "Insufficient evidence",
-            "Count": len(insufficient_evidence),
-        },
         {"Bucket": "Hard denied", "Count": len(hard_denied)},
         {"Bucket": "Retained total", "Count": retained_total},
     ])
@@ -3100,18 +2876,18 @@ with tabs[9]:
     st.markdown("#### Classification quality")
     quality_cols = st.columns(3)
     inaccessible_count = int(
-        insufficient_evidence.get(
+        needs_review.get(
             "routing_reason",
-            pd.Series("", index=insufficient_evidence.index),
+            pd.Series("", index=needs_review.index),
         )
         .astype(str)
         .eq("website_unavailable_or_no_usable_company_evidence")
         .sum()
     )
     low_signal_count = int(
-        insufficient_evidence.get(
+        needs_review.get(
             "routing_reason",
-            pd.Series("", index=insufficient_evidence.index),
+            pd.Series("", index=needs_review.index),
         )
         .astype(str)
         .eq("no_clear_enterprise_or_glasswing_fit")

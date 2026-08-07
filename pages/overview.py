@@ -205,9 +205,11 @@ st.caption(
 MASTER_BUCKETS = [
     ("Investable", ("priority",)),
     ("Coming Soon", ("coming_soon",)),
-    ("Needs Review", ("review",)),
+    # "insufficient"/"ghost"/"screened_out" are legacy stored values from
+    # before 2026-08-08 -- route_company only produces "review" or "reject"
+    # now, with no separate low-attention Insufficient Evidence limbo.
+    ("Needs Review", ("review", "insufficient", "ghost", "screened_out")),
     ("Potential Comp", ("comp",)),
-    ("Insufficient Evidence", ("insufficient", "ghost", "screened_out")),
     ("Hard Denied", ("reject",)),
 ]
 

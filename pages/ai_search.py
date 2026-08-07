@@ -372,9 +372,11 @@ with tabs[1]:
     bucket_specs = [
         ("Investable", ["priority"]),
         ("Coming Soon", ["coming_soon"]),
-        ("Needs Review", ["review"]),
+        # "insufficient"/"ghost"/"screened_out" are legacy stored values
+        # from before 2026-08-08 -- route_company only produces "review"
+        # or "reject" now, with no separate Insufficient Evidence limbo.
+        ("Needs Review", ["review", "insufficient", "ghost", "screened_out"]),
         ("Potential Comp", ["comp"]),
-        ("Insufficient Evidence", ["insufficient", "ghost", "screened_out"]),
         ("Hard Denied", ["reject"]),
     ]
     bucket_tabs = st.tabs([name for name, _ in bucket_specs])
@@ -437,7 +439,7 @@ with tabs[1]:
                 )
                 selected_bucket = pd.DataFrame(selected_rows)
                 if (
-                    bucket_name == "Insufficient Evidence"
+                    bucket_name == "Needs Review"
                     and raw_bucket_counts.get("ghost", 0)
                 ):
                     st.caption(

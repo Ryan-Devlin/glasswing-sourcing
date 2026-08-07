@@ -250,7 +250,7 @@ class RuleCalibrationTests(unittest.TestCase):
         self.assertTrue(detected)
         self.assertTrue(evidence)
 
-    def test_no_fit_without_disqualifier_is_insufficient_not_denied(self):
+    def test_no_fit_without_disqualifier_is_review_not_denied(self):
         bucket, reason = route_company(
             is_parked=False,
             is_coming=False,
@@ -266,10 +266,10 @@ class RuleCalibrationTests(unittest.TestCase):
             potential_glasswing_fit=False,
             substantive_no_fit_evidence=True,
         )
-        self.assertEqual(bucket, "insufficient")
+        self.assertEqual(bucket, "review")
         self.assertEqual(reason, "substantive_site_no_glasswing_fit_signals")
 
-    def test_strong_multidimensional_candidate_is_promoted(self):
+    def test_strong_multidimensional_candidate_reaches_review(self):
         bucket, reason = route_company(
             is_parked=False,
             is_coming=False,
@@ -285,10 +285,10 @@ class RuleCalibrationTests(unittest.TestCase):
             high_conviction_fit=False,
             strong_multidimensional_fit=True,
         )
-        self.assertEqual(bucket, "priority")
+        self.assertEqual(bucket, "review")
         self.assertEqual(reason, "venture_quality_investable")
 
-    def test_trusted_high_conviction_fit_is_not_ignored_by_router(self):
+    def test_trusted_high_conviction_fit_still_reaches_review(self):
         bucket, reason = route_company(
             is_parked=False,
             is_coming=False,
@@ -304,7 +304,7 @@ class RuleCalibrationTests(unittest.TestCase):
             high_conviction_fit=True,
             substantive_no_fit_evidence=True,
         )
-        self.assertEqual(bucket, "priority")
+        self.assertEqual(bucket, "review")
         self.assertEqual(reason, "trusted_high_conviction_product_fit")
 
     def test_high_conviction_never_overrides_explicit_disqualifier(self):
