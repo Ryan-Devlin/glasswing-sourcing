@@ -909,6 +909,45 @@ def mark_success(conn: sqlite3.Connection, domains: list[str]) -> None:
         )
     conn.commit()
 
+def persist_unreachable_domains(
+    domains_with_errors: list[tuple[str, str]],
+) -> None:
+    """Give up-for-good domains a real, visible bucket instead of vanishing.
+
+    Confirmed: a domain that raises asyncio.TimeoutError on every fetch
+    attempt never produces a `page`, so it never reaches process()/
+    route_company() at all -- screen_records excludes it from `output`
+    entirely and mark_failure only ever updated the pipeline's own queue
+    table. After max_attempts (~3, roughly 6-10 minutes of backoff) it
+    just became status='failed' in the queue with zero classification
+    record, ever -- not delayed, gone. This persists a minimal,
+    clearly-labeled "insufficient" record for each one instead, so every
+    domain the pipeline actually attempted ends up in some bucket.
+    """
+    import pandas as pd
+
+    from classification_store import upsert_classifications
+
+    records = []
+    for domain, error in domains_with_errors:
+        domain = stable_domain(domain)
+        if not domain:
+            continue
+        records.append({
+            "domain": domain,
+            "final_url": f"https://{domain}",
+            "http_status": "",
+            "page_title": "",
+            "meta_description": "",
+            "homepage_excerpt": "",
+            "routing_bucket": "insufficient",
+            "routing_reason": "website_never_reachable_after_max_attempts",
+            "fetch_error": error,
+        })
+    if records:
+        upsert_classifications(pd.DataFrame(records))
+
+
 def mark_failure(
     conn: sqlite3.Connection,
     domains: list[str],
@@ -916,6 +955,7 @@ def mark_failure(
     max_attempts: int,
 ) -> None:
     now = datetime.now(timezone.utc)
+    gave_up: list[tuple[str, str]] = []
     for domain in domains:
         row = conn.execute(
             "SELECT attempts FROM domains WHERE domain=?",
@@ -931,6 +971,7 @@ def mark_failure(
                 """,
                 (utc_now(), error[:500], domain),
             )
+            gave_up.append((domain, error))
         else:
             delay_minutes = min(60, 2 ** attempts)
             retry_at = (
@@ -945,6 +986,8 @@ def mark_failure(
                 (retry_at, error[:500], domain),
             )
     conn.commit()
+    if gave_up:
+        persist_unreachable_domains(gave_up)
 
 
 def load_run_config() -> dict:

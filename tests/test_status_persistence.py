@@ -253,6 +253,75 @@ class StatusPersistenceTests(unittest.TestCase):
             conn.execute("SELECT COUNT(*) FROM claude_calls").fetchone()[0], 0
         )
 
+    def test_mark_failure_gives_up_domain_a_real_bucket_not_silence(self):
+        # Confirmed live: a domain that times out on every one of
+        # max_attempts tries never reaches process()/route_company at all
+        # -- screen_records excludes it from `output` entirely, and
+        # mark_failure only ever updated the pipeline's own queue table.
+        # It just vanished after ~3 attempts with zero classification
+        # record, forever, not "not yet bucketed" but never bucketed.
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("""
+            CREATE TABLE domains (
+                domain TEXT PRIMARY KEY, status TEXT, attempts INTEGER,
+                next_attempt_at TEXT, last_processed_at TEXT, last_error TEXT
+            )
+        """)
+        conn.execute(
+            "INSERT INTO domains(domain, status, attempts) "
+            "VALUES ('dead.ai', 'processing', 3)"
+        )
+        conn.commit()
+
+        with patch(
+            "classification_store.upsert_classifications"
+        ) as mock_upsert:
+            continuous_pipeline.mark_failure(
+                conn, ["dead.ai"], "TimeoutError: fetch timed out", 3
+            )
+
+        mock_upsert.assert_called_once()
+        persisted = mock_upsert.call_args[0][0]
+        self.assertEqual(list(persisted["domain"]), ["dead.ai"])
+        self.assertEqual(list(persisted["routing_bucket"]), ["insufficient"])
+        self.assertEqual(
+            list(persisted["routing_reason"]),
+            ["website_never_reachable_after_max_attempts"],
+        )
+        row = conn.execute(
+            "SELECT status FROM domains WHERE domain='dead.ai'"
+        ).fetchone()
+        self.assertEqual(row["status"], "failed")
+
+    def test_mark_failure_retry_path_does_not_persist_a_classification(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("""
+            CREATE TABLE domains (
+                domain TEXT PRIMARY KEY, status TEXT, attempts INTEGER,
+                next_attempt_at TEXT, last_processed_at TEXT, last_error TEXT
+            )
+        """)
+        conn.execute(
+            "INSERT INTO domains(domain, status, attempts) "
+            "VALUES ('retry-me.ai', 'processing', 1)"
+        )
+        conn.commit()
+
+        with patch(
+            "classification_store.upsert_classifications"
+        ) as mock_upsert:
+            continuous_pipeline.mark_failure(
+                conn, ["retry-me.ai"], "TimeoutError: fetch timed out", 3
+            )
+
+        mock_upsert.assert_not_called()
+        row = conn.execute(
+            "SELECT status FROM domains WHERE domain='retry-me.ai'"
+        ).fetchone()
+        self.assertEqual(row["status"], "pending")
+
     def test_claim_batch_prefers_newest_domains_over_stale_backlog(self):
         # Confirmed live: a 121,000+ historical backlog meant claim_batch's
         # old oldest-first ordering would have starved freshly arriving
