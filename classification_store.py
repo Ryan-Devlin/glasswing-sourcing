@@ -306,6 +306,26 @@ def migrate(conn: sqlite3.Connection | PostgresConnection) -> None:
         CREATE INDEX IF NOT EXISTS idx_claude_review_queue_status
             ON claude_review_queue(status, requested_at);
 
+        CREATE TABLE IF NOT EXISTS competitive_landscape_jobs (
+            job_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL DEFAULT 'queued',
+            website TEXT NOT NULL,
+            template_name TEXT NOT NULL,
+            materials_json TEXT NOT NULL DEFAULT '[]',
+            notes TEXT NOT NULL DEFAULT '',
+            requested_count INTEGER NOT NULL DEFAULT 25,
+            company_name TEXT NOT NULL DEFAULT '',
+            competitor_count INTEGER NOT NULL DEFAULT 0,
+            output_path TEXT NOT NULL DEFAULT '',
+            result_json TEXT NOT NULL DEFAULT '{{}}',
+            error TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            started_at TEXT NOT NULL DEFAULT '',
+            completed_at TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_competitive_jobs_status
+            ON competitive_landscape_jobs(status, created_at);
+
         CREATE TABLE IF NOT EXISTS admin_audit_log (
             {movement_id_column},
             action TEXT NOT NULL,

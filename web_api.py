@@ -14,12 +14,13 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 
-from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
@@ -102,19 +103,35 @@ from zone_universe.database import (
     diagnostics as zone_diagnostics,
     get_state as zone_worker_state,
 )
+from competitive_landscape import (
+    JOB_ROOT as LANDSCAPE_ROOT,
+    claim_job as claim_landscape_job,
+    create_job as create_landscape_job,
+    create_default_template,
+    execute_job as execute_landscape_job,
+    job as landscape_job,
+    list_jobs as list_landscape_jobs,
+    recover_jobs as recover_landscape_jobs,
+)
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     await asyncio.to_thread(reconcile_claude_routing)
-    task = asyncio.create_task(_claude_queue_worker())
+    await asyncio.to_thread(recover_landscape_jobs)
+    tasks = [
+        asyncio.create_task(_claude_queue_worker()),
+        asyncio.create_task(_landscape_worker()),
+    ]
     try:
         yield
     finally:
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 app = FastAPI(title="Glasswing Sourcing API", version="1.0.0", lifespan=lifespan)
@@ -754,6 +771,87 @@ async def _claude_queue_worker() -> None:
             )
         else:
             await asyncio.sleep(3)
+
+
+async def _landscape_worker() -> None:
+    while True:
+        queued = await asyncio.to_thread(claim_landscape_job)
+        if queued:
+            await asyncio.to_thread(execute_landscape_job, queued)
+        else:
+            await asyncio.sleep(3)
+
+
+@app.get("/api/competitive-landscapes")
+def competitive_landscapes():
+    return {"jobs": list_landscape_jobs()}
+
+
+@app.post("/api/competitive-landscapes", dependencies=[Depends(_require_admin)])
+async def submit_competitive_landscape(
+    website: str = Form(...),
+    requested_count: int = Form(25),
+    notes: str = Form(""),
+    template: UploadFile | None = File(None),
+    materials: list[UploadFile] = File(default=[]),
+):
+    website = website.strip()
+    if not website or "." not in website:
+        raise HTTPException(400, "Enter a valid company website")
+    if not 5 <= requested_count <= 75:
+        raise HTTPException(400, "Competitor count must be between 5 and 75")
+    if template and not (template.filename or "").lower().endswith(".xlsx"):
+        raise HTTPException(400, "The template must be an .xlsx workbook")
+    template_bytes = await template.read() if template else b""
+    if len(template_bytes) > 15_000_000:
+        raise HTTPException(413, "Template exceeds the 15 MB limit")
+    safe_materials: list[tuple[str, bytes]] = []
+    allowed = {".pdf", ".docx", ".xlsx", ".csv", ".txt", ".md"}
+    total = len(template_bytes)
+    for number, upload in enumerate(materials):
+        suffix = Path(upload.filename or "").suffix.lower()
+        if suffix not in allowed:
+            raise HTTPException(400, f"Unsupported supporting file: {upload.filename}")
+        content = await upload.read()
+        total += len(content)
+        if total > 40_000_000:
+            raise HTTPException(413, "Combined uploads exceed the 40 MB limit")
+        safe_materials.append((f"material-{number + 1}{suffix}", content))
+    job_id = uuid.uuid4().hex
+    folder = LANDSCAPE_ROOT / job_id
+    folder.mkdir(parents=True, exist_ok=True)
+    if template_bytes:
+        (folder / "template.xlsx").write_bytes(template_bytes)
+    else:
+        create_default_template(folder / "template.xlsx")
+    for name, content in safe_materials:
+        (folder / name).write_bytes(content)
+    create_landscape_job(website, "template.xlsx", [name for name, _ in safe_materials], notes[:5000], requested_count, job_id)
+    record_admin_audit("competitive_landscape_queued", website, f"job={job_id} competitors={requested_count}")
+    return {"job_id": job_id, "status": "queued"}
+
+
+@app.get("/api/competitive-landscapes/{job_id}")
+def competitive_landscape_status(job_id: str):
+    result = landscape_job(job_id)
+    if not result:
+        raise HTTPException(404, "Competitive landscape job not found")
+    result.pop("result_json", None)
+    result.pop("output_path", None)
+    return result
+
+
+@app.get("/api/competitive-landscapes/{job_id}/download")
+def download_competitive_landscape(job_id: str):
+    result = landscape_job(job_id)
+    if not result or result.get("status") != "completed":
+        raise HTTPException(404, "Completed workbook not found")
+    path = Path(str(result.get("output_path") or ""))
+    expected = (LANDSCAPE_ROOT / job_id).resolve()
+    if not path.is_file() or path.resolve().parent != expected:
+        raise HTTPException(404, "Workbook file is unavailable")
+    name = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(result.get("company_name") or "competitive" )).strip("-").lower()
+    return FileResponse(path, filename=f"{name or 'competitive'}-landscape.xlsx", media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
 @app.get("/api/runtime")

@@ -11,6 +11,8 @@ import {
   Bot,
   CheckCircle2,
   Database,
+  Download,
+  FileSpreadsheet,
   Globe2,
   HeartPulse,
   Home,
@@ -34,6 +36,7 @@ const NAV = [
   ["domains", "Domain Crawler (.com, .app)", Globe2],
   ["health", "System Health", HeartPulse],
   ["claude", "Claude Queue", Bot],
+  ["landscape", "Competitive Landscape", FileSpreadsheet],
 ];
 const BUCKET_TABS = [
   ["investable", "Investable"],
@@ -2044,6 +2047,72 @@ function GlobalWorkerControls() {
   );
 }
 
+function CompetitiveLandscapePage() {
+  const { admin, requestLogin } = useAdmin();
+  const [tick, setTick] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const jobs = useApi(`/api/competitive-landscapes?t=${tick}`, [tick]);
+  const active = (jobs.data?.jobs || []).some((job) => ["queued", "researching"].includes(job.status));
+  useEffect(() => {
+    if (!active) return undefined;
+    const timer = setInterval(() => setTick((value) => value + 1), 5000);
+    return () => clearInterval(timer);
+  }, [active]);
+  const submit = async (event) => {
+    event.preventDefault();
+    if (!admin) return requestLogin();
+    setBusy(true); setError(""); setMessage("");
+    const form = new FormData(event.currentTarget);
+    try {
+      const result = await api("/api/competitive-landscapes", { method: "POST", body: form });
+      setMessage(`Research job ${result.job_id.slice(0, 8)} is queued. You can leave this page; it will keep running.`);
+      event.currentTarget.reset();
+      setTick((value) => value + 1);
+    } catch (err) {
+      setError(err.payload?.detail || err.message || "Upload failed");
+    } finally { setBusy(false); }
+  };
+  const rows = jobs.data?.jobs || [];
+  const completed = rows.filter((job) => job.status === "completed").length;
+  return <section className="landscape-page">
+    <header>
+      <p className="eyebrow">MARKET INTELLIGENCE</p>
+      <h1>Competitive Landscape</h1>
+      <p>Turn a company website and supporting materials into a sourced competitor workbook built on your Excel template.</p>
+    </header>
+    <div className="metrics">
+      <div className="metric"><span>Total analyses</span><strong>{fmt(rows.length)}</strong></div>
+      <div className="metric"><span>In progress</span><strong>{fmt(rows.length - completed - rows.filter((j) => j.status === "failed").length)}</strong></div>
+      <div className="metric"><span>Completed</span><strong>{fmt(completed)}</strong></div>
+      <div className="metric"><span>Competitors mapped</span><strong>{fmt(rows.reduce((sum, job) => sum + Number(job.competitor_count || 0), 0))}</strong></div>
+    </div>
+    <form className="landscape-form" onSubmit={submit}>
+      <div className="section-title"><div><h2>Build a landscape</h2><p>Claude researches the market and fills every applicable field without fabricating unknown data.</p></div></div>
+      <div className="form-grid">
+        <label className="wide"><span>Company website *</span><input name="website" type="text" inputMode="url" placeholder="https://company.com" required /></label>
+        <label><span>Competitors</span><input name="requested_count" type="number" min="5" max="75" defaultValue="25" required /></label>
+        <label><span>Excel template <small>optional · Ship Angel layout is the default</small></span><input name="template" type="file" accept=".xlsx" /></label>
+        <label className="wide"><span>Supporting materials <small>optional · PDF, DOCX, XLSX, CSV, TXT</small></span><input name="materials" type="file" accept=".pdf,.docx,.xlsx,.csv,.txt,.md" multiple /></label>
+        <label className="wide"><span>Research notes <small>optional</small></span><textarea name="notes" rows="3" placeholder="Product positioning, geographies, competitor types, or special questions…" /></label>
+      </div>
+      <div className="form-actions">
+        <button className="primary" type="submit" disabled={busy}>{busy ? <><RefreshCw className="spin" size={16}/> Uploading…</> : <><FileSpreadsheet size={16}/> Build landscape</>}</button>
+        {!admin && <span>Admin login is required to start paid research.</span>}
+      </div>
+      {message && <p className="notice inline-notice">{message}</p>}
+      {error && <p className="error inline-notice">{error}</p>}
+    </form>
+    <div className="table-heading"><div><h2>Analysis history</h2><p>Research continues in the background through navigation and browser closes.</p></div><button onClick={() => setTick((value) => value + 1)}><RefreshCw size={15}/> Refresh</button></div>
+    {jobs.loading && !jobs.data ? <p className="loading"><RefreshCw size={15}/> Loading analyses…</p> :
+      rows.length === 0 ? <p className="empty">No competitive landscapes yet.</p> :
+      <div className="table-wrap"><table><thead><tr><th>Company</th><th>Website</th><th>Status</th><th>Competitors</th><th>Requested</th><th>Completed</th><th>Action</th></tr></thead><tbody>
+      {rows.map((job) => <tr key={job.job_id}><td><strong>{job.company_name || "Researching…"}</strong></td><td>{job.website}</td><td><span className={`pill job-${job.status}`}>{job.status}</span>{job.error && <small className="row-error">{job.error}</small>}</td><td>{fmt(job.competitor_count || 0)}</td><td>{new Date(job.created_at).toLocaleString()}</td><td>{job.completed_at ? new Date(job.completed_at).toLocaleString() : "—"}</td><td>{job.status === "completed" ? <a className="button-link" href={`/api/competitive-landscapes/${job.job_id}/download`}><Download size={15}/> Download</a> : "—"}</td></tr>)}
+      </tbody></table></div>}
+  </section>;
+}
+
 function App() {
   const [page, setPage] = useState(location.hash.slice(1) || "home");
   const [admin, setAdmin] = useState(false);
@@ -2069,6 +2138,7 @@ function App() {
     domains: <SearchCorpusPage kind="zone" />,
     health: <HealthPage />,
     claude: <ClaudeQueuePage />,
+    landscape: <CompetitiveLandscapePage />,
   }[page] || <HomePage />;
   return (
     <AdminContext.Provider
