@@ -40,6 +40,34 @@ def test_api_responses_are_not_cached():
     assert response.headers["x-content-type-options"] == "nosniff"
 
 
+def test_overview_uses_lightweight_classification_counts(monkeypatch):
+    monkeypatch.setattr(web_api, "_count_cache", None)
+    monkeypatch.setattr(
+        web_api,
+        "classification_bucket_counts",
+        lambda: {"priority": 7, "review": 11, "reject": 3},
+    )
+    monkeypatch.setattr(
+        web_api,
+        "health_report",
+        lambda *args, **kwargs: pytest.fail("homepage must not run full health checks"),
+    )
+
+    response = client.get("/api/overview")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "overall": "Healthy",
+        "counts": {"classifications": 21},
+        "buckets": {
+            "all": 21,
+            "investable": 7,
+            "review": 11,
+            "denied": 3,
+        },
+    }
+
+
 def test_landscape_submit_ignores_browser_blank_file_part(monkeypatch, tmp_path):
     captured = {}
     monkeypatch.setattr(web_api, "LANDSCAPE_ROOT", tmp_path)

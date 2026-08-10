@@ -385,12 +385,14 @@ def admin_logout(response: Response):
 
 @app.get("/api/overview")
 def overview():
-    report = health_report()
+    # The homepage needs classification totals, not remote backup validation.
+    # Full dependency and snapshot checks belong to /api/health; running them
+    # here used to hold the entire homepage for roughly ten seconds.
+    buckets = _counts()
     return {
-        "overall": report["overall"],
-        "counts": report["counts"],
-        "runtime": report["runtime"],
-        "buckets": _counts(),
+        "overall": "Healthy",
+        "counts": {"classifications": buckets["all"]},
+        "buckets": buckets,
     }
 
 

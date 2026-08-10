@@ -537,8 +537,6 @@ function HomePage() {
   const [q, setQ] = useState("");
   const [rows, setRows] = useState([]);
   const [busy, setBusy] = useState(false);
-  if (overview.loading) return <Loading />;
-  if (overview.error) return <ErrorBox>{overview.error}</ErrorBox>;
   const d = overview.data;
   return (
     <>
@@ -597,19 +595,27 @@ function HomePage() {
       <section>
         <div className="section-title">
           <h2>System overview</h2>
-          <span className={`status ${String(d.overall).toLowerCase()}`}>
-            {d.overall}
-          </span>
+          {d && (
+            <span className={`status ${String(d.overall).toLowerCase()}`}>
+              {d.overall}
+            </span>
+          )}
         </div>
-        <div className="metrics">
-          <Metric
-            label="Companies tracked"
-            value={fmt(d.counts.classifications)}
-          />
-          <Metric label="Investable" value={fmt(d.buckets.investable)} />
-          <Metric label="Needs review" value={fmt(d.buckets.review)} />
-          <Metric label="Hard denied" value={fmt(d.buckets.denied)} />
-        </div>
+        {overview.error ? (
+          <ErrorBox>{overview.error}</ErrorBox>
+        ) : !d ? (
+          <Loading />
+        ) : (
+          <div className="metrics">
+            <Metric
+              label="Companies tracked"
+              value={fmt(d.counts.classifications)}
+            />
+            <Metric label="Investable" value={fmt(d.buckets.investable)} />
+            <Metric label="Needs review" value={fmt(d.buckets.review)} />
+            <Metric label="Hard denied" value={fmt(d.buckets.denied)} />
+          </div>
+        )}
       </section>
       <CompaniesTable />
     </>
@@ -1238,7 +1244,9 @@ function CertStreamPage() {
   const status = useApi("/api/certstream/status", [tick]);
   const claude = useApi("/api/claude/status", [tick]);
   useEffect(() => {
-    const id = setInterval(() => setTick((x) => x + 1), 30000);
+    const id = setInterval(() => {
+      if (document.visibilityState === "visible") setTick((x) => x + 1);
+    }, 30000);
     return () => clearInterval(id);
   }, []);
   const s = status.data || {};
@@ -1507,7 +1515,11 @@ function SearchCorpusPage({ kind }) {
   useEffect(() => {
     if (!isAi || !metrics.data?.pending) return;
     const timer = setInterval(
-      () => setMetricsTick((value) => value + 1),
+      () => {
+        if (document.visibilityState === "visible") {
+          setMetricsTick((value) => value + 1);
+        }
+      },
       15000,
     );
     return () => clearInterval(timer);
@@ -1832,7 +1844,9 @@ function ClaudeQueuePage() {
   const [message, setMessage] = useState("");
   const queue = useApi("/api/claude/queue", [tick]);
   useEffect(() => {
-    const timer = setInterval(() => setTick((v) => v + 1), 5000);
+    const timer = setInterval(() => {
+      if (document.visibilityState === "visible") setTick((v) => v + 1);
+    }, 5000);
     return () => clearInterval(timer);
   }, []);
   const retry = async (domain) => {
@@ -1981,7 +1995,9 @@ function ClaudeNotifier() {
       } catch {}
     };
     check();
-    const timer = setInterval(check, 10000);
+    const timer = setInterval(() => {
+      if (document.visibilityState === "visible") check();
+    }, 10000);
     return () => clearInterval(timer);
   }, [admin]);
   return null;
@@ -1994,7 +2010,11 @@ function GlobalWorkerControls() {
   const runtime = useApi("/api/runtime", [tick]);
   useEffect(() => {
     if (!admin) return;
-    const timer = setInterval(() => setTick((value) => value + 1), 30000);
+    const timer = setInterval(() => {
+      if (document.visibilityState === "visible") {
+        setTick((value) => value + 1);
+      }
+    }, 30000);
     return () => clearInterval(timer);
   }, [admin]);
   if (!admin) return null;
@@ -2068,7 +2088,11 @@ function CompetitiveLandscapePage() {
   const active = (jobs.data?.jobs || []).some((job) => ["queued", "researching", "exporting"].includes(job.status));
   useEffect(() => {
     if (!active) return undefined;
-    const timer = setInterval(() => setTick((value) => value + 1), 5000);
+    const timer = setInterval(() => {
+      if (document.visibilityState === "visible") {
+        setTick((value) => value + 1);
+      }
+    }, 5000);
     return () => clearInterval(timer);
   }, [active]);
   const submit = async (event) => {

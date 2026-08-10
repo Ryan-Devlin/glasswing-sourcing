@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -41,6 +42,8 @@ CLASSIFICATION_DATABASE_ENV_VARS = (
     "DATABASE_URL",
     "PIPELINE_DATABASE_URL",
 )
+_POSTGRES_MIGRATION_LOCK = threading.Lock()
+_MIGRATED_POSTGRES_TARGETS: set[str] = set()
 
 CORE_COLUMNS = (
     "domain",
@@ -103,27 +106,25 @@ def connect_store(
             read_only=read_only,
             env_var=database_env_var,
         )
-        if not read_only:
+        if not read_only and database_env_var not in _MIGRATED_POSTGRES_TARGETS:
             # This connection string is now shared by the web service and
             # the ai-worker/zone-worker cloud services too -- multiple
             # services independently connecting at once would otherwise
             # race to run this same schema DDL and deadlock on conflicting
             # locks (confirmed live for ai_search's identical pattern).
-            locked = acquire_advisory_lock_with_timeout(
-                conn,
-                "classification_store_migration_v2",
-                transactional=True,
-            )
-            try:
-                # PostgreSQL DDL still takes catalog locks even when guarded
-                # by IF NOT EXISTS. After a timeout, concurrent migrations can
-                # wait on each other and hold the public app in startup.
-                if locked:
-                    migrate(conn)
-            finally:
-                # The transaction-scoped lock is released by migrate's
-                # commit, including through connection poolers.
-                pass
+            with _POSTGRES_MIGRATION_LOCK:
+                if database_env_var not in _MIGRATED_POSTGRES_TARGETS:
+                    locked = acquire_advisory_lock_with_timeout(
+                        conn,
+                        "classification_store_migration_v2",
+                        transactional=True,
+                    )
+                    # PostgreSQL DDL still takes catalog locks even when
+                    # guarded by IF NOT EXISTS. Run it once per web/worker
+                    # process instead of once for every write request.
+                    if locked:
+                        migrate(conn)
+                    _MIGRATED_POSTGRES_TARGETS.add(database_env_var)
         return conn
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
