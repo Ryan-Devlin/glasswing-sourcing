@@ -119,3 +119,12 @@ def test_search_snippets_strip_untrusted_html_but_keep_highlights():
         "snippet": '<script>alert(1)</script><mark>match</mark><img src=x>',
     }])
     assert rows[0]["snippet"] == "alert(1)<mark>match</mark>"
+
+
+def test_ai_search_always_returns_a_rows_array(monkeypatch):
+    monkeypatch.setattr(web_api, "search_companies", lambda *args, **kwargs: [])
+    monkeypatch.setattr(web_api, "search_stats", lambda *args, **kwargs: {"domains": 12})
+    response = client.get("/api/ai/search?q=robotics")
+    assert response.status_code == 200
+    assert response.json()["rows"] == []
+    assert response.json()["stats"]["domains"] == 12

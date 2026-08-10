@@ -748,13 +748,25 @@ function SearchCorpusPage({ kind }) {
   const [q, setQ] = useState("");
   const [active, setActive] = useState("");
   const [page, setPage] = useState(1);
+  const [metricsTick, setMetricsTick] = useState(0);
+  const metrics = useApi(`/api/corpus/${kind}/stats`, [kind, metricsTick]);
   const result = useApi(
     active
       ? `/api/${kind}/search?q=${encodeURIComponent(active)}&page=${page}&page_size=100`
       : "/api/healthz",
     [active, page],
   );
-  const [upload, setUpload] = useState("");
+  const [upload, setUpload] = useState(null);
+  const [uploading, setUploading] = useState(false);
+  const rows = Array.isArray(result.data?.rows) ? result.data.rows : [];
+  useEffect(() => {
+    if (!isAi || !metrics.data?.pending) return;
+    const timer = setInterval(
+      () => setMetricsTick((value) => value + 1),
+      15000,
+    );
+    return () => clearInterval(timer);
+  }, [isAi, metrics.data?.pending]);
   const cols = [
     {
       key: "domain",
@@ -786,6 +798,25 @@ function SearchCorpusPage({ kind }) {
             : "Search retained website content without loading the zone corpus into the browser."}
         </p>
       </header>
+      {metrics.loading ? (
+        <Loading />
+      ) : metrics.error ? (
+        <ErrorBox>Metrics unavailable: {metrics.error}</ErrorBox>
+      ) : (
+        <div className="metrics corpus-metrics">
+          <Metric
+            label="Domains available"
+            value={fmt(metrics.data.available)}
+          />
+          <Metric label="Waiting to scrape" value={fmt(metrics.data.pending)} />
+          <Metric label="Crawled" value={fmt(metrics.data.crawled)} />
+          <Metric
+            label="Searchable pages"
+            value={fmt(metrics.data.searchable)}
+          />
+          <Metric label="Failed" value={fmt(metrics.data.failed)} />
+        </div>
+      )}
       <div className="segmented">
         <button
           className={view === "search" ? "active" : ""}
@@ -816,19 +847,45 @@ function SearchCorpusPage({ kind }) {
                   onChange={async (e) => {
                     const f = e.target.files[0];
                     if (!f) return;
+                    setUploading(true);
+                    setUpload(null);
                     const body = new FormData();
                     body.append("file", f);
-                    const r = await api("/api/ai/upload", {
-                      method: "POST",
-                      body,
-                    });
-                    setUpload(`Added ${r.added} of ${r.received} domains`);
+                    try {
+                      const r = await api("/api/ai/upload", {
+                        method: "POST",
+                        body,
+                      });
+                      setUpload(r);
+                      setMetricsTick((value) => value + 1);
+                    } catch (error) {
+                      setUpload({ error: error.message });
+                    } finally {
+                      setUploading(false);
+                      e.target.value = "";
+                    }
                   }}
                 />
                 {!admin && (
                   <button onClick={requestLogin}>Admin login to upload</button>
                 )}
-                {upload && <p>{upload}</p>}
+                {uploading && <p>Reading file and adding new domains…</p>}
+                {upload?.error && (
+                  <p className="upload-error">{upload.error}</p>
+                )}
+                {upload && !upload.error && (
+                  <div className="upload-result">
+                    <strong>{fmt(upload.added)} new domains queued</strong>
+                    <span>
+                      {fmt(upload.received)} unique received ·{" "}
+                      {fmt(upload.duplicates)} already known
+                    </span>
+                    <span>
+                      They move from Waiting to scrape → Crawled → Searchable
+                      automatically.
+                    </span>
+                  </div>
+                )}
               </div>
             </section>
           )}
@@ -858,11 +915,11 @@ function SearchCorpusPage({ kind }) {
             <ErrorBox>{result.error}</ErrorBox>
           ) : (
             <>
-              <Table rows={result.data.rows} columns={cols} />
+              <Table rows={rows} columns={cols} />
               <Pager
                 page={page}
                 setPage={setPage}
-                total={page * 100 + (result.data.rows.length === 100 ? 100 : 0)}
+                total={page * 100 + (rows.length === 100 ? 100 : 0)}
               />
             </>
           )}

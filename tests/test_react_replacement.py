@@ -16,6 +16,9 @@ def test_react_app_has_every_primary_page_and_no_streamlit_dependency():
         assert bucket in source
     assert 'aria-label="Classification bucket"' not in source
     assert 'aria-label="Crawler bucket"' not in source
+    assert "Array.isArray(result.data?.rows)" in source
+    for metric in ("Domains available", "Waiting to scrape", "Searchable pages"):
+        assert metric in source
 
 
 def test_production_entrypoint_is_fastapi():

@@ -27,6 +27,7 @@ for source in (ROOT, AI_SRC, ZONE_SRC):
         sys.path.insert(0, str(source))
 
 from ai_search.og_bridge import search_companies, search_stats
+from ai_search.database import connect as ai_connect, diagnostics as ai_diagnostics
 from classification_store import (
     classification_bucket_counts,
     classification_source_label,
@@ -60,6 +61,7 @@ from runtime_control import (
     shared_pipeline_backend_available,
 )
 from zone_universe.search import search_pages
+from zone_universe.database import connect as zone_connect, diagnostics as zone_diagnostics
 
 app = FastAPI(title="Glasswing Sourcing API", version="1.0.0")
 app.add_middleware(
@@ -363,6 +365,34 @@ def ai_search(q: str, page: int = 1, page_size: int = 100, minimum_words: int = 
     return {"rows": _safe_corpus_rows(rows), "page": page, "stats": search_stats(AI_SEARCH_DB)}
 
 
+@app.get("/api/corpus/{kind}/stats")
+def corpus_stats(kind: Literal["ai", "zone"]):
+    if kind == "ai":
+        with ai_connect(AI_SEARCH_DB, read_only=True) as conn:
+            details = ai_diagnostics(conn)
+            failed = int(conn.execute(
+                "SELECT count(*) AS count FROM domains "
+                "WHERE last_crawled_at IS NULL AND latest_crawl_status NOT IN ('pending','')"
+            ).fetchone()["count"])
+        searchable = search_stats(AI_SEARCH_DB)
+        return {
+            "available": details.get("domains", 0),
+            "pending": details.get("pending", 0),
+            "crawled": details.get("crawled", 0),
+            "failed": failed,
+            "searchable": searchable.get("indexed_pages", 0),
+        }
+    with zone_connect(ZONE_UNIVERSE_DB, read_only=True) as conn:
+        details = zone_diagnostics(conn)
+    return {
+        "available": details.get("queued_domains", 0),
+        "pending": max(0, details.get("queued_domains", 0) - details.get("attempted", 0)),
+        "crawled": details.get("success", 0),
+        "failed": max(0, details.get("attempted", 0) - details.get("success", 0)),
+        "searchable": details.get("searchable_pages", 0),
+    }
+
+
 @app.get("/api/zone/search")
 def zone_search(q: str, tld: str = "", page: int = 1, page_size: int = 100, minimum_words: int = 25):
     rows = search_pages(
@@ -406,10 +436,18 @@ async def upload_domains(file: UploadFile = File(...)):
     domains = [domain for domain in domains if domain]
     added = 0
     with ai_connect(AI_SEARCH_DB) as conn:
+        before = int(conn.execute("SELECT count(*) AS count FROM domains").fetchone()["count"])
         for domain in domains:
-            added += int(bool(add_domain(conn, domain)))
+            add_domain(conn, domain)
         conn.commit()
-    return {"received": len(domains), "added": added}
+        after = int(conn.execute("SELECT count(*) AS count FROM domains").fetchone()["count"])
+        added = max(0, after - before)
+    return {
+        "received": len(domains),
+        "added": added,
+        "duplicates": max(0, len(domains) - added),
+        "message": "New domains are queued automatically and become searchable after the crawler finishes.",
+    }
 
 
 DIST = ROOT / "webapp" / "dist"

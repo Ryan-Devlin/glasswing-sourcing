@@ -373,6 +373,23 @@ tbody tr:hover {
 .upload p {
   margin: 0 0 6px;
 }
+.upload-result {
+  display: grid;
+  gap: 4px;
+  margin-top: 10px;
+  color: #60736f;
+  font-size: 13px;
+}
+.upload-result strong {
+  color: #087365;
+  font-size: 15px;
+}
+.upload-error {
+  color: #a52f22;
+}
+.corpus-metrics {
+  grid-template-columns: repeat(5, minmax(130px, 1fr));
+}
 .worker-list {
   display: grid;
   gap: 10px;
@@ -427,6 +444,9 @@ tbody tr:hover {
 @media (max-width: 850px) {
   .app {
     grid-template-columns: 1fr;
+  }
+  .corpus-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   aside {
     position: static;
