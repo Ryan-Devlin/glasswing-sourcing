@@ -1381,7 +1381,7 @@ def purge_invalid_claude_diligence(
     """Remove only failed/empty automated results so they can be retried."""
     invalid_where = """
         reasoning='Diligence call failed'
-        OR result_json LIKE '%\"diligence_error\"%'
+        OR result_json LIKE ?
         OR (
             trim(product_summary)=''
             AND trim(reasoning)=''
@@ -1392,7 +1392,8 @@ def purge_invalid_claude_diligence(
         invalid = [
             str(row["domain"])
             for row in conn.execute(
-                f"SELECT domain FROM claude_diligence WHERE {invalid_where}"
+                f"SELECT domain FROM claude_diligence WHERE {invalid_where}",
+                ('%"diligence_error"%',),
             ).fetchall()
         ]
         if not invalid:

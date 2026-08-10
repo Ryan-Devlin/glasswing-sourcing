@@ -1,4 +1,5 @@
 import json
+import inspect
 import os
 
 import pandas as pd
@@ -173,6 +174,12 @@ def test_failed_and_empty_claude_results_are_purged_for_retry(tmp_path):
         for row in classification_store.training_label_rows(path=database)
     }
     assert set(labels) == {"real-reject.ai"}
+
+
+def test_invalid_diligence_json_pattern_is_a_bound_parameter():
+    source = inspect.getsource(classification_store.purge_invalid_claude_diligence)
+    assert "result_json LIKE ?" in source
+    assert "LIKE '%" not in source
 
 
 def test_automated_exclusion_is_tiny_and_human_truth_overrides_it(
