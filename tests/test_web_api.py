@@ -63,6 +63,25 @@ def test_classifications_are_server_paginated(monkeypatch):
     assert captured["sort"] == "Fit: low to high"
 
 
+def test_current_run_scope_reaches_counts_and_rows(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(web_api, "_current_run_id", lambda: "run-123")
+    monkeypatch.setattr(
+        web_api, "classification_bucket_counts",
+        lambda run_id="": captured.update(count_run_id=run_id) or {"priority": 2},
+    )
+    monkeypatch.setattr(
+        web_api, "query_classifications",
+        lambda buckets, **kwargs: captured.update(row_run_id=kwargs.get("run_id")) or [],
+    )
+    response = client.get(
+        "/api/classifications?bucket=investable&scope=current&page_size=25"
+    )
+    assert response.status_code == 200
+    assert response.json()["total"] == 2
+    assert captured == {"count_run_id": "run-123", "row_run_id": "run-123"}
+
+
 def test_human_label_endpoint_uses_protected_human_source(monkeypatch):
     captured = {}
     movement = {}

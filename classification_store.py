@@ -1174,7 +1174,8 @@ def admin_audit_rows(limit: int = 100, *, path: Path | str = CLASSIFICATION_DB) 
 
 
 def query_training_labels(
-    label: str, *, search: str = "", limit: int = 100, offset: int = 0,
+    label: str, *, search: str = "", run_id: str = "",
+    limit: int = 100, offset: int = 0,
     path: Path | str = CLASSIFICATION_DB,
 ) -> tuple[list[dict[str, object]], int]:
     target = clean(label).lower()
@@ -1185,6 +1186,12 @@ def query_training_labels(
     if clean(search):
         clauses.append("lower(domain) LIKE ?")
         params.append(f"%{clean(search).lower()}%")
+    if clean(run_id):
+        clauses.append(
+            "EXISTS (SELECT 1 FROM classifications c "
+            "WHERE c.domain=training_labels.domain AND c.record_json LIKE ?)"
+        )
+        params.append(f'%"run_id"%{clean(run_id)}%')
     where = " AND ".join(clauses)
     with connect_store(path, read_only=True) as conn:
         total = int(conn.execute(f"SELECT count(*) AS total FROM training_labels WHERE {where}", params).fetchone()["total"])

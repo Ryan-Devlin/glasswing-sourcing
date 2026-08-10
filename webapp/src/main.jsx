@@ -876,6 +876,7 @@ function LabelsPanel() {
 function CompaniesTable() {
   const { admin, requestLogin } = useAdmin();
   const [bucket, setBucket] = useState("investable");
+  const [scope, setScope] = useState("current");
   const [page, setPage] = useState(1);
   const [refresh, setRefresh] = useState(0);
   const [label, setLabel] = useState(null);
@@ -885,10 +886,11 @@ function CompaniesTable() {
   const [claudeOverride, setClaudeOverride] = useState(null);
   const basket = bucket === "yes" || bucket === "no";
   const query = basket
-    ? `/api/labels?label=${bucket}&page=${page}&page_size=100`
-    : `/api/classifications?bucket=${bucket}&page=${page}&page_size=100&sort=${encodeURIComponent(apiSort(sort))}`;
+    ? `/api/labels?label=${bucket}&scope=${scope}&page=${page}&page_size=100`
+    : `/api/classifications?bucket=${bucket}&scope=${scope}&page=${page}&page_size=100&sort=${encodeURIComponent(apiSort(sort))}`;
   const result = useApi(query, [
     bucket,
+    scope,
     page,
     refresh,
     sort.key,
@@ -950,6 +952,20 @@ function CompaniesTable() {
           </p>
         </div>
       </div>
+      <div className="segmented scope-tabs" aria-label="Classification history scope">
+        <button
+          className={scope === "current" ? "active" : ""}
+          onClick={() => { setScope("current"); setPage(1); }}
+        >
+          Current run
+        </button>
+        <button
+          className={scope === "history" ? "active" : ""}
+          onClick={() => { setScope("history"); setPage(1); }}
+        >
+          All history
+        </button>
+      </div>
       <BucketTabs
         value={bucket}
         onChange={(value) => {
@@ -960,11 +976,7 @@ function CompaniesTable() {
       <div className="export-row">
         <a
           className="button-link"
-          href={
-            basket
-              ? `/api/export/labels/${bucket}`
-              : `/api/export/classifications/${bucket}`
-          }
+          href={`${basket ? `/api/export/labels/${bucket}` : `/api/export/classifications/${bucket}`}?scope=${scope}`}
         >
           Export current bucket CSV
         </a>

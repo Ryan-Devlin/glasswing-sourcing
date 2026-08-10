@@ -246,6 +246,28 @@ def _counts() -> dict[str, int]:
     return dict(result)
 
 
+def _bucket_counts_for_run(run_id: str) -> dict[str, int]:
+    raw = classification_bucket_counts(run_id=run_id)
+    total = sum(raw.values())
+    investable = int(raw.get("priority", 0))
+    denied = int(raw.get("reject", 0))
+    return {
+        "all": total,
+        "investable": investable,
+        "review": max(0, total - investable - denied),
+        "denied": denied,
+    }
+
+
+def _current_run_id() -> str:
+    status = (
+        read_pipeline_status()
+        if shared_pipeline_backend_available()
+        else read_local_pipeline_status()
+    )
+    return str(status.get("run_id", "") or "__no_current_run__")
+
+
 def _clean_search_row(row: dict, source: str) -> dict:
     return {
         "domain": row.get("domain", ""),
@@ -410,15 +432,18 @@ def classifications(
     page: int = Query(1, ge=1),
     page_size: int = Query(100, ge=25, le=250),
     sort: str = "Recently classified",
+    scope: Literal["current", "history"] = "history",
 ):
     if bucket not in BUCKETS:
         raise HTTPException(400, "Unknown bucket")
-    counts = _counts()
+    run_id = _current_run_id() if scope == "current" else ""
+    counts = _bucket_counts_for_run(run_id) if scope == "current" else _counts()
     rows = query_classifications(
         BUCKETS[bucket],
         limit=page_size,
         offset=(page - 1) * page_size,
         sort=sort,
+        run_id=run_id,
     )
     hidden = hidden_domain_set([row["domain"] for row in rows])
     return {
@@ -440,10 +465,13 @@ def classification(domain: str):
 @app.get("/api/labels")
 def labels(
     label: Literal["yes", "no"], q: str = "",
+    scope: Literal["current", "history"] = "history",
     page: int = Query(1, ge=1), page_size: int = Query(100, ge=25, le=500),
 ):
     rows, total = query_training_labels(
-        label, search=q, limit=page_size, offset=(page - 1) * page_size
+        label, search=q,
+        run_id=_current_run_id() if scope == "current" else "",
+        limit=page_size, offset=(page - 1) * page_size
     )
     hidden = hidden_domain_set([row["domain"] for row in rows])
     return {
@@ -603,12 +631,18 @@ def _csv_response(rows: list[dict], filename: str):
 
 
 @app.get("/api/export/classifications/{bucket}")
-def export_classifications(bucket: str):
+def export_classifications(
+    bucket: str, scope: Literal["current", "history"] = "history"
+):
     if bucket not in BUCKETS:
         raise HTTPException(400, "Unknown bucket")
     rows: list[dict] = []
     while True:
-        batch = query_classifications(BUCKETS[bucket], limit=250, offset=len(rows), sort="Recently classified")
+        batch = query_classifications(
+            BUCKETS[bucket], limit=250, offset=len(rows),
+            sort="Recently classified",
+            run_id=_current_run_id() if scope == "current" else "",
+        )
         rows.extend(batch)
         if len(batch) < 250:
             break
@@ -616,11 +650,18 @@ def export_classifications(bucket: str):
 
 
 @app.get("/api/export/labels/{label}")
-def export_labels(label: Literal["yes", "no"]):
+def export_labels(
+    label: Literal["yes", "no"],
+    scope: Literal["current", "history"] = "history",
+):
     rows: list[dict] = []
     total = 1
     while len(rows) < total:
-        batch, total = query_training_labels(label, limit=500, offset=len(rows))
+        batch, total = query_training_labels(
+            label,
+            run_id=_current_run_id() if scope == "current" else "",
+            limit=500, offset=len(rows),
+        )
         rows.extend(batch)
     return _csv_response(rows, f"glasswing-{label}-basket.csv")
 
