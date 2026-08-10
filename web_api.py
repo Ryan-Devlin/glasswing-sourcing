@@ -13,6 +13,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -176,6 +177,9 @@ CORPUS_SOURCES = {
 }
 COUNT_CACHE_SECONDS = 15.0
 _count_cache: tuple[float, dict[str, int]] | None = None
+_health_cache: tuple[float, dict[str, object]] | None = None
+_health_cache_lock = threading.Lock()
+HEALTH_CACHE_SECONDS = 30.0
 ADMIN_COOKIE = "glasswing_admin"
 ADMIN_SESSION_SECONDS = 8 * 60 * 60
 LOGIN_WINDOW_SECONDS = 5 * 60
@@ -939,8 +943,25 @@ def admin_activity(limit: int = Query(100, ge=1, le=500)):
 
 
 @app.get("/api/health")
-def system_health(full: bool = False):
-    return health_report(include_integrity=full)
+def system_health(full: bool = False, refresh: int = 0):
+    global _health_cache
+    # Reopening System Health should not repeat several full-table counts.
+    # Explicit refreshes and deep checks always bypass this short cache.
+    if not full and not refresh:
+        now = time.monotonic()
+        if _health_cache and now - _health_cache[0] < HEALTH_CACHE_SECONDS:
+            return _health_cache[1]
+        with _health_cache_lock:
+            now = time.monotonic()
+            if _health_cache and now - _health_cache[0] < HEALTH_CACHE_SECONDS:
+                return _health_cache[1]
+            report = health_report(include_integrity=False)
+            _health_cache = (now, report)
+            return report
+    report = health_report(include_integrity=full)
+    if not full:
+        _health_cache = (time.monotonic(), report)
+    return report
 
 
 @app.get("/api/ai/search")

@@ -60,6 +60,17 @@ def test_postgres_adapter_strips_nul_from_text_but_preserves_binary():
     )
 
 
+def test_pooled_adapter_releases_connection_only_once():
+    raw = _FakeRawConnection()
+    released = []
+    connection = db_backend.PostgresConnection(raw, release=released.append)
+
+    connection.close()
+    connection.close()
+
+    assert released == [raw]
+
+
 class _FakeLockCursor:
     def __init__(self, locked):
         self._locked = locked

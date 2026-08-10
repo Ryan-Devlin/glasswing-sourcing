@@ -17,6 +17,7 @@ def _base_counts() -> dict[str, int]:
 
 
 def _patch_common(monkeypatch, *, pipeline_running) -> None:
+    monkeypatch.setattr(health_monitor, "_snapshot_cache", None)
     monkeypatch.setattr(health_monitor, "_database_counts", lambda: _base_counts())
     monkeypatch.setattr(
         health_monitor,
@@ -26,6 +27,41 @@ def _patch_common(monkeypatch, *, pipeline_running) -> None:
     monkeypatch.setattr(health_monitor, "list_manual_snapshots", lambda: [])
     monkeypatch.setattr(health_monitor, "performance_metrics", lambda: {})
     monkeypatch.setattr(health_monitor, "using_postgres", lambda *a, **k: False)
+
+
+def test_ordinary_health_skips_remote_snapshot_validation(monkeypatch):
+    _patch_common(monkeypatch, pipeline_running=None)
+    monkeypatch.setattr(
+        health_monitor,
+        "list_manual_snapshots",
+        lambda: (_ for _ in ()).throw(AssertionError("deep check ran")),
+    )
+
+    report = health_monitor.health_report()
+
+    backup = next(row for row in report["checks"] if row["Check"] == "Manual truth backup")
+    assert backup == {
+        "Check": "Manual truth backup",
+        "Status": "Healthy",
+        "Detail": "Run full checks to validate backups",
+    }
+
+
+def test_full_health_validates_and_caches_remote_snapshots(monkeypatch):
+    _patch_common(monkeypatch, pipeline_running=None)
+    calls = []
+    monkeypatch.setattr(
+        health_monitor,
+        "list_manual_snapshots",
+        lambda: calls.append(True) or [{"valid": True}],
+    )
+
+    deep = health_monitor.health_report(include_integrity=True)
+    quick = health_monitor.health_report()
+
+    assert len(calls) == 1
+    assert deep["manual_snapshots"] == [{"valid": True}]
+    assert quick["manual_snapshots"] == [{"valid": True}]
 
 
 def _stuck_claims_check(report: dict) -> dict:

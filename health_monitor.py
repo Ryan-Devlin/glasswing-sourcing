@@ -33,6 +33,8 @@ from zone_universe.database import connect as connect_zone_universe
 # Same dedicated env var continuous_pipeline.py gates on -- never the
 # classification store's DATABASE_URL (see continuous_pipeline.connect_db).
 PIPELINE_DATABASE_ENV_VAR = "PIPELINE_DATABASE_URL"
+_snapshot_cache: tuple[float, list[dict[str, object]]] | None = None
+SNAPSHOT_CACHE_SECONDS = 300.0
 
 
 @contextmanager
@@ -178,12 +180,26 @@ def _timestamp_age_seconds(value: object) -> float | None:
 
 
 def health_report(*, include_integrity: bool = False) -> dict[str, object]:
+    global _snapshot_cache
     with _timed("_database_counts total"):
         counts = _database_counts()
     with _timed("runtime_status"):
         runtime = runtime_status()
-    with _timed("list_manual_snapshots"):
-        snapshots = list_manual_snapshots()
+    # Snapshot validation reads every remote snapshot plus its sidecar and is
+    # intentionally a deep check. Ordinary System Health loads reuse the last
+    # deep result instead of paying that multi-second object-storage cost.
+    cached_snapshots = bool(
+        _snapshot_cache
+        and time.monotonic() - _snapshot_cache[0] < SNAPSHOT_CACHE_SECONDS
+    )
+    if include_integrity:
+        with _timed("list_manual_snapshots"):
+            snapshots = list_manual_snapshots()
+        _snapshot_cache = (time.monotonic(), snapshots)
+    elif cached_snapshots:
+        snapshots = _snapshot_cache[1]
+    else:
+        snapshots = []
     stream = _json(STREAM_STATUS)
     free_gb = shutil.disk_usage(DATA).free / (1024 ** 3)
     checks: list[dict[str, str]] = []
@@ -316,13 +332,14 @@ def health_report(*, include_integrity: bool = False) -> dict[str, object]:
             ),
         })
     valid_snapshots = sum(row["valid"] for row in snapshots)
+    snapshots_checked = include_integrity or cached_snapshots
     checks.append({
         "Check": "Manual truth backup",
-        "Status": "Healthy" if valid_snapshots else "Warning",
+        "Status": "Healthy" if valid_snapshots else ("Warning" if snapshots_checked else "Healthy"),
         "Detail": (
             f"{valid_snapshots:,} valid snapshot(s)"
             if valid_snapshots
-            else "No snapshot created yet"
+            else ("No snapshot created yet" if snapshots_checked else "Run full checks to validate backups")
         ),
     })
 

@@ -17,8 +17,13 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import time
 from typing import Any, Iterable
+
+
+_POOLS: dict[tuple[str, str, bool], Any] = {}
+_POOLS_LOCK = threading.Lock()
 
 
 def using_postgres(env_var: str = "DATABASE_URL") -> bool:
@@ -36,8 +41,10 @@ def using_postgres(env_var: str = "DATABASE_URL") -> bool:
 class PostgresConnection:
     """Adapts a psycopg connection to the sqlite3.Connection calling style."""
 
-    def __init__(self, raw) -> None:
+    def __init__(self, raw, release=None) -> None:
         self._raw = raw
+        self._release = release
+        self._released = False
 
     @staticmethod
     def _translate(sql: str) -> str:
@@ -87,7 +94,13 @@ class PostgresConnection:
         self._raw.rollback()
 
     def close(self) -> None:
-        self._raw.close()
+        if self._released:
+            return
+        self._released = True
+        if self._release is not None:
+            self._release(self._raw)
+        else:
+            self._raw.close()
 
     def copy_out(self, sql: str) -> bytes:
         """Run a `COPY ... TO STDOUT` and return the raw bytes produced.
@@ -110,37 +123,53 @@ class PostgresConnection:
             self._raw.commit()
         else:
             self._raw.rollback()
-        self._raw.close()
+        self.close()
+
+
+def _connection_pool(env_var: str, read_only: bool):
+    from psycopg.rows import dict_row
+    from psycopg_pool import ConnectionPool
+
+    url = os.environ[env_var]
+    key = (env_var, url, read_only)
+    with _POOLS_LOCK:
+        pool = _POOLS.get(key)
+        if pool is None:
+            def configure(raw) -> None:
+                if read_only:
+                    with raw.cursor() as cursor:
+                        cursor.execute("SET default_transaction_read_only = on")
+                    raw.commit()
+
+            pool = ConnectionPool(
+                conninfo=url,
+                min_size=0,
+                max_size=max(1, int(os.getenv("GLASSWING_DB_POOL_SIZE", "8"))),
+                timeout=10,
+                max_idle=300,
+                kwargs={
+                    "row_factory": dict_row,
+                    "autocommit": False,
+                    "keepalives": 1,
+                    "keepalives_idle": 30,
+                    "keepalives_interval": 10,
+                    "keepalives_count": 3,
+                },
+                configure=configure,
+            )
+            _POOLS[key] = pool
+        return pool
 
 
 def connect_postgres(
     *, read_only: bool = False, env_var: str = "DATABASE_URL"
 ) -> PostgresConnection:
-    import psycopg
-    from psycopg.rows import dict_row
-
-    raw = psycopg.connect(
-        os.environ[env_var],
-        row_factory=dict_row,
-        autocommit=False,
-        # Without these, a dropped connection (laptop sleep, wifi hiccup,
-        # a long-running script left unattended) hangs forever waiting on a
-        # socket read that will never complete -- there's no query running
-        # for Postgres to time out, so statement_timeout doesn't help. TCP
-        # keepalives make the OS notice a dead peer and raise an error
-        # instead of hanging silently (~30s idle, then a probe every 10s,
-        # give up after 3 failed probes -- so a real hang surfaces in well
-        # under a minute rather than never).
-        keepalives=1,
-        keepalives_idle=30,
-        keepalives_interval=10,
-        keepalives_count=3,
-    )
-    if read_only:
-        with raw.cursor() as cursor:
-            cursor.execute("SET default_transaction_read_only = on")
-        raw.commit()
-    return PostgresConnection(raw)
+    # A separate read-only pool prevents session settings from leaking into
+    # write requests. Returning the wrapper closes the transaction normally,
+    # then releases the live socket back to the bounded process-local pool.
+    pool = _connection_pool(env_var, read_only)
+    raw = pool.getconn()
+    return PostgresConnection(raw, release=pool.putconn)
 
 
 def begin_immediate(conn) -> None:

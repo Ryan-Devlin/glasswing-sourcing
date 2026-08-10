@@ -68,6 +68,24 @@ def test_overview_uses_lightweight_classification_counts(monkeypatch):
     }
 
 
+def test_health_summary_is_cached_but_explicit_refresh_bypasses(monkeypatch):
+    calls = []
+    monkeypatch.setattr(web_api, "_health_cache", None)
+    monkeypatch.setattr(
+        web_api,
+        "health_report",
+        lambda **kwargs: calls.append(kwargs) or {"sequence": len(calls)},
+    )
+
+    assert client.get("/api/health").json() == {"sequence": 1}
+    assert client.get("/api/health").json() == {"sequence": 1}
+    assert client.get("/api/health?refresh=1").json() == {"sequence": 2}
+    assert calls == [
+        {"include_integrity": False},
+        {"include_integrity": False},
+    ]
+
+
 def test_landscape_submit_ignores_browser_blank_file_part(monkeypatch, tmp_path):
     captured = {}
     monkeypatch.setattr(web_api, "LANDSCAPE_ROOT", tmp_path)

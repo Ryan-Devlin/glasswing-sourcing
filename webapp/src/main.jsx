@@ -47,6 +47,7 @@ const BUCKET_TABS = [
 ];
 const AdminContext = createContext({ admin: false, requestLogin: () => {} });
 const useAdmin = () => useContext(AdminContext);
+const inflightGets = new Map();
 function apiSort(sort) {
   const names = {
     company_name:
@@ -92,23 +93,31 @@ function ClaudeReviewBadge({ row, prefix = "" }) {
   );
 }
 async function api(path, options = {}) {
-  const r = await fetch(path, {
-    headers: {
-      ...(options.body instanceof FormData
-        ? {}
-        : { "Content-Type": "application/json" }),
-      ...(options.headers || {}),
-    },
-    ...options,
-  });
-  if (!r.ok) {
-    const text = await r.text();
-    const error = new Error(text || `Request failed ${r.status}`);
-    error.status = r.status;
-    try { error.payload = JSON.parse(text); } catch {}
-    throw error;
-  }
-  return r.json();
+  const method = String(options.method || "GET").toUpperCase();
+  const request = async () => {
+    const r = await fetch(path, {
+      headers: {
+        ...(options.body instanceof FormData
+          ? {}
+          : { "Content-Type": "application/json" }),
+        ...(options.headers || {}),
+      },
+      ...options,
+    });
+    if (!r.ok) {
+      const text = await r.text();
+      const error = new Error(text || `Request failed ${r.status}`);
+      error.status = r.status;
+      try { error.payload = JSON.parse(text); } catch {}
+      throw error;
+    }
+    return r.json();
+  };
+  if (method !== "GET") return request();
+  if (inflightGets.has(path)) return inflightGets.get(path);
+  const pending = request().finally(() => inflightGets.delete(path));
+  inflightGets.set(path, pending);
+  return pending;
 }
 async function requestClaudeReview(domain, overrideDailyLimit = false) {
   return api(`/api/claude/review/${encodeURIComponent(domain)}`, {
@@ -1694,8 +1703,8 @@ function HealthPage() {
   const { admin, requestLogin } = useAdmin();
   const [full, setFull] = useState(false);
   const [tick, setTick] = useState(0);
-  const health = useApi(`/api/health?full=${full}`, [full, tick]);
-  if (health.loading) return <Loading />;
+  const health = useApi(`/api/health?full=${full}&refresh=${tick}`, [full, tick]);
+  if (health.loading && !health.data) return <Loading />;
   if (health.error) return <ErrorBox>{health.error}</ErrorBox>;
   const d = health.data;
   const services = d.runtime?.services || {};
@@ -1720,7 +1729,15 @@ function HealthPage() {
         <span className={`status ${String(d.overall).toLowerCase()}`}>
           {d.overall}
         </span>
-        <button onClick={() => setFull(true)}>Run full checks</button>
+        <button
+          disabled={health.loading}
+          onClick={() => {
+            setFull(true);
+            setTick((value) => value + 1);
+          }}
+        >
+          {health.loading ? "Running full checks…" : "Run full checks"}
+        </button>
       </div>
       <div className="metrics">
         <Metric label="Companies" value={fmt(d.counts.classifications)} />
