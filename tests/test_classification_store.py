@@ -861,3 +861,19 @@ def test_claude_queue_recovers_and_audit_is_append_only(tmp_path):
     rows = classification_store.admin_audit_rows(path=database)
     assert rows[0]["action"] == "claude_completed"
     assert rows[0]["target"] == "example.ai"
+
+
+def test_top_claude_keeps_returns_only_highest_decisive_approvals(tmp_path):
+    database = tmp_path / "classifications.sqlite3"
+    upsert_classifications(pd.DataFrame([
+        {"domain": "best.ai", "company_name": "Best", "routing_bucket": "priority"},
+        {"domain": "lower.ai", "company_name": "Lower", "routing_bucket": "priority"},
+        {"domain": "denied.ai", "company_name": "Denied", "routing_bucket": "reject"},
+    ]), database)
+    upsert_claude_diligence([
+        {"domain": "best.ai", "llm_decision": "KEEP", "llm_fit_score": 98},
+        {"domain": "lower.ai", "llm_decision": "KEEP", "llm_fit_score": 81},
+        {"domain": "denied.ai", "llm_decision": "REJECT", "llm_fit_score": 99},
+    ], path=database)
+    rows = classification_store.top_claude_keeps(path=database)
+    assert [row["domain"] for row in rows] == ["best.ai", "lower.ai"]

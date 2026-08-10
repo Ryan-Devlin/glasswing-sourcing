@@ -57,6 +57,7 @@ from classification_store import (
     recover_claude_review_queue,
     search_classifications,
     source_bucket_counts,
+    top_claude_keeps,
     unhide_domains,
 )
 from common import (
@@ -476,6 +477,11 @@ def claude_status():
         "calls_this_run": int(status.get("claude_calls", 0) or 0),
         "warning": str(status.get("claude_warning", "") or ""),
     }
+
+
+@app.get("/api/claude/top")
+def claude_top_companies(limit: int = Query(6, ge=1, le=20)):
+    return {"rows": top_claude_keeps(limit)}
 
 
 @app.post("/api/claude/review/{domain}", dependencies=[Depends(_require_admin)])

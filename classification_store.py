@@ -1079,6 +1079,19 @@ def claude_review_queue_rows(limit: int = 200, *, path: Path | str = CLASSIFICAT
     return [dict(row) for row in rows]
 
 
+def top_claude_keeps(limit: int = 6, *, path: Path | str = CLASSIFICATION_DB) -> list[dict[str, object]]:
+    """Highest-conviction decisive Claude approvals for the homepage."""
+    with connect_store(path, read_only=True) as conn:
+        rows = conn.execute(
+            "SELECT d.domain,d.fit_score,d.reasoning,d.product_summary,d.updated_at,"
+            "c.company_name,c.final_url,c.description,c.thesis_pillar "
+            "FROM claude_diligence d LEFT JOIN classifications c ON c.domain=d.domain "
+            "WHERE d.decision='KEEP' ORDER BY d.fit_score DESC,d.updated_at DESC LIMIT ?",
+            (max(1, min(int(limit), 20)),),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def query_classifications_by_domains(
     domains: Iterable[str],
     *,

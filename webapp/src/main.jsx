@@ -491,6 +491,7 @@ function HomePage() {
           page.
         </p>
       </header>
+      <ClaudeTopPicks />
       <form
         className="searchbar"
         onSubmit={async (e) => {
@@ -552,6 +553,59 @@ function HomePage() {
       </section>
       <CompaniesTable />
     </>
+  );
+}
+
+function ClaudeTopPicks() {
+  const picks = useApi("/api/claude/top?limit=6", []);
+  if (picks.loading) return <Loading />;
+  if (picks.error || !picks.data?.rows?.length) return null;
+  return (
+    <section className="top-picks">
+      <div className="section-title">
+        <div>
+          <p className="eyebrow">Highest conviction</p>
+          <h2>Claude’s strongest investment recommendations</h2>
+          <p>Decisive KEEP reviews, ranked by Claude’s diligence score.</p>
+        </div>
+        <a className="button-link" href="#claude">
+          View Claude queue
+        </a>
+      </div>
+      <div className="top-pick-grid">
+        {picks.data.rows.map((row) => {
+          const reason = shortClaudeReason(
+            row.reasoning || row.product_summary,
+          );
+          return (
+            <article className="top-pick" key={row.domain}>
+              <div className="top-pick-head">
+                <span className="score-ring">
+                  {row.fit_score}
+                  <small>/100</small>
+                </span>
+                <span className="pill claude-keep">Claude KEEP</span>
+              </div>
+              <h3>{row.company_name || row.domain}</h3>
+              <a
+                href={row.final_url || `https://${row.domain}`}
+                target="_blank"
+              >
+                {row.domain}
+              </a>
+              <p className="clamp-text" title={reason}>
+                {reason}
+              </p>
+              {row.thesis_pillar && (
+                <span className="top-pick-category">
+                  {String(row.thesis_pillar).replaceAll("_", " ")}
+                </span>
+              )}
+            </article>
+          );
+        })}
+      </div>
+    </section>
   );
 }
 

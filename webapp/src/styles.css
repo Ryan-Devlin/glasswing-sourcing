@@ -204,6 +204,70 @@ header p {
   font-family: Manrope;
   font-size: 26px;
 }
+.top-picks {
+  margin: 0 0 30px;
+  padding: 20px;
+  border: 1px solid #cfe2dc;
+  border-radius: 14px;
+  background: linear-gradient(135deg, #f3faf7, #ffffff);
+  box-shadow: 0 5px 20px #173d350d;
+}
+.top-picks .section-title {
+  margin: 0 0 16px;
+}
+.top-picks .section-title p:not(.eyebrow) {
+  margin: 5px 0 0;
+  color: #687b77;
+  font-size: 13px;
+}
+.top-pick-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 11px;
+}
+.top-pick {
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid #dbe8e3;
+  border-radius: 11px;
+  background: #fff;
+}
+.top-pick-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 11px;
+}
+.score-ring {
+  color: #087365;
+  font-size: 22px;
+  font-weight: 750;
+}
+.score-ring small {
+  color: #7c8e8a;
+  font-size: 11px;
+}
+.top-pick h3 {
+  margin: 0 0 3px;
+  font-size: 16px;
+}
+.top-pick > a {
+  color: #138c7b;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+}
+.top-pick > p {
+  min-height: 49px;
+  margin: 11px 0;
+  color: #566a66;
+  font-size: 12px;
+}
+.top-pick-category {
+  color: #71837f;
+  font-size: 11px;
+  text-transform: capitalize;
+}
 .searchbar {
   display: grid;
   grid-template-columns: auto 1fr auto;
