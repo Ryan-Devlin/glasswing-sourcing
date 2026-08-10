@@ -27,7 +27,7 @@ import {
 } from "lucide-react";
 import "./styles.css";
 import "./polish.css";
-import { formatCount as fmt, pageCount, plainSnippet } from "./domain";
+import { dealAgeLabel, formatCount as fmt, pageCount, plainSnippet } from "./domain";
 
 const NAV = [
   ["home", "Home", Home],
@@ -662,6 +662,7 @@ function GoodDeals() {
         {rows.map((row) => (
           <article className="top-pick" key={row.domain}>
             <button className="card-dismiss" title="Reject to Hard Denied and NO" onClick={() => reject(row)}>Reject</button>
+            <span className="deal-age" title={row.classified_at || row.updated_at}>{dealAgeLabel(row.classified_at || row.updated_at)}</span>
             <div className="top-pick-head">
               <span className="score-ring">{row.fit_score}<small>/100</small></span>
               <span className="pill">Investable</span>
@@ -727,6 +728,7 @@ function ClaudeTopPicks() {
           );
           return (
             <article className="top-pick" key={row.domain}>
+              <span className="deal-age" title={row.classified_at || row.updated_at}>{dealAgeLabel(row.classified_at || row.updated_at)}</span>
               <button className="card-dismiss" title="Reject to Hard Denied and NO" onClick={async () => {
                 if (!admin) return requestLogin();
                 await api("/api/labels", {

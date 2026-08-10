@@ -246,6 +246,14 @@ header p {
   font-size: 12px;
   font-weight: 700;
 }
+.deal-age {
+  position: absolute;
+  bottom: 18px;
+  left: 16px;
+  color: #71837f;
+  font-size: 10px;
+  font-weight: 650;
+}
 .top-pick-head {
   display: flex;
   align-items: center;

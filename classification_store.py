@@ -1096,7 +1096,7 @@ def query_classifications(
         rows = conn.execute(
             "SELECT domain,company_name,final_url,description,"
             "routing_bucket,routing_reason,fit_score,priority_score,"
-            "thesis_pillar,content_source,updated_at "
+            "thesis_pillar,content_source,classified_at,updated_at "
             "FROM classifications WHERE "
             + " AND ".join(clauses)
             + f" ORDER BY {order} LIMIT ? OFFSET ?",
@@ -1306,7 +1306,7 @@ def top_claude_keeps(
     with connect_store(path, read_only=True) as conn:
         rows = conn.execute(
             "SELECT d.domain,d.fit_score,d.reasoning,d.product_summary,d.result_json,d.updated_at,"
-            "c.company_name,c.final_url,c.description,c.thesis_pillar "
+            "c.company_name,c.final_url,c.description,c.thesis_pillar,c.classified_at "
             "FROM claude_diligence d LEFT JOIN classifications c ON c.domain=d.domain "
             "WHERE d.decision='KEEP' "
             + ("AND d.diligence_version=? " if clean(diligence_version) else "")
