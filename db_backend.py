@@ -98,6 +98,14 @@ class PostgresConnection:
             return
         self._released = True
         if self._release is not None:
+            # A SELECT opens a transaction under psycopg's normal DB-API
+            # semantics. Callers that explicitly close after reads expect a
+            # rollback; do it here so the pool receives an IDLE connection
+            # instead of logging and repairing an INTRANS session itself.
+            try:
+                self._raw.rollback()
+            except Exception:
+                self._raw.close()
             self._release(self._raw)
         else:
             self._raw.close()
