@@ -271,6 +271,17 @@ header p {
   font-weight: 600;
   text-decoration: none;
 }
+.deal-claude-review {
+  margin-top: 9px;
+}
+.deal-claude-review .pill {
+  cursor: help;
+  font-size: 10px;
+}
+.claude-unreviewed {
+  background: #eef2f1;
+  color: #697b77;
+}
 .top-pick > p {
   min-height: 49px;
   margin: 11px 0;

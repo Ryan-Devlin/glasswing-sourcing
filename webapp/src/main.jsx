@@ -625,8 +625,7 @@ function GoodDeals() {
     <section className="top-picks">
       <div className="section-title">
         <div>
-          <p className="eyebrow">Good deals</p>
-          <h2>Highest-rated investable companies</h2>
+          <h2>Good deals</h2>
           <p>Strong sourcing candidates ranked by the Glasswing screen, independent of Claude review status.</p>
         </div>
       </div>
@@ -640,6 +639,22 @@ function GoodDeals() {
             </div>
             <h3>{row.company_name || row.domain}</h3>
             <a href={row.final_url || `https://${row.domain}`} target="_blank">{row.domain}</a>
+            {row.claude_decision ? (
+              <div className="deal-claude-review">
+                <span
+                  className={`pill claude-${row.claude_decision.toLowerCase()}`}
+                  title={claudeScorecard(row)}
+                  data-tooltip={claudeScorecard(row)}
+                  tabIndex="0"
+                >
+                  Claude {row.claude_decision} · {row.claude_score}/100
+                </span>
+              </div>
+            ) : (
+              <div className="deal-claude-review">
+                <span className="pill claude-unreviewed">Not reviewed by Claude</span>
+              </div>
+            )}
             <p className="clamp-text" title={row.description}>{row.description || row.routing_reason}</p>
             <span className="top-pick-category">{String(row.thesis_pillar || "enterprise technology").replaceAll("_", " ")}</span>
           </article>
