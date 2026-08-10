@@ -14,7 +14,7 @@ class SmoothRefreshTests(unittest.TestCase):
     def test_refresh_timer_mounts_after_the_expensive_page_content(self):
         self.assertGreater(
             self.source.rfind("st_autorefresh("),
-            self.source.index('bucket_chart = pd.DataFrame({'),
+            self.source.index('immediate_history_table = pd.DataFrame({'),
         )
         self.assertGreater(
             self.source.rfind("st_autorefresh("),

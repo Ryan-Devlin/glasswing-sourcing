@@ -20,6 +20,7 @@ from classification_store import (
     classification_bucket_counts,
     classification_source_label,
     frame_from_store,
+    query_classifications,
 )
 from common import (
     FILTERED, LLM, MANUAL, NO_BASKET_DATA, YES_BASKET_DATA,
@@ -164,8 +165,25 @@ def read_screened_classifications() -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False, ttl=15, max_entries=4)
 def read_bucket_counts(run_id: str = "") -> dict[str, int]:
-    """Fast chart counts without downloading every stored website record."""
+    """Fast counts without downloading every stored website record."""
     return classification_bucket_counts(run_id=run_id)
+
+
+@st.cache_data(show_spinner=False, ttl=15, max_entries=32)
+def read_classification_page(
+    buckets: tuple[str, ...],
+    limit: int,
+    offset: int,
+    run_id: str,
+) -> list[dict[str, object]]:
+    """Fetch one lightweight table page directly from Postgres."""
+    return query_classifications(
+        buckets,
+        limit=limit,
+        offset=offset,
+        sort="Recently classified",
+        run_id=run_id,
+    )
 
 
 def read_status() -> dict:
@@ -1673,42 +1691,76 @@ with run_id_col:
     else:
         st.caption("Showing the latest saved result for every known domain.")
 
-# Render the chart from a server-side GROUP BY before downloading the complete
-# classification corpus. The all-history corpus is now ~80k wide JSON records;
-# making the chart wait for that transfer made it appear permanently absent.
+# Render the actual results table from a paged SQL query before downloading the
+# complete classification corpus. All History is now ~80k wide JSON records;
+# the old path blocked this table behind that entire transfer and rescore.
 summary_run_id = current_run_id if result_scope == "Current Run" else ""
 summary_raw_counts = read_bucket_counts(summary_run_id)
-summary_total = sum(int(value) for value in summary_raw_counts.values())
-summary_investable = int(summary_raw_counts.get("priority", 0))
-summary_hard_denied = int(summary_raw_counts.get("reject", 0))
-summary_needs_review = max(
-    0,
-    summary_total - summary_investable - summary_hard_denied,
+fast_bucket_groups = {
+    "All Results": (
+        "priority", "review", "coming_soon", "insufficient", "ghost",
+        "screened_out", "comp", "reject",
+    ),
+    "Investable": ("priority",),
+    "Needs Review": (
+        "review", "coming_soon", "insufficient", "ghost", "screened_out", "comp",
+    ),
+    "Hard Denied": ("reject",),
+}
+fast_bucket_label = st.selectbox(
+    "Results table",
+    list(fast_bucket_groups),
+    key="certstream_fast_table_bucket",
 )
-bucket_chart = pd.DataFrame({
-    "Bucket": ["Investable", "Needs Review", "Hard Denied"],
-    "Companies": [
-        summary_investable,
-        summary_needs_review,
-        summary_hard_denied,
-    ],
-})
-st.markdown("#### Classification buckets")
-if summary_total > 0:
-    st.bar_chart(
-        bucket_chart,
-        x="Bucket",
-        y="Companies",
-        x_label="",
-        y_label="Companies",
-        height=280,
-        color="#34C6B3",
+fast_buckets = fast_bucket_groups[fast_bucket_label]
+fast_total = sum(int(summary_raw_counts.get(bucket, 0)) for bucket in fast_buckets)
+fast_page_size = 100
+fast_max_page = max(1, (fast_total + fast_page_size - 1) // fast_page_size)
+fast_page = int(st.number_input(
+    "Page",
+    min_value=1,
+    max_value=fast_max_page,
+    value=min(int(st.session_state.get("certstream_fast_page", 1)), fast_max_page),
+    step=1,
+    key="certstream_fast_page",
+))
+fast_rows = read_classification_page(
+    tuple(fast_buckets),
+    fast_page_size,
+    (fast_page - 1) * fast_page_size,
+    summary_run_id,
+)
+st.caption(f"{fast_total:,} records · page {fast_page:,} of {fast_max_page:,}")
+if fast_rows:
+    immediate_history_table = pd.DataFrame({
+        "Company": [row.get("company_name", "") for row in fast_rows],
+        "Domain": [row.get("domain", "") for row in fast_rows],
+        "Bucket": [
+            str(row.get("routing_bucket", "")).replace("_", " ").title()
+            for row in fast_rows
+        ],
+        "Score": [int(row.get("fit_score", 0) or 0) for row in fast_rows],
+        "Category": [
+            str(row.get("thesis_pillar", "")).replace("_", " ").title()
+            for row in fast_rows
+        ],
+        "Description": [row.get("description", "") for row in fast_rows],
+        "Website": [row.get("final_url", "") for row in fast_rows],
+    })
+    render_hideable_table(
+        immediate_history_table,
+        domain_column="Domain",
+        key="certstream_immediate_history_table",
+        column_config={
+            "Score": st.column_config.ProgressColumn(
+                "Score", min_value=0, max_value=100, format="%d"
+            ),
+            "Website": st.column_config.LinkColumn("Website", display_text="Open"),
+        },
     )
 else:
     st.info(
-        "The classification chart has no saved outcomes to display for "
-        "this scope yet. Choose All History or wait for the first websites "
-        "to finish screening."
+        "No saved results exist for this bucket and run scope yet."
     )
 
 # Confirmed live: pipeline-worker writes real Claude verdicts to BOTH the

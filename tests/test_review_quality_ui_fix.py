@@ -168,13 +168,14 @@ class ReviewQualityUiFixTests(unittest.TestCase):
         self.assertNotIn('.metric(\n    "Classified"', self.dashboard)
         self.assertNotIn('.metric("Classified"', self.dashboard)
 
-    def test_certstream_bucket_chart_has_a_real_render_and_empty_state(self):
-        self.assertIn('bucket_chart = pd.DataFrame({', self.dashboard)
-        self.assertIn('st.bar_chart(', self.dashboard)
-        self.assertIn('x="Bucket"', self.dashboard)
-        self.assertIn('y="Companies"', self.dashboard)
+    def test_certstream_history_uses_a_real_paged_table(self):
+        self.assertIn('immediate_history_table = pd.DataFrame({', self.dashboard)
+        self.assertIn('read_classification_page(', self.dashboard)
+        self.assertIn('"Results table"', self.dashboard)
+        self.assertIn('fast_page_size = 100', self.dashboard)
+        self.assertNotIn('st.bar_chart(', self.dashboard)
         self.assertIn(
-            "The classification chart has no saved outcomes",
+            "No saved results exist for this bucket",
             self.dashboard,
         )
 
