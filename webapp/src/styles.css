@@ -121,6 +121,38 @@ main {
   padding: 48px clamp(28px, 5vw, 78px);
   min-width: 0;
 }
+.global-controls {
+  position: sticky;
+  top: 12px;
+  z-index: 12;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: -28px 0 30px;
+  padding: 10px 12px 10px 15px;
+  border: 1px solid #cfe0da;
+  border-radius: 11px;
+  background: #fffffff2;
+  box-shadow: 0 8px 28px #173d3517;
+  backdrop-filter: blur(12px);
+}
+.global-controls > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.global-controls strong {
+  font-size: 13px;
+  color: #36504c;
+}
+.global-controls .dot {
+  margin: 0;
+}
+.global-controls .dot.paused {
+  background: #df8b51;
+  box-shadow: 0 0 10px #df8b51;
+}
 header {
   margin-bottom: 28px;
 }
@@ -521,6 +553,12 @@ tbody tr:hover {
   }
   .filter-fields {
     grid-template-columns: 1fr;
+  }
+  .global-controls {
+    position: static;
+    margin: 0 0 22px;
+    align-items: flex-start;
+    flex-direction: column;
   }
   aside {
     position: static;

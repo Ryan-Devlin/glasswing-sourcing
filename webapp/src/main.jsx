@@ -1235,6 +1235,72 @@ function HealthPage() {
   );
 }
 
+function GlobalWorkerControls() {
+  const { admin } = useAdmin();
+  const [tick, setTick] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const runtime = useApi("/api/runtime", [tick]);
+  useEffect(() => {
+    if (!admin) return;
+    const timer = setInterval(() => setTick((value) => value + 1), 30000);
+    return () => clearInterval(timer);
+  }, [admin]);
+  if (!admin) return null;
+  const services = runtime.data?.services || {};
+  const values = Object.values(services);
+  const allRunning = values.length > 0 && values.every((row) => row.desired);
+  const allPaused = values.length > 0 && values.every((row) => !row.desired);
+  const control = async (desired) => {
+    if (!desired && !window.confirm("Pause every worker safely?")) return;
+    setBusy(true);
+    try {
+      await api("/api/runtime/all", {
+        method: "POST",
+        body: JSON.stringify({ desired }),
+      });
+      setTick((value) => value + 1);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="global-controls" aria-label="Global worker controls">
+      <div>
+        <span className={`dot ${allPaused ? "paused" : ""}`} />
+        <strong>
+          {allRunning
+            ? "All workers running"
+            : allPaused
+              ? "All workers paused"
+              : "Mixed worker state"}
+        </strong>
+      </div>
+      <div>
+        <button
+          disabled={busy || allRunning || runtime.loading}
+          onClick={() => control(true)}
+        >
+          <Play size={15} /> Resume all
+        </button>
+        <button
+          disabled={busy || allPaused || runtime.loading}
+          onClick={() => control(false)}
+        >
+          <Pause size={15} /> Pause all
+        </button>
+        <button
+          className="icon"
+          disabled={busy}
+          onClick={() => setTick((value) => value + 1)}
+          title="Refresh worker state"
+        >
+          <RefreshCw size={15} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [page, setPage] = useState(location.hash.slice(1) || "home");
   const [admin, setAdmin] = useState(false);
@@ -1295,6 +1361,7 @@ function App() {
           <ApiStatus />
         </aside>
         <main>
+          <GlobalWorkerControls />
           <ErrorBoundary>{body}</ErrorBoundary>
         </main>
         {loginOpen && (
