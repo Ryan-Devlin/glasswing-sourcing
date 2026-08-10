@@ -1031,6 +1031,9 @@ def load_run_config() -> dict:
         return {}
 
 def claude_allowance(conn: sqlite3.Connection) -> int:
+    config = load_run_config()
+    daily_limit = max(1, min(5000, int(config.get("claude_daily_limit", CLAUDE_DAILY_LIMIT))))
+    hourly_limit = min(CLAUDE_HOURLY_LIMIT, daily_limit)
     now = datetime.now(timezone.utc)
     hour_cutoff = (
         now - timedelta(hours=1)
@@ -1050,16 +1053,16 @@ def claude_allowance(conn: sqlite3.Connection) -> int:
     allowance = max(
         0,
         min(
-            CLAUDE_HOURLY_LIMIT - hour_count,
-            CLAUDE_DAILY_LIMIT - day_count,
+            hourly_limit - hour_count,
+            daily_limit - day_count,
         ),
     )
     if allowance <= 0:
         write_status(
             claude_warning=(
-                "Claude diligence is paused by its fixed budget: "
-                f"{hour_count}/{CLAUDE_HOURLY_LIMIT} calls this hour and "
-                f"{day_count}/{CLAUDE_DAILY_LIMIT} calls today. Resumes "
+                "Claude diligence is paused by its configured budget: "
+                f"{hour_count}/{hourly_limit} calls this hour and "
+                f"{day_count}/{daily_limit} calls today. Resumes "
                 "automatically once the window rolls over."
             ),
             updated_at=utc_now(),

@@ -57,6 +57,14 @@ function apiSort(sort) {
   };
   return names[sort.key] || "Recently classified";
 }
+function shortClaudeReason(value) {
+  const reason = String(
+    value || "No written reason was saved for this decision.",
+  )
+    .replace(/\s+/g, " ")
+    .trim();
+  return reason.length > 260 ? `${reason.slice(0, 257)}…` : reason;
+}
 async function api(path, options = {}) {
   const r = await fetch(path, {
     headers: {
@@ -374,8 +382,10 @@ const companyCols = [
     render: (r) =>
       r.claude_decision ? (
         <span
-          className={`pill claude-${r.claude_decision.toLowerCase()}`}
-          title={r.claude_reasoning || ""}
+          className={`pill claude-pill claude-${r.claude_decision.toLowerCase()}`}
+          data-tooltip={shortClaudeReason(r.claude_reasoning)}
+          title={shortClaudeReason(r.claude_reasoning)}
+          tabIndex="0"
         >
           {r.claude_decision}{" "}
           {r.claude_score !== "" ? `· ${r.claude_score}` : ""}
@@ -634,7 +644,13 @@ function CompaniesTable() {
   const query = basket
     ? `/api/labels?label=${bucket}&page=${page}&page_size=100`
     : `/api/classifications?bucket=${bucket}&page=${page}&page_size=100&sort=${encodeURIComponent(apiSort(sort))}`;
-  const result = useApi(query, [bucket, page, refresh]);
+  const result = useApi(query, [
+    bucket,
+    page,
+    refresh,
+    sort.key,
+    sort.direction,
+  ]);
   const save = (row, label) => setLabel({ domain: row.domain, label });
   const hide = async (row) => {
     await api("/api/hidden", {
@@ -872,6 +888,39 @@ function RunFilters() {
             }
           />
         </label>
+        <label className="claude-limit-control">
+          Claude calls per day
+          <div>
+            <input
+              type="range"
+              min="1"
+              max="1000"
+              step="25"
+              value={form.claude_daily_limit ?? 400}
+              onChange={(e) =>
+                setForm({ ...form, claude_daily_limit: Number(e.target.value) })
+              }
+            />
+            <input
+              type="number"
+              min="1"
+              max="5000"
+              value={form.claude_daily_limit ?? 400}
+              onChange={(e) =>
+                setForm({
+                  ...form,
+                  claude_daily_limit: Math.max(
+                    1,
+                    Math.min(5000, Number(e.target.value) || 1),
+                  ),
+                })
+              }
+            />
+          </div>
+          <span>
+            Rolling 24-hour paid-call cap. Hourly safety cap remains 100.
+          </span>
+        </label>
       </div>
       <div className="filter-actions">
         <button className="primary" onClick={save}>
@@ -983,7 +1032,7 @@ function CorpusCompanies({ kind }) {
     basket
       ? `/api/labels?label=${bucket}&page=${page}&page_size=100`
       : `/api/corpus/${kind}?bucket=${bucket}&page=${page}&page_size=100&sort=${encodeURIComponent(apiSort(sort))}`,
-    [bucket, page, refresh],
+    [bucket, page, refresh, sort.key, sort.direction],
   );
   return (
     <section>

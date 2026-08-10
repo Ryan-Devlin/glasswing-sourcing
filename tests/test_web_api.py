@@ -54,11 +54,12 @@ def test_classifications_are_server_paginated(monkeypatch):
 
     monkeypatch.setattr(web_api, "query_classifications", query)
     monkeypatch.setattr(web_api, "hidden_domain_set", lambda domains: set())
-    response = client.get("/api/classifications?bucket=review&page=3&page_size=100")
+    response = client.get("/api/classifications?bucket=review&page=3&page_size=100&sort=Fit%3A%20low%20to%20high")
     assert response.status_code == 200
     assert response.json()["total"] == 501
     assert captured["limit"] == 100
     assert captured["offset"] == 200
+    assert captured["sort"] == "Fit: low to high"
 
 
 def test_human_label_endpoint_uses_protected_human_source(monkeypatch):

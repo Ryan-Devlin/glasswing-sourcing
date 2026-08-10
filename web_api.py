@@ -170,6 +170,7 @@ class PipelineFilters(BaseModel):
     include_keywords: list[str] = []
     exclude_keywords: list[str] = []
     minimum_score: int = Field(55, ge=0, le=100)
+    claude_daily_limit: int = Field(400, ge=1, le=5000)
 
 
 def _admin_password() -> str:
@@ -336,6 +337,7 @@ def pipeline_filters():
         "include_keywords": config.get("include_keywords", []),
         "exclude_keywords": config.get("exclude_keywords", []),
         "minimum_score": int(config.get("minimum_score", 55)),
+        "claude_daily_limit": int(config.get("claude_daily_limit", 400)),
     }
 
 

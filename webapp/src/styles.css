@@ -407,6 +407,40 @@ tbody tr:hover {
   background: #fee6e1;
   color: #9d382c;
 }
+.claude-pill {
+  position: relative;
+  cursor: help;
+  outline: none;
+}
+.claude-pill::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 10px);
+  width: min(320px, 70vw);
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #102f2c;
+  color: #fff;
+  box-shadow: 0 10px 30px #071b1b42;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.45;
+  text-transform: none;
+  white-space: normal;
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, 5px);
+  transition:
+    opacity 0.14s ease,
+    transform 0.14s ease;
+  z-index: 20;
+}
+.claude-pill:hover::after,
+.claude-pill:focus::after {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
 .muted {
   color: #8a9996;
   font-size: 12px;
@@ -434,9 +468,23 @@ tbody tr:hover {
 }
 .filter-fields {
   display: grid;
-  grid-template-columns: 1fr 1fr minmax(130px, 0.35fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
   margin-top: 14px;
+}
+.claude-limit-control > div {
+  display: grid;
+  grid-template-columns: 1fr 90px;
+  align-items: center;
+  gap: 10px;
+}
+.claude-limit-control input[type="range"] {
+  padding: 0;
+  accent-color: #138c7b;
+}
+.claude-limit-control span {
+  color: #7a8b87;
+  font-weight: 400;
 }
 .filter-fields label {
   display: grid;

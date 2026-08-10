@@ -25,6 +25,9 @@ def test_react_app_has_every_primary_page_and_no_streamlit_dependency():
     assert "Pause all" in source
     assert "Send to Claude" in source
     assert "/api/claude/review/" in source
+    assert "sort.key, sort.direction" in source
+    assert "Claude calls per day" in source
+    assert "data-tooltip" in source
 
 
 def test_production_entrypoint_is_fastapi():
