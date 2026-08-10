@@ -65,11 +65,16 @@ def test_classifications_are_server_paginated(monkeypatch):
 
 def test_human_label_endpoint_uses_protected_human_source(monkeypatch):
     captured = {}
+    movement = {}
 
     def save(domain, label, rating, **kwargs):
         captured.update(domain=domain, label=label, rating=rating, **kwargs)
 
     monkeypatch.setattr(web_api, "save_basket_entry", save)
+    monkeypatch.setattr(
+        web_api, "record_manual_move",
+        lambda domains, **kwargs: movement.update(domains=domains, **kwargs),
+    )
     response = client.post(
         "/api/labels",
         json={"domain": "Example.ai", "label": "yes", "rating": 87},
@@ -78,6 +83,17 @@ def test_human_label_endpoint_uses_protected_human_source(monkeypatch):
     assert captured["source"] == "human"
     assert captured["label"] == "yes"
     assert captured["rating"] == 87
+    assert movement["target_bucket"] == "priority"
+    assert movement["target_label"] == "yes"
+
+    response = client.post(
+        "/api/labels",
+        json={"domain": "Reject.ai", "label": "no", "rating": 12,
+              "reason": "manual_reject"},
+    )
+    assert response.status_code == 200
+    assert movement["target_bucket"] == "reject"
+    assert movement["target_label"] == "no"
 
 
 def test_worker_control_is_explicit_and_scoped(monkeypatch):

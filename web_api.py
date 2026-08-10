@@ -54,6 +54,7 @@ from classification_store import (
     query_source_classifications,
     query_training_labels,
     record_admin_audit,
+    record_manual_move,
     recover_claude_review_queue,
     reconcile_claude_routing,
     search_classifications,
@@ -449,6 +450,14 @@ def labels(
 @app.post("/api/labels", dependencies=[Depends(_require_admin)])
 def set_label(update: LabelUpdate):
     save_basket_entry(update.domain, update.label, update.rating, source="human", reason=update.reason)
+    record_manual_move(
+        [update.domain],
+        target_label=update.label,
+        target_bucket="priority" if update.label == "yes" else "reject",
+        scores={stable_domain(update.domain): update.rating},
+        note=update.reason,
+        source="human",
+    )
     record_admin_audit("label_set", update.domain, f"{update.label} score {update.rating}")
     return {"ok": True, "domain": stable_domain(update.domain), "label": update.label}
 

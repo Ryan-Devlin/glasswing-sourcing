@@ -287,7 +287,7 @@ function Table({
   rows,
   columns,
   onLabel,
-  onHide,
+  onReject,
   onClaude,
   claudeBusy,
   sort,
@@ -317,7 +317,7 @@ function Table({
                 )}
               </th>
             ))}
-            {(onLabel || onHide || onClaude) && <th>Actions</th>}
+            {(onLabel || onReject || onClaude) && <th>Actions</th>}
           </tr>
         </thead>
         <tbody>
@@ -348,7 +348,7 @@ function Table({
                   )}
                 </td>
               ))}
-              {(onLabel || onHide || onClaude) && (
+              {(onLabel || onReject || onClaude) && (
                 <td className="actions">
                   {onLabel && (
                     <>
@@ -363,14 +363,14 @@ function Table({
                       </button>
                     </>
                   )}
-                  {onHide && (
+                  {onReject && (
                     <button
-                      className="hide"
-                      title="Dismiss from this view"
-                      aria-label={`Pass on ${row.domain}`}
-                      onClick={() => onHide(row)}
+                      className="no"
+                      title="Reject to Hard Denied and NO"
+                      aria-label={`Reject ${row.domain}`}
+                      onClick={() => onReject(row)}
                     >
-                      Pass
+                      Reject
                     </button>
                   )}
                   {onClaude && (
@@ -618,11 +618,14 @@ function GoodDeals() {
   if (deals.error) return <ErrorBox>{deals.error}</ErrorBox>;
   const rows = (deals.data?.rows || []).filter((row) => !row.hidden).slice(0, 6);
   if (!rows.length) return null;
-  const dismiss = async (row) => {
+  const reject = async (row) => {
     if (!admin) return requestLogin();
-    await api("/api/hidden", {
+    await api("/api/labels", {
       method: "POST",
-      body: JSON.stringify({ domains: [row.domain], hidden: true }),
+      body: JSON.stringify({
+        domain: row.domain, label: "no", rating: Number(row.fit_score || 0),
+        reason: "manual_reject",
+      }),
     });
     setRefresh((value) => value + 1);
   };
@@ -652,7 +655,7 @@ function GoodDeals() {
       <div className="top-pick-grid">
         {rows.map((row) => (
           <article className="top-pick" key={row.domain}>
-            <button className="card-dismiss" title="Pass on this company" onClick={() => dismiss(row)}>Pass</button>
+            <button className="card-dismiss" title="Reject to Hard Denied and NO" onClick={() => reject(row)}>Reject</button>
             <div className="top-pick-head">
               <span className="score-ring">{row.fit_score}<small>/100</small></span>
               <span className="pill">Investable</span>
@@ -718,14 +721,17 @@ function ClaudeTopPicks() {
           );
           return (
             <article className="top-pick" key={row.domain}>
-              <button className="card-dismiss" title="Pass on this company" onClick={async () => {
+              <button className="card-dismiss" title="Reject to Hard Denied and NO" onClick={async () => {
                 if (!admin) return requestLogin();
-                await api("/api/hidden", {
+                await api("/api/labels", {
                   method: "POST",
-                  body: JSON.stringify({ domains: [row.domain], hidden: true }),
+                  body: JSON.stringify({
+                    domain: row.domain, label: "no", rating: Number(row.fit_score || 0),
+                    reason: "manual_reject",
+                  }),
                 });
                 setRefresh((value) => value + 1);
-              }}>Pass</button>
+              }}>Reject</button>
               <div className="top-pick-head">
                 <span className="score-ring">
                   {row.fit_score}
@@ -889,12 +895,15 @@ function CompaniesTable() {
     sort.direction,
   ]);
   const save = (row, label) => setLabel({ domain: row.domain, label });
-  const hide = async (row) => {
-    await api("/api/hidden", {
+  const reject = async (row) => {
+    await api("/api/labels", {
       method: "POST",
-      body: JSON.stringify({ domains: [row.domain], hidden: true }),
+      body: JSON.stringify({
+        domain: row.domain, label: "no", rating: Number(row.fit_score || row.rating || 0),
+        reason: "manual_reject",
+      }),
     });
-    setToast(`${row.domain} hidden from review tables`);
+    setToast(`${row.domain} moved to Hard Denied and NO`);
     setRefresh((x) => x + 1);
     setTimeout(() => setToast(""), 2500);
   };
@@ -980,7 +989,7 @@ function CompaniesTable() {
               },
               { key: "rating", label: "Glasswing score" },
             ]}
-            onHide={admin ? hide : requestLogin}
+            onReject={admin ? reject : requestLogin}
           />
           <Pager page={page} setPage={setPage} total={result.data.total} />
         </>
@@ -990,7 +999,7 @@ function CompaniesTable() {
             rows={result.data.rows.filter((r) => !r.hidden)}
             columns={companyCols}
             onLabel={admin ? save : (_, label) => requestLogin(label)}
-            onHide={admin ? hide : requestLogin}
+            onReject={admin ? reject : requestLogin}
             onClaude={admin ? sendClaude : requestLogin}
             claudeBusy={claudeBusy}
             sort={sort}
@@ -1308,13 +1317,16 @@ function CorpusCompanies({ kind }) {
   const [claudeBusy, setClaudeBusy] = useState("");
   const [claudeOverride, setClaudeOverride] = useState(null);
   const [toast, setToast] = useState("");
-  const hide = async (row) => {
+  const reject = async (row) => {
     if (!admin) return requestLogin();
-    await api("/api/hidden", {
+    await api("/api/labels", {
       method: "POST",
-      body: JSON.stringify({ domains: [row.domain], hidden: true }),
+      body: JSON.stringify({
+        domain: row.domain, label: "no", rating: Number(row.fit_score || row.rating || 0),
+        reason: "manual_reject",
+      }),
     });
-    setToast(`${row.domain} dismissed from this view`);
+    setToast(`${row.domain} moved to Hard Denied and NO`);
     setRefresh((value) => value + 1);
   };
   const basket = bucket === "yes" || bucket === "no";
@@ -1359,7 +1371,7 @@ function CorpusCompanies({ kind }) {
             },
             { key: "rating", label: "Glasswing score" },
           ]}
-          onHide={hide}
+          onReject={reject}
         />
       ) : (
         <>
@@ -1369,7 +1381,7 @@ function CorpusCompanies({ kind }) {
             onLabel={(row, label) =>
               admin ? setLabel({ domain: row.domain, label }) : requestLogin()
             }
-            onHide={hide}
+            onReject={reject}
             onClaude={async (row) => {
               if (!admin) return requestLogin();
               setClaudeBusy(row.domain);
