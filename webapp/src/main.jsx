@@ -1051,6 +1051,8 @@ function CertStreamPage() {
   const { admin, requestLogin } = useAdmin();
   const [tick, setTick] = useState(0);
   const [controlBusy, setControlBusy] = useState(false);
+  const [requestedState, setRequestedState] = useState(null);
+  const [controlMessage, setControlMessage] = useState("");
   const status = useApi("/api/certstream/status", [tick]);
   const claude = useApi("/api/claude/status", [tick]);
   useEffect(() => {
@@ -1058,15 +1060,28 @@ function CertStreamPage() {
     return () => clearInterval(id);
   }, []);
   const s = status.data || {};
-  const desiredRunning = s.desired_running ?? s.running;
+  const desiredRunning = requestedState ?? s.desired_running ?? s.running;
+  useEffect(() => {
+    if (s.desired_running === requestedState) setRequestedState(null);
+  }, [s.desired_running, requestedState]);
   const control = async (desired) => {
+    setRequestedState(desired);
+    setControlMessage(desired ? "Starting CertStream…" : "Pause requested…");
     setControlBusy(true);
     try {
       await api("/api/runtime/pipeline", {
         method: "POST",
         body: JSON.stringify({ desired }),
       });
+      setControlMessage(
+        desired
+          ? "CertStream resumed. New domains are being collected."
+          : "CertStream paused. Intake is disconnected; no new domains will be collected.",
+      );
       setTick((x) => x + 1);
+    } catch (error) {
+      setRequestedState(null);
+      setControlMessage(`Could not change CertStream state: ${error.message}`);
     } finally {
       setControlBusy(false);
     }
@@ -1079,10 +1094,14 @@ function CertStreamPage() {
         <p>Live worker state updates independently from the results table.</p>
       </header>
       <div className="section-title">
-        <h2>
-          {desiredRunning ? (s.running ? "Running" : "Starting") : "Paused"} ·{" "}
-          {String(s.stage || "waiting").replaceAll("_", " ")}
-        </h2>
+        <div>
+          <h2>{desiredRunning ? (s.running ? "Running" : "Starting") : "Paused"}</h2>
+          <p>
+            {desiredRunning
+              ? "Collecting certificate domains and screening the queue."
+              : "Intake and new screening are stopped. An already-started batch may finish safely."}
+          </p>
+        </div>
         <div>
           <button
             disabled={controlBusy || desiredRunning}
@@ -1109,6 +1128,7 @@ function CertStreamPage() {
           </button>
         </div>
       </div>
+      {controlMessage && <p className="notice">{controlMessage}</p>}
       <div className="metrics">
         <Metric
           label="New domains"
