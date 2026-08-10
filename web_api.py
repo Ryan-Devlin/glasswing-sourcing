@@ -117,7 +117,12 @@ from competitive_landscape import (
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     await asyncio.to_thread(reconcile_claude_routing)
-    await asyncio.to_thread(recover_landscape_jobs)
+    try:
+        await asyncio.to_thread(recover_landscape_jobs)
+    except Exception as exc:
+        # Background-job recovery must never hold the public website offline
+        # while another service finishes the one-time schema migration.
+        print(f"Competitive landscape recovery deferred: {exc}", file=sys.stderr)
     tasks = [
         asyncio.create_task(_claude_queue_worker()),
         asyncio.create_task(_landscape_worker()),
@@ -775,7 +780,12 @@ async def _claude_queue_worker() -> None:
 
 async def _landscape_worker() -> None:
     while True:
-        queued = await asyncio.to_thread(claim_landscape_job)
+        try:
+            queued = await asyncio.to_thread(claim_landscape_job)
+        except Exception as exc:
+            print(f"Competitive landscape worker waiting for storage: {exc}", file=sys.stderr)
+            await asyncio.sleep(10)
+            continue
         if queued:
             await asyncio.to_thread(execute_landscape_job, queued)
         else:

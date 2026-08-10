@@ -113,7 +113,11 @@ def connect_store(
                 conn, "classification_store_migration"
             )
             try:
-                migrate(conn)
+                # PostgreSQL DDL still takes catalog locks even when guarded
+                # by IF NOT EXISTS. After a timeout, concurrent migrations can
+                # wait on each other and hold the public app in startup.
+                if locked:
+                    migrate(conn)
             finally:
                 if locked:
                     conn.execute(
