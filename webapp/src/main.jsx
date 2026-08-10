@@ -11,7 +11,6 @@ import {
   Bot,
   CheckCircle2,
   Database,
-  EyeOff,
   Globe2,
   HeartPulse,
   Home,
@@ -23,6 +22,7 @@ import {
   Search,
   Trash2,
   Upload,
+  X,
 } from "lucide-react";
 import "./styles.css";
 import "./polish.css";
@@ -357,11 +357,11 @@ function Table({
                   {onHide && (
                     <button
                       className="hide"
-                      title="Hide from review tables"
+                      title="Dismiss from this view"
+                      aria-label={`Dismiss ${row.domain}`}
                       onClick={() => onHide(row)}
                     >
-                      <EyeOff size={13} />
-                      Hide
+                      <X size={14} />
                     </button>
                   )}
                   {onClaude && (
@@ -537,6 +537,7 @@ function HomePage() {
           page.
         </p>
       </header>
+      <GoodDeals />
       <ClaudeTopPicks />
       <form
         className="searchbar"
@@ -602,8 +603,57 @@ function HomePage() {
   );
 }
 
+function GoodDeals() {
+  const { admin, requestLogin } = useAdmin();
+  const [refresh, setRefresh] = useState(0);
+  const deals = useApi(
+    "/api/classifications?bucket=investable&page=1&page_size=25&sort=Highest%20score",
+    [refresh],
+  );
+  if (deals.loading) return <Loading />;
+  if (deals.error) return <ErrorBox>{deals.error}</ErrorBox>;
+  const rows = (deals.data?.rows || []).filter((row) => !row.hidden).slice(0, 6);
+  if (!rows.length) return null;
+  const dismiss = async (row) => {
+    if (!admin) return requestLogin();
+    await api("/api/hidden", {
+      method: "POST",
+      body: JSON.stringify({ domains: [row.domain], hidden: true }),
+    });
+    setRefresh((value) => value + 1);
+  };
+  return (
+    <section className="top-picks">
+      <div className="section-title">
+        <div>
+          <p className="eyebrow">Good deals</p>
+          <h2>Highest-rated investable companies</h2>
+          <p>Strong sourcing candidates ranked by the Glasswing screen, independent of Claude review status.</p>
+        </div>
+      </div>
+      <div className="top-pick-grid">
+        {rows.map((row) => (
+          <article className="top-pick" key={row.domain}>
+            <button className="card-dismiss" title="Dismiss from this view" onClick={() => dismiss(row)}><X size={15} /></button>
+            <div className="top-pick-head">
+              <span className="score-ring">{row.fit_score}<small>/100</small></span>
+              <span className="pill">Investable</span>
+            </div>
+            <h3>{row.company_name || row.domain}</h3>
+            <a href={row.final_url || `https://${row.domain}`} target="_blank">{row.domain}</a>
+            <p className="clamp-text" title={row.description}>{row.description || row.routing_reason}</p>
+            <span className="top-pick-category">{String(row.thesis_pillar || "enterprise technology").replaceAll("_", " ")}</span>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function ClaudeTopPicks() {
-  const picks = useApi("/api/claude/top?limit=6", []);
+  const { admin, requestLogin } = useAdmin();
+  const [refresh, setRefresh] = useState(0);
+  const picks = useApi("/api/claude/top?limit=6", [refresh]);
   if (picks.loading) return <Loading />;
   if (picks.error || !picks.data?.rows?.length) return null;
   return (
@@ -625,6 +675,14 @@ function ClaudeTopPicks() {
           );
           return (
             <article className="top-pick" key={row.domain}>
+              <button className="card-dismiss" title="Dismiss from this view" onClick={async () => {
+                if (!admin) return requestLogin();
+                await api("/api/hidden", {
+                  method: "POST",
+                  body: JSON.stringify({ domains: [row.domain], hidden: true }),
+                });
+                setRefresh((value) => value + 1);
+              }}><X size={15} /></button>
               <div className="top-pick-head">
                 <span className="score-ring">
                   {row.fit_score}
@@ -866,7 +924,7 @@ function CompaniesTable() {
       ) : basket ? (
         <>
           <Table
-            rows={result.data.rows}
+            rows={result.data.rows.filter((row) => !row.hidden)}
             columns={[
               {
                 key: "domain",
@@ -879,6 +937,7 @@ function CompaniesTable() {
               },
               { key: "rating", label: "Glasswing score" },
             ]}
+            onHide={admin ? hide : requestLogin}
           />
           <Pager page={page} setPage={setPage} total={result.data.total} />
         </>
@@ -1211,6 +1270,15 @@ function CorpusCompanies({ kind }) {
   const [claudeBusy, setClaudeBusy] = useState("");
   const [claudeOverride, setClaudeOverride] = useState(null);
   const [toast, setToast] = useState("");
+  const hide = async (row) => {
+    if (!admin) return requestLogin();
+    await api("/api/hidden", {
+      method: "POST",
+      body: JSON.stringify({ domains: [row.domain], hidden: true }),
+    });
+    setToast(`${row.domain} dismissed from this view`);
+    setRefresh((value) => value + 1);
+  };
   const basket = bucket === "yes" || bucket === "no";
   const result = useApi(
     basket
@@ -1253,6 +1321,7 @@ function CorpusCompanies({ kind }) {
             },
             { key: "rating", label: "Glasswing score" },
           ]}
+          onHide={hide}
         />
       ) : (
         <>
@@ -1262,6 +1331,7 @@ function CorpusCompanies({ kind }) {
             onLabel={(row, label) =>
               admin ? setLabel({ domain: row.domain, label }) : requestLogin()
             }
+            onHide={hide}
             onClaude={async (row) => {
               if (!admin) return requestLogin();
               setClaudeBusy(row.domain);
@@ -1680,6 +1750,8 @@ function AdminActivity() {
 function ClaudeQueuePage() {
   const { admin, requestLogin } = useAdmin();
   const [tick, setTick] = useState(0);
+  const [overrideDomain, setOverrideDomain] = useState("");
+  const [message, setMessage] = useState("");
   const queue = useApi("/api/claude/queue", [tick]);
   useEffect(() => {
     const timer = setInterval(() => setTick((v) => v + 1), 5000);
@@ -1687,10 +1759,14 @@ function ClaudeQueuePage() {
   }, []);
   const retry = async (domain) => {
     if (!admin) return requestLogin();
-    await api(`/api/claude/review/${encodeURIComponent(domain)}`, {
-      method: "POST",
-    });
-    setTick((v) => v + 1);
+    try {
+      await requestClaudeReview(domain);
+      setMessage(`${domain} queued for retry`);
+      setTick((v) => v + 1);
+    } catch (error) {
+      if (error.status === 429) setOverrideDomain(domain);
+      else setMessage(`Retry failed: ${error.message}`);
+    }
   };
   const d = queue.data || { rows: [], counts: {} };
   return (
@@ -1708,6 +1784,7 @@ function ClaudeQueuePage() {
         <Metric label="Completed" value={fmt(d.counts.completed)} />
         <Metric label="Failed" value={fmt(d.counts.failed)} />
       </div>
+      {message && <p className="notice">{message}</p>}
       <div className="inline-tools">
         <button
           onClick={async () => {
@@ -1770,12 +1847,31 @@ function ClaudeQueuePage() {
               label: "Action",
               render: (row) =>
                 row.status === "failed" ? (
-                  <button onClick={() => retry(row.domain)}>Retry</button>
+                  <button onClick={() => {
+                    if (String(row.error || "").toLowerCase().includes("budget"))
+                      setOverrideDomain(row.domain);
+                    else retry(row.domain);
+                  }}>
+                    {String(row.error || "").toLowerCase().includes("budget")
+                      ? "Override & retry" : "Retry"}
+                  </button>
                 ) : (
                   ""
                 ),
             },
           ]}
+        />
+      )}
+      {overrideDomain && (
+        <ClaudeOverrideModal
+          domain={overrideDomain}
+          onClose={() => setOverrideDomain("")}
+          onOverride={async () => {
+            await requestClaudeReview(overrideDomain, true);
+            setMessage(`${overrideDomain} queued with daily-limit override`);
+            setOverrideDomain("");
+            setTick((value) => value + 1);
+          }}
         />
       )}
     </>

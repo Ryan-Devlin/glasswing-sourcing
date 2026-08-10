@@ -433,8 +433,12 @@ def labels(
     rows, total = query_training_labels(
         label, search=q, limit=page_size, offset=(page - 1) * page_size
     )
+    hidden = hidden_domain_set([row["domain"] for row in rows])
     return {
-        "rows": [{**row, "url": f"https://{row['domain']}"} for row in rows],
+        "rows": [
+            {**row, "url": f"https://{row['domain']}"}
+            for row in rows if row["domain"] not in hidden
+        ],
         "total": total, "page": page, "page_size": page_size,
     }
 
@@ -508,7 +512,11 @@ def claude_status():
 
 @app.get("/api/claude/top")
 def claude_top_companies(limit: int = Query(6, ge=1, le=20)):
-    return {"rows": top_claude_keeps(limit, diligence_version=DILIGENCE_VERSION)}
+    rows = top_claude_keeps(
+        min(limit * 3, 20), diligence_version=DILIGENCE_VERSION
+    )
+    hidden = hidden_domain_set([row["domain"] for row in rows])
+    return {"rows": [row for row in rows if row["domain"] not in hidden][:limit]}
 
 
 @app.post("/api/claude/review/{domain}", dependencies=[Depends(_require_admin)])
