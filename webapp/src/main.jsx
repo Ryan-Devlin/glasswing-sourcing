@@ -1248,12 +1248,7 @@ function CertStreamPage() {
       {claude.data?.warning && (
         <p className="notice">Claude: {claude.data.warning}</p>
       )}
-      {s.last_domain_received && (
-        <p className="notice">
-          Latest domain: <strong>{s.last_domain_received}</strong>
-        </p>
-      )}
-      <RunFilters running={Boolean(s.running)} />
+      <RunFilters running={Boolean(desiredRunning)} />
       <CompaniesTable />
     </>
   );

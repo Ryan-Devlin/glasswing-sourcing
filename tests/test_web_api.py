@@ -202,3 +202,26 @@ def test_run_filters_cannot_change_while_certstream_is_running(monkeypatch):
     )
     assert response.status_code == 409
     assert "Pause CertStream" in response.text
+
+
+def test_paused_cloud_worker_allows_filter_changes(monkeypatch, tmp_path):
+    monkeypatch.setattr(web_api, "shared_pipeline_backend_available", lambda: True)
+    monkeypatch.setattr(
+        web_api, "read_control",
+        lambda: {"desired": {"pipeline": False}},
+    )
+    monkeypatch.setattr(web_api, "read_pipeline_config", lambda: {})
+    monkeypatch.setattr(web_api, "publish_pipeline_config", lambda *args, **kwargs: None)
+    monkeypatch.setattr(web_api, "record_admin_audit", lambda *args, **kwargs: None)
+    monkeypatch.setattr(web_api, "RUN_CONFIG", tmp_path / "run_config.json")
+    response = client.post(
+        "/api/pipeline/filters",
+        json={
+            "selected_extensions": [".ai"],
+            "include_keywords": [],
+            "exclude_keywords": [],
+            "minimum_score": 55,
+            "claude_daily_limit": 400,
+        },
+    )
+    assert response.status_code == 200
