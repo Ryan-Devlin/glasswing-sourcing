@@ -61,10 +61,43 @@ class ClaudeThresholdTests(unittest.TestCase):
         <product_depth>1</product_depth><technical_moat>0</technical_moat>
         <stage_fit>2</stage_fit><evidence_confidence>4</evidence_confidence>
         <summary>Consumer photo editor</summary><reason>Not enterprise software</reason>
+        <portfolio_overlap>no</portfolio_overlap><portfolio_company>none</portfolio_company>
+        <portfolio_overlap_evidence>none</portfolio_overlap_evidence>
         <positive_evidence>Working consumer product</positive_evidence>
         <negative_evidence>No enterprise buyer</negative_evidence><unknowns>none</unknowns>
         """
         claude_classifier.validate_response_text(response)
+
+    def test_confirmed_portfolio_technology_overlap_forces_reject(self):
+        assessment = {
+            "decision": "KEEP", "us_based": "yes",
+            "thesis_fit": 5, "enterprise_value": 5, "product_depth": 5,
+            "technical_moat": 5, "stage_fit": 5,
+            "funding_millions_usd": 1, "latest_round": "seed",
+            "institutional_rounds": 1, "ownership_status": "independent",
+            "company_maturity": "early_stage", "concerns": "",
+            "reasoning": "Strong candidate", "portfolio_overlap": "yes",
+            "portfolio_company": "neyon.ai",
+            "portfolio_overlap_evidence": "Both provide the same core autonomous security remediation product.",
+        }
+        result = apply_hard_guards(assessment)
+        self.assertEqual(result["decision"], "REJECT")
+        self.assertLessEqual(result["fit_score"], 35)
+        self.assertIn("neyon.ai", result["reasoning"])
+        self.assertIn("Direct technology overlap", result["hard_disqualifiers"][-1])
+
+    def test_unverified_portfolio_overlap_does_not_force_reject(self):
+        assessment = {
+            "decision": "KEEP", "us_based": "yes",
+            "thesis_fit": 5, "enterprise_value": 5, "product_depth": 5,
+            "technical_moat": 5, "stage_fit": 5,
+            "funding_millions_usd": 1, "latest_round": "seed",
+            "institutional_rounds": 1, "ownership_status": "independent",
+            "company_maturity": "early_stage", "concerns": "",
+            "reasoning": "Strong candidate", "portfolio_overlap": "unclear",
+            "portfolio_company": "none", "portfolio_overlap_evidence": "none",
+        }
+        self.assertEqual(apply_hard_guards(assessment)["decision"], "KEEP")
 
     def test_rubric_response_has_sufficient_token_headroom(self):
         source = Path(claude_classifier.__file__).read_text(encoding="utf-8")

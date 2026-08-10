@@ -7,7 +7,7 @@ from typing import Any
 
 from common import clean
 
-DILIGENCE_VERSION = "2026-08-glasswing-rubric-v6"
+DILIGENCE_VERSION = "2026-08-glasswing-rubric-v7"
 KEEP_THRESHOLD = 70
 CORE_MINIMUM = 3
 SCORE_WEIGHTS = {
@@ -43,6 +43,9 @@ FIELDS = [
     "company_maturity",
     "ownership_status",
     "ownership_evidence",
+    "portfolio_overlap",
+    "portfolio_company",
+    "portfolio_overlap_evidence",
     "summary",
     "reason",
     "concern",
@@ -143,6 +146,10 @@ def apply_hard_guards(
     if assessment["company_maturity"] in {"established", "large_or_public"}:
         reasons.append("Too mature")
 
+    if assessment.get("portfolio_overlap") == "yes":
+        company = clean(assessment.get("portfolio_company")) or "Glasswing portfolio company"
+        reasons.append(f"Direct technology overlap with {company}")
+
     assessment["fit_score"] = dimension_score(assessment)
     assessment["decision"] = substantive_decision(assessment)
     assessment["hard_disqualifiers"] = reasons
@@ -150,6 +157,12 @@ def apply_hard_guards(
         assessment["decision"] = "REJECT"
         assessment["fit_score"] = min(int(assessment["fit_score"]), 35)
         assessment["concerns"] = clamp_words(reasons[0], 15)
+        if assessment.get("portfolio_overlap") == "yes":
+            evidence = clean(assessment.get("portfolio_overlap_evidence"))
+            assessment["reasoning"] = clamp_words(
+                f"Direct technology overlap with {assessment.get('portfolio_company') or 'a Glasswing portfolio company'}. {evidence}",
+                30,
+            )
     elif assessment["decision"] == "KEEP":
         # Missing evidence is not negative evidence. Preserve a substantive
         # KEEP unless a confirmed hard disqualifier above exists, and surface
@@ -203,6 +216,10 @@ def parse_assessment(
     }:
         ownership = "unclear"
 
+    portfolio_overlap = raw["portfolio_overlap"].lower()
+    if portfolio_overlap not in {"yes", "no", "unclear"}:
+        portfolio_overlap = "unclear"
+
     assessment = {
         "decision": model_recommendation,
         "model_recommendation": model_recommendation,
@@ -216,6 +233,9 @@ def parse_assessment(
         "company_maturity": maturity,
         "ownership_status": ownership,
         "ownership_evidence": clamp_words(raw["ownership_evidence"], 20),
+        "portfolio_overlap": portfolio_overlap,
+        "portfolio_company": clamp_words(raw["portfolio_company"], 8),
+        "portfolio_overlap_evidence": clamp_words(raw["portfolio_overlap_evidence"], 30),
         "product_summary": clamp_words(raw["summary"], 16),
         "reasoning": clamp_words(raw["reason"], 30),
         "concerns": clamp_words(raw["concern"], 18),

@@ -42,7 +42,10 @@ MAX_TOTAL_FUNDING_M = float(os.getenv("MAX_TOTAL_FUNDING_USD_M", "8"))
 MAX_INSTITUTIONAL_ROUNDS = int(os.getenv("MAX_INSTITUTIONAL_ROUNDS", "2"))
 
 
-SYSTEM_PROMPT = """You are Glasswing Ventures' evidence-first early-stage diligence analyst.
+PORTFOLIO_DOMAINS_TEXT = ", ".join(GLASSWING_PORTFOLIO_DOMAINS)
+
+
+SYSTEM_PROMPT = f"""You are Glasswing Ventures' evidence-first early-stage diligence analyst.
 Target: pre-seed/seed enterprise B2B technology in vertical AI, physical AI,
 AI-adaptive infrastructure, intelligent enterprise defense, collaborative
 intelligence, and next-generation compute.
@@ -52,6 +55,13 @@ search. Separate confirmed facts from unknowns. Missing verification is NEVER
 negative evidence. Confirmed non-U.S., consumer, agency, generic wrapper,
 funding >$8M, Series A+, >2 institutional rounds, acquired/subsidiary/public,
 or established/large status is a hard disqualifier.
+
+Also REJECT a company when confirmed evidence shows its core product and
+underlying technology directly collide with a Glasswing portfolio company.
+Shared category, buyer, or generic AI terminology alone is not enough. Name
+the overlapping portfolio company and describe the concrete product/technical
+collision. If overlap cannot be verified, return unclear and do not reject for
+this reason. Glasswing portfolio domains: {PORTFOLIO_DOMAINS_TEXT}
 
 Score each dimension independently from 0-5:
 - thesis_fit: direct fit to a Glasswing category and market thesis
@@ -81,6 +91,9 @@ Return ONLY these tags, with no prose before or after:
 <company_maturity>very_early|early_stage|established|large_or_public|unknown</company_maturity>
 <ownership_status>independent|acquired|subsidiary|merged|public|unclear</ownership_status>
 <ownership_evidence>twenty words maximum</ownership_evidence>
+<portfolio_overlap>yes|no|unclear</portfolio_overlap>
+<portfolio_company>portfolio company name/domain or none</portfolio_company>
+<portfolio_overlap_evidence>thirty words maximum; concrete collision or none</portfolio_overlap_evidence>
 <summary>sixteen words maximum</summary>
 <reason>thirty words maximum</reason>
 <concern>eighteen words maximum</concern>
@@ -107,6 +120,9 @@ FIELDS = [
     "company_maturity",
     "ownership_status",
     "ownership_evidence",
+    "portfolio_overlap",
+    "portfolio_company",
+    "portfolio_overlap_evidence",
     "summary",
     "reason",
     "concern",
@@ -219,6 +235,9 @@ def dry_assessment(row: dict) -> dict:
         "company_maturity": "unknown",
         "ownership_status": "unclear",
         "ownership_evidence": "",
+        "portfolio_overlap": "unclear",
+        "portfolio_company": "none",
+        "portfolio_overlap_evidence": "none",
         "product_summary": "Dry run",
         "reasoning": "Website gate passed",
         "concerns": "Funding not verified",
@@ -243,6 +262,7 @@ def validate_response_text(text: str) -> None:
     required = (
         "decision", "thesis_fit", "enterprise_value", "product_depth",
         "technical_moat", "stage_fit", "evidence_confidence", "summary",
+        "portfolio_overlap", "portfolio_company", "portfolio_overlap_evidence",
         "reason", "positive_evidence", "negative_evidence", "unknowns",
     )
     missing = [

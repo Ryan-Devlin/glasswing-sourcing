@@ -76,7 +76,10 @@ function claudeScorecard(row) {
   ].filter(([, value]) => value !== "" && value !== undefined);
   const breakdown = dimensions.length ? ` ${dimensions.map(([name, value]) => `${name} ${value}/5`).join(" · ")}.` : "";
   const unknowns = row.claude_unknowns && row.claude_unknowns !== "none" ? ` Unknowns: ${row.claude_unknowns}.` : "";
-  return shortClaudeReason(`${row.claude_reasoning || row.claude_concerns || "No written rationale."}.${breakdown}${unknowns}`);
+  const rationale = row.claude_reasoning || "No written rationale.";
+  const concern = row.claude_concerns && !rationale.includes(row.claude_concerns)
+    ? ` Concern: ${row.claude_concerns}.` : "";
+  return shortClaudeReason(`${rationale}.${concern}${breakdown}${unknowns}`);
 }
 function ClaudeReviewBadge({ row, prefix = "" }) {
   const score = row.claude_score !== "" && row.claude_score !== undefined
