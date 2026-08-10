@@ -243,6 +243,16 @@ def migrate(conn: sqlite3.Connection | PostgresConnection) -> None:
         CREATE INDEX IF NOT EXISTS idx_training_labels_source
             ON training_labels(source, labeled_at DESC);
 
+        CREATE TABLE IF NOT EXISTS classification_run_membership (
+            domain TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            first_seen_at TEXT NOT NULL DEFAULT '',
+            last_seen_at TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY(domain, run_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_classification_run_membership_run
+            ON classification_run_membership(run_id, domain);
+
         CREATE TABLE IF NOT EXISTS daily_digest_runs (
             run_id TEXT PRIMARY KEY,
             status TEXT NOT NULL,
@@ -336,6 +346,24 @@ def migrate(conn: sqlite3.Connection | PostgresConnection) -> None:
             "ALTER TABLE claude_review_queue ADD COLUMN "
             "override_budget BOOLEAN NOT NULL DEFAULT FALSE"
         )
+    membership_count = int(conn.execute(
+        "SELECT count(*) AS total FROM classification_run_membership"
+    ).fetchone()["total"])
+    if membership_count == 0:
+        for row in conn.execute(
+            "SELECT domain,record_json,classified_at,updated_at FROM classifications"
+        ).fetchall():
+            try:
+                stored = json.loads(str(row["record_json"] or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                stored = {}
+            run_id = clean(stored.get("run_id", ""))
+            if run_id:
+                conn.execute(
+                    "INSERT INTO classification_run_membership(domain,run_id,first_seen_at,last_seen_at) "
+                    "VALUES (?,?,?,?) ON CONFLICT(domain,run_id) DO NOTHING",
+                    (row["domain"], run_id, row["classified_at"], row["updated_at"]),
+                )
     conn.commit()
 
 
@@ -617,6 +645,19 @@ def upsert_classifications(
             sql,
             [tuple(record[column] for column in CORE_COLUMNS) for record in records],
         )
+        for record in records:
+            try:
+                stored_record = json.loads(str(record.get("record_json") or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                stored_record = {}
+            run_id = clean(stored_record.get("run_id", ""))
+            if run_id:
+                conn.execute(
+                    "INSERT INTO classification_run_membership(domain,run_id,first_seen_at,last_seen_at) "
+                    "VALUES (?,?,?,?) ON CONFLICT(domain,run_id) DO UPDATE SET "
+                    "last_seen_at=excluded.last_seen_at",
+                    (record["domain"], run_id, record["classified_at"], record["updated_at"]),
+                )
         # Scraper refreshes cannot return a decisively reviewed company to an
         # incompatible bucket. Persisted Claude output owns canonical routing.
         for record in records:
@@ -910,8 +951,11 @@ def classification_bucket_counts(
     where = ""
     params: list[object] = []
     if clean(run_id):
-        where = "WHERE record_json LIKE ?"
-        params.append(f'%"run_id"%{clean(run_id)}%')
+        where = (
+            "WHERE EXISTS (SELECT 1 FROM classification_run_membership m "
+            "WHERE m.domain=classifications.domain AND m.run_id=?)"
+        )
+        params.append(clean(run_id))
     with connect_store(path, read_only=True) as conn:
         rows = conn.execute(
             "SELECT routing_bucket, count(*) AS total "
@@ -1018,8 +1062,11 @@ def query_classifications(
     clauses = [f"routing_bucket IN ({marks})"]
     params: list[object] = list(bucket_values)
     if clean(run_id):
-        clauses.append("record_json LIKE ?")
-        params.append(f'%"run_id"%{clean(run_id)}%')
+        clauses.append(
+            "EXISTS (SELECT 1 FROM classification_run_membership m "
+            "WHERE m.domain=classifications.domain AND m.run_id=?)"
+        )
+        params.append(clean(run_id))
     params.extend([bounded_limit, bounded_offset])
     with connect_store(path, read_only=True) as conn:
         rows = conn.execute(
@@ -1189,9 +1236,10 @@ def query_training_labels(
     if clean(run_id):
         clauses.append(
             "EXISTS (SELECT 1 FROM classifications c "
-            "WHERE c.domain=training_labels.domain AND c.record_json LIKE ?)"
+            "JOIN classification_run_membership m ON m.domain=c.domain "
+            "WHERE c.domain=training_labels.domain AND m.run_id=?)"
         )
-        params.append(f'%"run_id"%{clean(run_id)}%')
+        params.append(clean(run_id))
     where = " AND ".join(clauses)
     with connect_store(path, read_only=True) as conn:
         total = int(conn.execute(f"SELECT count(*) AS total FROM training_labels WHERE {where}", params).fetchone()["total"])
