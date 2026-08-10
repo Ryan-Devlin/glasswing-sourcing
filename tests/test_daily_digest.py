@@ -138,8 +138,12 @@ def test_hidden_and_mark_no_companies_never_enter_digest(tmp_path):
         conn.execute("DELETE FROM hidden_domains")
         conn.execute(
             """
-            INSERT INTO training_labels(domain,label,rating,source,reason,labeled_at)
-            VALUES (?,?,?,?,?,?)
+                INSERT INTO training_labels(domain,label,rating,source,reason,labeled_at)
+                VALUES (?,?,?,?,?,?)
+                ON CONFLICT(domain) DO UPDATE SET
+                    label=excluded.label,rating=excluded.rating,
+                    source=excluded.source,reason=excluded.reason,
+                    labeled_at=excluded.labeled_at
             """,
             ("strong.ai", "no", 2, "human", "not a fit", "2026-08-05T12:30:00Z"),
         )

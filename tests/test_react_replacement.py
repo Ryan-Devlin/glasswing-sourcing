@@ -29,7 +29,7 @@ def test_react_app_has_every_primary_page_and_no_streamlit_dependency():
     assert "Claude calls per day" in source
     assert "data-tooltip" in source
     assert "Pause CertStream to unlock" in source
-    assert "<RunFilters running={Boolean(s.running)} />" in source
+    assert "<RunFilters running={Boolean(desiredRunning)} />" in source
     assert source.count("<CompaniesTable />") >= 2
     assert "clamp-text" in source
     assert "Claude’s strongest investment recommendations" in source

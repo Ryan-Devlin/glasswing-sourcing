@@ -617,6 +617,24 @@ def upsert_classifications(
             sql,
             [tuple(record[column] for column in CORE_COLUMNS) for record in records],
         )
+        # Scraper refreshes cannot return a decisively reviewed company to an
+        # incompatible bucket. Persisted Claude output owns canonical routing.
+        for record in records:
+            diligence = conn.execute(
+                "SELECT decision FROM claude_diligence WHERE domain=?",
+                (record["domain"],),
+            ).fetchone()
+            if diligence and diligence["decision"] in {"KEEP", "REJECT"}:
+                decision = str(diligence["decision"])
+                conn.execute(
+                    "UPDATE classifications SET routing_bucket=?,routing_reason=? "
+                    "WHERE domain=? AND manual_override=0",
+                    (
+                        "priority" if decision == "KEEP" else "reject",
+                        "claude_keep" if decision == "KEEP" else "claude_reject",
+                        record["domain"],
+                    ),
+                )
         conn.commit()
     return len(records)
 
@@ -733,8 +751,78 @@ def upsert_claude_diligence(
             """,
             values,
         )
+        # A decisive diligence result must move the canonical company and
+        # its training label together; otherwise REJECT cards can remain in
+        # Investable even though Claude has already denied them.
+        for value in values:
+            domain, decision, fit_score = value[0], value[1], value[2]
+            bucket = "priority" if decision == "KEEP" else "reject"
+            label = "yes" if decision == "KEEP" else "no"
+            reason = "claude_keep" if decision == "KEEP" else "claude_reject"
+            conn.execute(
+                "UPDATE classifications SET routing_bucket=?,routing_reason=?,"
+                "updated_at=? WHERE domain=? AND manual_override=0",
+                (bucket, reason, now, domain),
+            )
+            conn.execute(
+                """
+                INSERT INTO training_labels(
+                    domain,label,rating,source,reason,labeled_at
+                ) VALUES (?,?,?,?,?,?)
+                ON CONFLICT(domain) DO UPDATE SET
+                    label=excluded.label,rating=excluded.rating,
+                    source=excluded.source,reason=excluded.reason,
+                    labeled_at=excluded.labeled_at
+                WHERE lower(training_labels.source) NOT IN (
+                    'human','glasswing_portfolio'
+                )
+                """,
+                (domain, label, fit_score, "claude", reason, now),
+            )
         conn.commit()
     return len(values)
+
+
+def reconcile_claude_routing(
+    *, path: Path | str = CLASSIFICATION_DB
+) -> int:
+    """Repair canonical buckets/labels for every stored Claude decision."""
+    now = utc_now()
+    with connect_store(path) as conn:
+        rows = conn.execute(
+            "SELECT domain,decision,fit_score FROM claude_diligence "
+            "WHERE decision IN ('KEEP','REJECT')"
+        ).fetchall()
+        begin_immediate(conn)
+        for row in rows:
+            domain = str(row["domain"])
+            decision = str(row["decision"])
+            fit_score = int(row["fit_score"] or 0)
+            bucket = "priority" if decision == "KEEP" else "reject"
+            label = "yes" if decision == "KEEP" else "no"
+            reason = "claude_keep" if decision == "KEEP" else "claude_reject"
+            conn.execute(
+                "UPDATE classifications SET routing_bucket=?,routing_reason=?,"
+                "updated_at=? WHERE domain=? AND manual_override=0",
+                (bucket, reason, now, domain),
+            )
+            conn.execute(
+                """
+                INSERT INTO training_labels(
+                    domain,label,rating,source,reason,labeled_at
+                ) VALUES (?,?,?,?,?,?)
+                ON CONFLICT(domain) DO UPDATE SET
+                    label=excluded.label,rating=excluded.rating,
+                    source=excluded.source,reason=excluded.reason,
+                    labeled_at=excluded.labeled_at
+                WHERE lower(training_labels.source) NOT IN (
+                    'human','glasswing_portfolio'
+                )
+                """,
+                (domain, label, fit_score, "claude", reason, now),
+            )
+        conn.commit()
+    return len(rows)
 
 
 def query_claude_diligence(

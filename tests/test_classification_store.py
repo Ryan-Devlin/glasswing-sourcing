@@ -117,6 +117,38 @@ def test_claude_diligence_is_shared_and_upserted(tmp_path):
     assert rows[0]["llm_fit_score"] == 88
 
 
+def test_claude_decision_routes_company_and_training_bucket_atomically(tmp_path):
+    database = tmp_path / "classifications.sqlite3"
+    upsert_classifications(pd.DataFrame([{
+        "domain": "decision.ai", "company_name": "Decision",
+        "routing_bucket": "priority", "fit_score": 91,
+    }]), database)
+
+    upsert_claude_diligence([{
+        "domain": "decision.ai", "llm_decision": "REJECT",
+        "llm_fit_score": 18, "llm_reasoning": "Confirmed consumer product",
+    }], path=database)
+    assert [row["domain"] for row in query_classifications(
+        ("reject",), path=database
+    )] == ["decision.ai"]
+    labels = classification_store.training_label_rows(path=database)
+    assert labels[0]["label"] == "no"
+    assert labels[0]["source"] == "claude"
+
+    upsert_claude_diligence([{
+        "domain": "decision.ai", "llm_decision": "KEEP",
+        "llm_fit_score": 86,
+    }], path=database)
+    assert [row["domain"] for row in query_classifications(
+        ("priority",), path=database
+    )] == ["decision.ai"]
+    assert classification_store.training_label_rows(path=database)[0]["label"] == "yes"
+
+    # The deployment-time reconciliation repairs previously inconsistent
+    # rows using the same canonical decisions.
+    assert classification_store.reconcile_claude_routing(path=database) == 1
+
+
 def test_historical_claude_results_backfill_baskets_without_overwriting_human(tmp_path):
     database = tmp_path / "classifications.sqlite3"
     upsert_claude_diligence([
@@ -128,7 +160,7 @@ def test_historical_claude_results_backfill_baskets_without_overwriting_human(tm
         "domain": "human.ai", "label": "yes", "rating": 95, "source": "human",
     }], path=database)
 
-    assert classification_store.backfill_claude_training_labels(path=database) == 2
+    assert classification_store.backfill_claude_training_labels(path=database) == 0
     labels = {
         row["domain"]: row
         for row in classification_store.training_label_rows(path=database)

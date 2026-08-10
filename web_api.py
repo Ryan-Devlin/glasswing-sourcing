@@ -55,6 +55,7 @@ from classification_store import (
     query_training_labels,
     record_admin_audit,
     recover_claude_review_queue,
+    reconcile_claude_routing,
     search_classifications,
     source_bucket_counts,
     top_claude_keeps,
@@ -95,6 +96,7 @@ from zone_universe.database import connect as zone_connect, diagnostics as zone_
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    await asyncio.to_thread(reconcile_claude_routing)
     task = asyncio.create_task(_claude_queue_worker())
     try:
         yield
