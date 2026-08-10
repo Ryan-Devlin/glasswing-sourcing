@@ -804,7 +804,7 @@ async def submit_competitive_landscape(
     requested_count: int = Form(25),
     notes: str = Form(""),
     template: UploadFile | None = File(None),
-    materials: list[UploadFile] = File(default=[]),
+    materials: list[UploadFile | str] = File(default=[]),
 ):
     website = website.strip()
     if not website or "." not in website:
@@ -820,9 +820,18 @@ async def submit_competitive_landscape(
     allowed = {".pdf", ".docx", ".xlsx", ".csv", ".txt", ".md"}
     total = len(template_bytes)
     for number, upload in enumerate(materials):
-        suffix = Path(upload.filename or "").suffix.lower()
+        if isinstance(upload, str):
+            if not upload.strip():
+                continue
+            raise HTTPException(400, "Supporting materials must be uploaded files")
+        filename = (upload.filename or "").strip()
+        # Browsers may serialize an untouched multi-file input as a blank
+        # multipart file part. It is absence, not an unsupported attachment.
+        if not filename:
+            continue
+        suffix = Path(filename).suffix.lower()
         if suffix not in allowed:
-            raise HTTPException(400, f"Unsupported supporting file: {upload.filename}")
+            raise HTTPException(400, f"Unsupported supporting file: {filename}")
         content = await upload.read()
         total += len(content)
         if total > 40_000_000:

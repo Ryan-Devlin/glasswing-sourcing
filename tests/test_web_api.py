@@ -40,6 +40,29 @@ def test_api_responses_are_not_cached():
     assert response.headers["x-content-type-options"] == "nosniff"
 
 
+def test_landscape_submit_ignores_browser_blank_file_part(monkeypatch, tmp_path):
+    captured = {}
+    monkeypatch.setattr(web_api, "LANDSCAPE_ROOT", tmp_path)
+    monkeypatch.setattr(
+        web_api,
+        "create_landscape_job",
+        lambda website, template, materials, notes, count, job_id: captured.update(
+            website=website, materials=materials, job_id=job_id
+        ) or job_id,
+    )
+    monkeypatch.setattr(web_api, "record_admin_audit", lambda *args: None)
+
+    response = client.post(
+        "/api/competitive-landscapes",
+        data={"website": "neyon.ai", "requested_count": "25", "notes": ""},
+        files=[("materials", ("", b"", "application/octet-stream"))],
+    )
+
+    assert response.status_code == 200
+    assert captured["website"] == "neyon.ai"
+    assert captured["materials"] == []
+
+
 def test_classifications_are_server_paginated(monkeypatch):
     monkeypatch.setattr(web_api, "_count_cache", None)
     monkeypatch.setattr(

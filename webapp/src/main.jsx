@@ -2065,6 +2065,9 @@ function CompetitiveLandscapePage() {
     if (!admin) return requestLogin();
     setBusy(true); setError(""); setMessage("");
     const form = new FormData(event.currentTarget);
+    const attachments = form.getAll("materials").filter((file) => file?.name && file.size > 0);
+    form.delete("materials");
+    attachments.forEach((file) => form.append("materials", file));
     try {
       const result = await api("/api/competitive-landscapes", { method: "POST", body: form });
       setMessage(`Research job ${result.job_id.slice(0, 8)} is queued. You can leave this page; it will keep running.`);
