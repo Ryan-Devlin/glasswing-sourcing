@@ -1,4 +1,10 @@
-import React, { createContext, useContext, useEffect, useState } from "react";
+import React, {
+  createContext,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { createRoot } from "react-dom/client";
 import {
   Activity,
@@ -28,6 +34,7 @@ const NAV = [
   ["csv", "CSV Scraper", Database],
   ["domains", "Domain Crawler (.com, .app)", Globe2],
   ["health", "System Health", HeartPulse],
+  ["claude", "Claude Queue", Bot],
 ];
 const BUCKET_TABS = [
   ["investable", "Investable"],
@@ -515,7 +522,12 @@ function LabelsPanel() {
   const { admin, requestLogin } = useAdmin();
   const [label, setLabel] = useState("yes");
   const [refresh, setRefresh] = useState(0);
-  const result = useApi(`/api/labels?label=${label}`, [label, refresh]);
+  const [page, setPage] = useState(1);
+  const [q, setQ] = useState("");
+  const result = useApi(
+    `/api/labels?label=${label}&page=${page}&page_size=100&q=${encodeURIComponent(q)}`,
+    [label, page, q, refresh],
+  );
   const remove = async (domain) => {
     if (
       !window.confirm(
@@ -539,12 +551,28 @@ function LabelsPanel() {
         </div>
         <BucketTabs
           value={label}
-          onChange={setLabel}
+          onChange={(value) => {
+            setLabel(value);
+            setPage(1);
+          }}
           tabs={[
             ["yes", "YES"],
             ["no", "NO"],
           ]}
         />
+      </div>
+      <div className="inline-tools">
+        <input
+          value={q}
+          onChange={(e) => {
+            setQ(e.target.value);
+            setPage(1);
+          }}
+          placeholder="Search basket domains"
+        />
+        <a className="button-link" href={`/api/export/labels/${label}`}>
+          Export CSV
+        </a>
       </div>
       {result.loading ? (
         <Loading />
@@ -586,6 +614,9 @@ function LabelsPanel() {
           </table>
         </div>
       )}
+      {result.data && (
+        <Pager page={page} setPage={setPage} total={result.data.total} />
+      )}
     </section>
   );
 }
@@ -601,7 +632,7 @@ function CompaniesTable() {
   const [claudeBusy, setClaudeBusy] = useState("");
   const basket = bucket === "yes" || bucket === "no";
   const query = basket
-    ? `/api/labels?label=${bucket}`
+    ? `/api/labels?label=${bucket}&page=${page}&page_size=100`
     : `/api/classifications?bucket=${bucket}&page=${page}&page_size=100&sort=${encodeURIComponent(apiSort(sort))}`;
   const result = useApi(query, [bucket, page, refresh]);
   const save = (row, label) => setLabel({ domain: row.domain, label });
@@ -662,26 +693,41 @@ function CompaniesTable() {
           setPage(1);
         }}
       />
+      <div className="export-row">
+        <a
+          className="button-link"
+          href={
+            basket
+              ? `/api/export/labels/${bucket}`
+              : `/api/export/classifications/${bucket}`
+          }
+        >
+          Export current bucket CSV
+        </a>
+      </div>
       {result.loading ? (
         <Loading />
       ) : result.error ? (
         <ErrorBox>{result.error}</ErrorBox>
       ) : basket ? (
-        <Table
-          rows={result.data.rows}
-          columns={[
-            {
-              key: "domain",
-              label: "Domain",
-              render: (row) => (
-                <a href={row.url} target="_blank">
-                  {row.domain}
-                </a>
-              ),
-            },
-            { key: "rating", label: "Glasswing score" },
-          ]}
-        />
+        <>
+          <Table
+            rows={result.data.rows}
+            columns={[
+              {
+                key: "domain",
+                label: "Domain",
+                render: (row) => (
+                  <a href={row.url} target="_blank">
+                    {row.domain}
+                  </a>
+                ),
+              },
+              { key: "rating", label: "Glasswing score" },
+            ]}
+          />
+          <Pager page={page} setPage={setPage} total={result.data.total} />
+        </>
       ) : (
         <>
           <Table
@@ -935,7 +981,7 @@ function CorpusCompanies({ kind }) {
   const basket = bucket === "yes" || bucket === "no";
   const result = useApi(
     basket
-      ? `/api/labels?label=${bucket}`
+      ? `/api/labels?label=${bucket}&page=${page}&page_size=100`
       : `/api/corpus/${kind}?bucket=${bucket}&page=${page}&page_size=100&sort=${encodeURIComponent(apiSort(sort))}`,
     [bucket, page, refresh],
   );
@@ -1377,6 +1423,127 @@ function AdminActivity() {
   );
 }
 
+function ClaudeQueuePage() {
+  const { admin, requestLogin } = useAdmin();
+  const [tick, setTick] = useState(0);
+  const queue = useApi("/api/claude/queue", [tick]);
+  useEffect(() => {
+    const timer = setInterval(() => setTick((v) => v + 1), 5000);
+    return () => clearInterval(timer);
+  }, []);
+  const retry = async (domain) => {
+    if (!admin) return requestLogin();
+    await api(`/api/claude/review/${encodeURIComponent(domain)}`, {
+      method: "POST",
+    });
+    setTick((v) => v + 1);
+  };
+  const d = queue.data || { rows: [], counts: {} };
+  return (
+    <>
+      <header>
+        <p className="eyebrow">External diligence</p>
+        <h1>Claude Queue</h1>
+        <p>
+          Durable paid-review jobs continue through navigation and deployments.
+        </p>
+      </header>
+      <div className="metrics">
+        <Metric label="Queued" value={fmt(d.counts.queued)} />
+        <Metric label="Reviewing" value={fmt(d.counts.reviewing)} />
+        <Metric label="Completed" value={fmt(d.counts.completed)} />
+        <Metric label="Failed" value={fmt(d.counts.failed)} />
+      </div>
+      <div className="inline-tools">
+        <button
+          onClick={async () => {
+            if ("Notification" in window)
+              await Notification.requestPermission();
+          }}
+        >
+          Enable completion notifications
+        </button>
+        <button onClick={() => setTick((v) => v + 1)}>
+          <RefreshCw size={15} />
+          Refresh
+        </button>
+      </div>
+      {queue.loading ? (
+        <Loading />
+      ) : queue.error ? (
+        <ErrorBox>{queue.error}</ErrorBox>
+      ) : (
+        <Table
+          rows={d.rows}
+          columns={[
+            {
+              key: "domain",
+              label: "Domain",
+              render: (row) => (
+                <a href={`https://${row.domain}`} target="_blank">
+                  {row.domain}
+                </a>
+              ),
+            },
+            {
+              key: "status",
+              label: "Status",
+              render: (row) => (
+                <span className={`status ${row.status}`}>{row.status}</span>
+              ),
+            },
+            { key: "decision", label: "Decision" },
+            { key: "fit_score", label: "Claude score" },
+            { key: "requested_at", label: "Requested" },
+            { key: "error", label: "Error" },
+            {
+              key: "retry",
+              label: "Action",
+              render: (row) =>
+                row.status === "failed" ? (
+                  <button onClick={() => retry(row.domain)}>Retry</button>
+                ) : (
+                  ""
+                ),
+            },
+          ]}
+        />
+      )}
+    </>
+  );
+}
+
+function ClaudeNotifier() {
+  const { admin } = useAdmin();
+  const seen = useRef({});
+  useEffect(() => {
+    if (!admin) return;
+    const check = async () => {
+      try {
+        const data = await api("/api/claude/queue?limit=50");
+        for (const row of data.rows) {
+          const before = seen.current[row.domain];
+          if (
+            before &&
+            before !== row.status &&
+            ["completed", "failed"].includes(row.status) &&
+            "Notification" in window &&
+            Notification.permission === "granted"
+          )
+            new Notification(`Claude review ${row.status}`, {
+              body: `${row.domain}${row.decision ? ` · ${row.decision}` : ""}`,
+            });
+          seen.current[row.domain] = row.status;
+        }
+      } catch {}
+    };
+    check();
+    const timer = setInterval(check, 10000);
+    return () => clearInterval(timer);
+  }, [admin]);
+  return null;
+}
+
 function GlobalWorkerControls() {
   const { admin } = useAdmin();
   const [tick, setTick] = useState(0);
@@ -1467,11 +1634,13 @@ function App() {
     csv: <SearchCorpusPage kind="ai" />,
     domains: <SearchCorpusPage kind="zone" />,
     health: <HealthPage />,
+    claude: <ClaudeQueuePage />,
   }[page] || <HomePage />;
   return (
     <AdminContext.Provider
       value={{ admin, requestLogin: () => setLoginOpen(true) }}
     >
+      <ClaudeNotifier />
       <div className="app">
         <aside>
           <div className="brand">

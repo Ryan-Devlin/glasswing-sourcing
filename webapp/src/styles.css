@@ -238,6 +238,48 @@ button {
   align-items: center;
   gap: 7px;
 }
+.button-link {
+  display: inline-flex;
+  align-items: center;
+  padding: 9px 13px;
+  border: 1px solid #cfdad6;
+  border-radius: 8px;
+  background: #fff;
+  color: #087365;
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 600;
+}
+.inline-tools,
+.export-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 9px;
+  margin: 10px 0 14px;
+}
+.inline-tools input {
+  min-width: 260px;
+  border: 1px solid #cedbd6;
+  border-radius: 8px;
+  padding: 9px 11px;
+}
+.status.queued {
+  background: #fff0cf;
+  color: #8f6200;
+}
+.status.reviewing {
+  background: #e8e0fa;
+  color: #64459c;
+}
+.status.completed {
+  background: #dbf5e9;
+  color: #13734f;
+}
+.status.failed {
+  background: #ffe0dc;
+  color: #a52f22;
+}
 button:hover:not(:disabled) {
   border-color: #138c7b;
   color: #087365;

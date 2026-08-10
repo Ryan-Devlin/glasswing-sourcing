@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import json
 import hashlib
 import hmac
@@ -20,7 +22,7 @@ from typing import Literal
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -38,6 +40,7 @@ from classification_store import (
     claim_claude_review,
     claude_decisions_for_domains,
     claude_review_status,
+    claude_review_queue_rows,
     connect_store,
     enqueue_claude_review,
     finish_claude_review,
@@ -49,6 +52,7 @@ from classification_store import (
     query_classifications,
     query_classifications_by_domains,
     query_source_classifications,
+    query_training_labels,
     record_admin_audit,
     recover_claude_review_queue,
     search_classifications,
@@ -247,7 +251,10 @@ def _safe_corpus_rows(rows: list[dict]) -> list[dict]:
 
 
 def _with_claude(rows: list[dict]) -> list[dict]:
-    decisions = claude_decisions_for_domains(row.get("domain", "") for row in rows)
+    decisions: dict[str, dict] = {}
+    domains = [row.get("domain", "") for row in rows]
+    for start in range(0, len(domains), 500):
+        decisions.update(claude_decisions_for_domains(domains[start:start + 500]))
     return [
         {
             **row,
@@ -397,8 +404,17 @@ def classification(domain: str):
 
 
 @app.get("/api/labels")
-def labels(label: Literal["yes", "no"]):
-    return {"rows": _basket_payload(YES_BASKET_DATA if label == "yes" else NO_BASKET_DATA)}
+def labels(
+    label: Literal["yes", "no"], q: str = "",
+    page: int = Query(1, ge=1), page_size: int = Query(100, ge=25, le=500),
+):
+    rows, total = query_training_labels(
+        label, search=q, limit=page_size, offset=(page - 1) * page_size
+    )
+    return {
+        "rows": [{**row, "url": f"https://{row['domain']}"} for row in rows],
+        "total": total, "page": page, "page_size": page_size,
+    }
 
 
 @app.post("/api/labels", dependencies=[Depends(_require_admin)])
@@ -475,6 +491,51 @@ def manual_claude_review_status(domain: str):
     if not queued and not decision:
         raise HTTPException(404, "Claude review not found")
     return {**(queued or {}), "result": decision}
+
+
+@app.get("/api/claude/queue")
+def claude_queue(limit: int = Query(200, ge=1, le=500)):
+    rows = claude_review_queue_rows(limit)
+    counts: dict[str, int] = {}
+    for row in rows:
+        status = str(row.get("status", "unknown"))
+        counts[status] = counts.get(status, 0) + 1
+    return {"rows": rows, "counts": counts}
+
+
+def _csv_response(rows: list[dict], filename: str):
+    output = io.StringIO()
+    columns = list(rows[0]) if rows else ["domain"]
+    writer = csv.DictWriter(output, fieldnames=columns, extrasaction="ignore")
+    writer.writeheader()
+    writer.writerows(rows)
+    return StreamingResponse(
+        iter([output.getvalue()]), media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/api/export/classifications/{bucket}")
+def export_classifications(bucket: str):
+    if bucket not in BUCKETS:
+        raise HTTPException(400, "Unknown bucket")
+    rows: list[dict] = []
+    while True:
+        batch = query_classifications(BUCKETS[bucket], limit=250, offset=len(rows), sort="Recently classified")
+        rows.extend(batch)
+        if len(batch) < 250:
+            break
+    return _csv_response(_with_claude(rows), f"glasswing-{bucket}.csv")
+
+
+@app.get("/api/export/labels/{label}")
+def export_labels(label: Literal["yes", "no"]):
+    rows: list[dict] = []
+    total = 1
+    while len(rows) < total:
+        batch, total = query_training_labels(label, limit=500, offset=len(rows))
+        rows.extend(batch)
+    return _csv_response(rows, f"glasswing-{label}-basket.csv")
 
 
 def _execute_queued_claude(target: str) -> None:

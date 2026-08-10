@@ -1044,6 +1044,41 @@ def admin_audit_rows(limit: int = 100, *, path: Path | str = CLASSIFICATION_DB) 
     return [dict(row) for row in rows]
 
 
+def query_training_labels(
+    label: str, *, search: str = "", limit: int = 100, offset: int = 0,
+    path: Path | str = CLASSIFICATION_DB,
+) -> tuple[list[dict[str, object]], int]:
+    target = clean(label).lower()
+    if target not in {"yes", "no"}:
+        return [], 0
+    clauses = ["label=?"]
+    params: list[object] = [target]
+    if clean(search):
+        clauses.append("lower(domain) LIKE ?")
+        params.append(f"%{clean(search).lower()}%")
+    where = " AND ".join(clauses)
+    with connect_store(path, read_only=True) as conn:
+        total = int(conn.execute(f"SELECT count(*) AS total FROM training_labels WHERE {where}", params).fetchone()["total"])
+        rows = conn.execute(
+            "SELECT domain,label,rating,source,reason,labeled_at FROM training_labels "
+            f"WHERE {where} ORDER BY labeled_at DESC,domain LIMIT ? OFFSET ?",
+            params + [max(1, min(int(limit), 500)), max(0, int(offset))],
+        ).fetchall()
+    return [dict(row) for row in rows], total
+
+
+def claude_review_queue_rows(limit: int = 200, *, path: Path | str = CLASSIFICATION_DB) -> list[dict[str, object]]:
+    with connect_store(path, read_only=True) as conn:
+        rows = conn.execute(
+            "SELECT q.domain,q.status,q.requested_at,q.started_at,q.completed_at,q.error,"
+            "d.decision,d.fit_score FROM claude_review_queue q "
+            "LEFT JOIN claude_diligence d ON d.domain=q.domain "
+            "ORDER BY q.requested_at DESC LIMIT ?",
+            (max(1, min(int(limit), 500)),),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def query_classifications_by_domains(
     domains: Iterable[str],
     *,
