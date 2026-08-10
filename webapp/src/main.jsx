@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { createContext, useContext, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Activity,
@@ -8,6 +8,8 @@ import {
   Globe2,
   HeartPulse,
   Home,
+  LogIn,
+  LogOut,
   Pause,
   Play,
   RefreshCw,
@@ -33,6 +35,8 @@ const BUCKET_TABS = [
   ["yes", "YES"],
   ["no", "NO"],
 ];
+const AdminContext = createContext({ admin: false, requestLogin: () => {} });
+const useAdmin = () => useContext(AdminContext);
 async function api(path, options = {}) {
   const r = await fetch(path, {
     headers: {
@@ -114,6 +118,57 @@ class ErrorBoundary extends React.Component {
     }
     return this.props.children;
   }
+}
+function AdminLogin({ onClose, onLogin }) {
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const submit = async (event) => {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      await api("/api/auth/login", {
+        method: "POST",
+        body: JSON.stringify({ password }),
+      });
+      onLogin();
+    } catch {
+      setError("Incorrect admin password.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div
+      className="modal-bg"
+      onMouseDown={(e) => e.target === e.currentTarget && onClose()}
+    >
+      <form className="modal" onSubmit={submit}>
+        <h3>Admin login</h3>
+        <p>Admin access enables labels, uploads, and worker controls.</p>
+        <label>
+          Password
+          <input
+            autoFocus
+            type="password"
+            autoComplete="current-password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+        </label>
+        {error && <ErrorBox>{error}</ErrorBox>}
+        <div className="modal-actions">
+          <button type="button" onClick={onClose}>
+            Cancel
+          </button>
+          <button className="primary" disabled={busy || !password}>
+            Log in
+          </button>
+        </div>
+      </form>
+    </div>
+  );
 }
 function Pager({ page, setPage, total, pageSize = 100 }) {
   const max = pageCount(total, pageSize);
@@ -368,6 +423,7 @@ function HomePage() {
 }
 
 function LabelsPanel() {
+  const { admin, requestLogin } = useAdmin();
   const [label, setLabel] = useState("yes");
   const [refresh, setRefresh] = useState(0);
   const result = useApi(`/api/labels?label=${label}`, [label, refresh]);
@@ -425,9 +481,14 @@ function LabelsPanel() {
                   </td>
                   <td>{row.rating}</td>
                   <td>
-                    <button className="no" onClick={() => remove(row.domain)}>
+                    <button
+                      className="no"
+                      onClick={() =>
+                        admin ? remove(row.domain) : requestLogin()
+                      }
+                    >
                       <Trash2 size={13} />
-                      Remove
+                      {admin ? "Remove" : "Admin"}
                     </button>
                   </td>
                 </tr>
@@ -441,6 +502,7 @@ function LabelsPanel() {
 }
 
 function CompaniesTable() {
+  const { admin, requestLogin } = useAdmin();
   const [bucket, setBucket] = useState("investable");
   const [page, setPage] = useState(1);
   const [refresh, setRefresh] = useState(0);
@@ -505,8 +567,8 @@ function CompaniesTable() {
           <Table
             rows={result.data.rows.filter((r) => !r.hidden)}
             columns={companyCols}
-            onLabel={save}
-            onHide={hide}
+            onLabel={admin ? save : (_, label) => requestLogin(label)}
+            onHide={admin ? hide : requestLogin}
           />
           <Pager page={page} setPage={setPage} total={result.data.total} />
         </>
@@ -527,6 +589,7 @@ function CompaniesTable() {
   );
 }
 function CertStreamPage() {
+  const { admin, requestLogin } = useAdmin();
   const [tick, setTick] = useState(0);
   const [controlBusy, setControlBusy] = useState(false);
   const status = useApi("/api/certstream/status", [tick]);
@@ -562,7 +625,7 @@ function CertStreamPage() {
         <div>
           <button
             disabled={controlBusy || s.running}
-            onClick={() => control(true)}
+            onClick={() => (admin ? control(true) : requestLogin())}
           >
             <Play size={16} />
             Start
@@ -570,8 +633,10 @@ function CertStreamPage() {
           <button
             disabled={controlBusy || !s.running}
             onClick={() =>
-              window.confirm("Pause CertStream screening safely?") &&
-              control(false)
+              admin
+                ? window.confirm("Pause CertStream screening safely?") &&
+                  control(false)
+                : requestLogin()
             }
           >
             <Pause size={16} />
@@ -603,6 +668,7 @@ function CertStreamPage() {
 }
 
 function CorpusCompanies({ kind }) {
+  const { admin, requestLogin } = useAdmin();
   const [bucket, setBucket] = useState("investable");
   const [page, setPage] = useState(1);
   const [refresh, setRefresh] = useState(0);
@@ -654,7 +720,9 @@ function CorpusCompanies({ kind }) {
           <Table
             rows={result.data.rows}
             columns={companyCols}
-            onLabel={(row, label) => setLabel({ domain: row.domain, label })}
+            onLabel={(row, label) =>
+              admin ? setLabel({ domain: row.domain, label }) : requestLogin()
+            }
           />
           <Pager page={page} setPage={setPage} total={result.data.total} />
         </>
@@ -674,6 +742,7 @@ function CorpusCompanies({ kind }) {
 }
 
 function SearchCorpusPage({ kind }) {
+  const { admin, requestLogin } = useAdmin();
   const isAi = kind === "ai";
   const [view, setView] = useState("search");
   const [q, setQ] = useState("");
@@ -743,6 +812,7 @@ function SearchCorpusPage({ kind }) {
                 <input
                   type="file"
                   accept=".csv,.txt"
+                  disabled={!admin}
                   onChange={async (e) => {
                     const f = e.target.files[0];
                     if (!f) return;
@@ -755,6 +825,9 @@ function SearchCorpusPage({ kind }) {
                     setUpload(`Added ${r.added} of ${r.received} domains`);
                   }}
                 />
+                {!admin && (
+                  <button onClick={requestLogin}>Admin login to upload</button>
+                )}
                 {upload && <p>{upload}</p>}
               </div>
             </section>
@@ -800,6 +873,7 @@ function SearchCorpusPage({ kind }) {
 }
 
 function HealthPage() {
+  const { admin, requestLogin } = useAdmin();
   const [full, setFull] = useState(false);
   const [tick, setTick] = useState(0);
   const health = useApi(`/api/health?full=${full}`, [full, tick]);
@@ -808,6 +882,7 @@ function HealthPage() {
   const d = health.data;
   const services = d.runtime?.services || {};
   const control = async (service, desired) => {
+    if (!admin) return requestLogin();
     await api(`/api/runtime/${service}`, {
       method: "POST",
       body: JSON.stringify({ desired }),
@@ -914,11 +989,22 @@ function HealthPage() {
 
 function App() {
   const [page, setPage] = useState(location.hash.slice(1) || "home");
+  const [admin, setAdmin] = useState(false);
+  const [loginOpen, setLoginOpen] = useState(false);
   useEffect(() => {
     const fn = () => setPage(location.hash.slice(1) || "home");
     addEventListener("hashchange", fn);
     return () => removeEventListener("hashchange", fn);
   }, []);
+  useEffect(() => {
+    api("/api/auth/status")
+      .then((result) => setAdmin(result.admin))
+      .catch(() => {});
+  }, []);
+  const logout = async () => {
+    await api("/api/auth/logout", { method: "POST" });
+    setAdmin(false);
+  };
   const body = {
     home: <HomePage />,
     certstream: <CertStreamPage />,
@@ -927,29 +1013,53 @@ function App() {
     health: <HealthPage />,
   }[page] || <HomePage />;
   return (
-    <div className="app">
-      <aside>
-        <div className="brand">
-          <div className="mark">G</div>
-          <div>
-            <strong>Glasswing</strong>
-            <span>VENTURES</span>
+    <AdminContext.Provider
+      value={{ admin, requestLogin: () => setLoginOpen(true) }}
+    >
+      <div className="app">
+        <aside>
+          <div className="brand">
+            <div className="mark">G</div>
+            <div>
+              <strong>Glasswing</strong>
+              <span>VENTURES</span>
+            </div>
           </div>
-        </div>
-        <nav>
-          {NAV.map(([id, label, Icon]) => (
-            <a key={id} className={page === id ? "active" : ""} href={`#${id}`}>
-              <Icon size={18} />
-              {label}
-            </a>
-          ))}
-        </nav>
-        <ApiStatus />
-      </aside>
-      <main>
-        <ErrorBoundary>{body}</ErrorBoundary>
-      </main>
-    </div>
+          <nav>
+            {NAV.map(([id, label, Icon]) => (
+              <a
+                key={id}
+                className={page === id ? "active" : ""}
+                href={`#${id}`}
+              >
+                <Icon size={18} />
+                {label}
+              </a>
+            ))}
+          </nav>
+          <button
+            className="admin-button"
+            onClick={admin ? logout : () => setLoginOpen(true)}
+          >
+            {admin ? <LogOut size={16} /> : <LogIn size={16} />}
+            {admin ? "Log out admin" : "Admin login"}
+          </button>
+          <ApiStatus />
+        </aside>
+        <main>
+          <ErrorBoundary>{body}</ErrorBoundary>
+        </main>
+        {loginOpen && (
+          <AdminLogin
+            onClose={() => setLoginOpen(false)}
+            onLogin={() => {
+              setAdmin(true);
+              setLoginOpen(false);
+            }}
+          />
+        )}
+      </div>
+    </AdminContext.Provider>
   );
 }
 createRoot(document.getElementById("root")).render(<App />);

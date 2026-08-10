@@ -1,9 +1,28 @@
 from fastapi.testclient import TestClient
+import pytest
 
 import web_api
 
 
 client = TestClient(web_api.app)
+
+
+@pytest.fixture(autouse=True)
+def admin_session(monkeypatch):
+    monkeypatch.setenv("GLASSWING_ADMIN_PASSWORD", "Glasswing")
+    response = client.post("/api/auth/login", json={"password": "Glasswing"})
+    assert response.status_code == 200
+    yield
+    client.post("/api/auth/logout")
+
+
+def test_admin_login_is_server_enforced():
+    client.post("/api/auth/logout")
+    assert client.get("/api/auth/status").json() == {"admin": False}
+    assert client.post("/api/runtime/pipeline", json={"desired": False}).status_code == 401
+    assert client.post("/api/auth/login", json={"password": "wrong"}).status_code == 401
+    assert client.post("/api/auth/login", json={"password": "Glasswing"}).status_code == 200
+    assert client.get("/api/auth/status").json() == {"admin": True}
 
 
 def test_health_and_spa_are_served():

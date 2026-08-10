@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import hmac
 import os
 import re
 import sys
@@ -10,7 +12,7 @@ import time
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse
@@ -94,6 +96,11 @@ CORPUS_SOURCES = {
 }
 COUNT_CACHE_SECONDS = 15.0
 _count_cache: tuple[float, dict[str, int]] | None = None
+ADMIN_COOKIE = "glasswing_admin"
+ADMIN_SESSION_SECONDS = 8 * 60 * 60
+LOGIN_WINDOW_SECONDS = 5 * 60
+LOGIN_MAX_FAILURES = 10
+_login_failures: dict[str, list[float]] = {}
 
 
 class LabelUpdate(BaseModel):
@@ -110,6 +117,38 @@ class WorkerUpdate(BaseModel):
 class HiddenUpdate(BaseModel):
     domains: list[str]
     hidden: bool = True
+
+
+class LoginRequest(BaseModel):
+    password: str = Field(min_length=1, max_length=200)
+
+
+def _admin_password() -> str:
+    return os.getenv("GLASSWING_ADMIN_PASSWORD", "Glasswing")
+
+
+def _session_token(expires: int) -> str:
+    signature = hmac.new(
+        _admin_password().encode(), str(expires).encode(), hashlib.sha256
+    ).hexdigest()
+    return f"{expires}.{signature}"
+
+
+def _is_admin(request: Request) -> bool:
+    token = request.cookies.get(ADMIN_COOKIE, "")
+    try:
+        expires_text, signature = token.split(".", 1)
+        expires = int(expires_text)
+    except (TypeError, ValueError):
+        return False
+    return expires >= int(time.time()) and hmac.compare_digest(
+        signature, _session_token(expires).split(".", 1)[1]
+    )
+
+
+def _require_admin(request: Request) -> None:
+    if not _is_admin(request):
+        raise HTTPException(401, "Admin login required")
 
 
 def _basket_payload(path: Path) -> list[dict]:
@@ -165,6 +204,46 @@ def _safe_corpus_rows(rows: list[dict]) -> list[dict]:
 @app.get("/api/healthz")
 def healthz():
     return {"status": "ok"}
+
+
+@app.get("/api/auth/status")
+def auth_status(request: Request):
+    return {"admin": _is_admin(request)}
+
+
+@app.post("/api/auth/login")
+def admin_login(update: LoginRequest, request: Request, response: Response):
+    client = request.client.host if request.client else "unknown"
+    now = time.monotonic()
+    failures = [
+        attempted
+        for attempted in _login_failures.get(client, [])
+        if now - attempted < LOGIN_WINDOW_SECONDS
+    ]
+    if len(failures) >= LOGIN_MAX_FAILURES:
+        raise HTTPException(429, "Too many login attempts; try again shortly")
+    if not hmac.compare_digest(update.password, _admin_password()):
+        failures.append(now)
+        _login_failures[client] = failures
+        raise HTTPException(401, "Incorrect admin password")
+    _login_failures.pop(client, None)
+    expires = int(time.time()) + ADMIN_SESSION_SECONDS
+    response.set_cookie(
+        ADMIN_COOKIE,
+        _session_token(expires),
+        max_age=ADMIN_SESSION_SECONDS,
+        httponly=True,
+        secure=request.url.scheme == "https",
+        samesite="strict",
+        path="/",
+    )
+    return {"admin": True}
+
+
+@app.post("/api/auth/logout")
+def admin_logout(response: Response):
+    response.delete_cookie(ADMIN_COOKIE, path="/", samesite="strict")
+    return {"admin": False}
 
 
 @app.get("/api/overview")
@@ -227,19 +306,19 @@ def labels(label: Literal["yes", "no"]):
     return {"rows": _basket_payload(YES_BASKET_DATA if label == "yes" else NO_BASKET_DATA)}
 
 
-@app.post("/api/labels")
+@app.post("/api/labels", dependencies=[Depends(_require_admin)])
 def set_label(update: LabelUpdate):
     save_basket_entry(update.domain, update.label, update.rating, source="human", reason=update.reason)
     return {"ok": True, "domain": stable_domain(update.domain), "label": update.label}
 
 
-@app.delete("/api/labels/{domain}")
+@app.delete("/api/labels/{domain}", dependencies=[Depends(_require_admin)])
 def delete_label(domain: str):
     remove_basket_entry(domain)
     return {"ok": True}
 
 
-@app.post("/api/hidden")
+@app.post("/api/hidden", dependencies=[Depends(_require_admin)])
 def set_hidden(update: HiddenUpdate):
     changed = hide_domains(update.domains) if update.hidden else unhide_domains(update.domains)
     return {"ok": True, "changed": changed}
@@ -261,7 +340,7 @@ def workers():
     return runtime_status()
 
 
-@app.post("/api/runtime/{service}")
+@app.post("/api/runtime/{service}", dependencies=[Depends(_require_admin)])
 def worker_control(service: str, update: WorkerUpdate):
     if service not in SERVICES and service != "all":
         raise HTTPException(404, "Unknown worker")
@@ -314,7 +393,7 @@ def corpus_companies(
     return {"rows": rows, "total": total, "page": page, "page_size": page_size}
 
 
-@app.post("/api/ai/upload")
+@app.post("/api/ai/upload", dependencies=[Depends(_require_admin)])
 async def upload_domains(file: UploadFile = File(...)):
     from ai_search.database import add_domain
     from ai_search.database import connect as ai_connect
