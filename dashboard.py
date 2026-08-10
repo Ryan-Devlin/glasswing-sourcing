@@ -17,6 +17,7 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 from classification_store import (
+    classification_bucket_counts,
     classification_source_label,
     frame_from_store,
 )
@@ -159,6 +160,12 @@ def read_csv_safely(path: Path) -> pd.DataFrame:
 def read_screened_classifications() -> pd.DataFrame:
     """Read the canonical cross-service store, not a container-local CSV."""
     return frame_from_store()
+
+
+@st.cache_data(show_spinner=False, ttl=15, max_entries=4)
+def read_bucket_counts(run_id: str = "") -> dict[str, int]:
+    """Fast chart counts without downloading every stored website record."""
+    return classification_bucket_counts(run_id=run_id)
 
 
 def read_status() -> dict:
@@ -1666,6 +1673,44 @@ with run_id_col:
     else:
         st.caption("Showing the latest saved result for every known domain.")
 
+# Render the chart from a server-side GROUP BY before downloading the complete
+# classification corpus. The all-history corpus is now ~80k wide JSON records;
+# making the chart wait for that transfer made it appear permanently absent.
+summary_run_id = current_run_id if result_scope == "Current Run" else ""
+summary_raw_counts = read_bucket_counts(summary_run_id)
+summary_total = sum(int(value) for value in summary_raw_counts.values())
+summary_investable = int(summary_raw_counts.get("priority", 0))
+summary_hard_denied = int(summary_raw_counts.get("reject", 0))
+summary_needs_review = max(
+    0,
+    summary_total - summary_investable - summary_hard_denied,
+)
+bucket_chart = pd.DataFrame({
+    "Bucket": ["Investable", "Needs Review", "Hard Denied"],
+    "Companies": [
+        summary_investable,
+        summary_needs_review,
+        summary_hard_denied,
+    ],
+})
+st.markdown("#### Classification buckets")
+if summary_total > 0:
+    st.bar_chart(
+        bucket_chart,
+        x="Bucket",
+        y="Companies",
+        x_label="",
+        y_label="Companies",
+        height=280,
+        color="#34C6B3",
+    )
+else:
+    st.info(
+        "The classification chart has no saved outcomes to display for "
+        "this scope yet. Choose All History or wait for the first websites "
+        "to finish screening."
+    )
+
 # Confirmed live: pipeline-worker writes real Claude verdicts to BOTH the
 # shared Postgres claude_diligence table and its own local CSV mirror
 # (llm_approved_master.csv/llm_denied_master.csv) -- but only the shared
@@ -2156,31 +2201,6 @@ metric_1, metric_2, metric_3 = st.columns(3)
 metric_1.metric("Investable", len(investable_candidates))
 metric_2.metric("Needs review", len(needs_review))
 metric_3.metric("Hard denied", len(hard_denied))
-
-bucket_chart = pd.DataFrame({
-    "Bucket": ["Investable", "Needs Review", "Hard Denied"],
-    "Companies": [
-        len(investable_candidates),
-        len(needs_review),
-        len(hard_denied),
-    ],
-})
-if int(bucket_chart["Companies"].sum()) > 0:
-    st.bar_chart(
-        bucket_chart,
-        x="Bucket",
-        y="Companies",
-        x_label="",
-        y_label="Companies",
-        height=280,
-        color="#34C6B3",
-    )
-else:
-    st.info(
-        "The classification chart has no saved outcomes to display for "
-        "this scope yet. Choose All History or wait for the first websites "
-        "to finish screening."
-    )
 
 retained_total = funnel_screened
 st.caption(
