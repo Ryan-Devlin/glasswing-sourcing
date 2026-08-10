@@ -6,9 +6,39 @@ from unittest.mock import patch
 import pandas as pd
 
 import claude_classifier
+from diligence_logic import apply_hard_guards
 
 
 class ClaudeThresholdTests(unittest.TestCase):
+    def test_unverified_facts_do_not_turn_a_keep_into_reject(self):
+        assessment = {
+            "decision": "KEEP",
+            "fit_score": 88,
+            "us_based": "unclear",
+            "funding_millions_usd": -1,
+            "latest_round": "unknown",
+            "institutional_rounds": -1,
+            "ownership_status": "unclear",
+            "company_maturity": "unknown",
+            "category": "unclear",
+            "product_summary": "",
+            "diligence_sources": "",
+            "concerns": "",
+        }
+        result = apply_hard_guards(assessment)
+        self.assertEqual(result["decision"], "KEEP")
+        self.assertEqual(result["concerns"], "Location not verified")
+
+    def test_confirmed_non_us_still_forces_reject(self):
+        assessment = {
+            "decision": "KEEP", "fit_score": 90, "us_based": "no",
+            "funding_millions_usd": -1, "latest_round": "unknown",
+            "institutional_rounds": -1, "ownership_status": "unclear",
+            "company_maturity": "unknown", "category": "vertical_ai",
+            "product_summary": "Product", "diligence_sources": "", "concerns": "",
+        }
+        self.assertEqual(apply_hard_guards(assessment)["decision"], "REJECT")
+
     def test_empty_response_is_retryable_failure_not_reject(self):
         with self.assertRaises(claude_classifier.DiligenceResponseError):
             claude_classifier.validate_response_text("")

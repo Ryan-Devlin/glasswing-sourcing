@@ -46,11 +46,12 @@ SYSTEM_PROMPT = """You classify Glasswing Ventures fit. Be terse.
 Target: U.S. pre-seed/seed enterprise B2B/cybersecurity; vertical/physical AI,
 AI infrastructure, enterprise defense, collaborative intelligence, or compute.
 Search once using exact name+domain to verify U.S. base, funding/stage/rounds,
-ownership, acquisition/public status. REJECT if non-U.S., consumer, agency,
+ownership, acquisition/public status. REJECT if confirmed non-U.S., consumer, agency,
 generic wrapper/weak moat, >$8M, Series A+, >2 institutional rounds, acquired,
-subsidiary, public, large, or established. Also REJECT (never KEEP) if U.S.,
-funding, or ownership remains unclear -- unverified is not a pass. KEEP
-requires verified independence, credible enterprise/government buyer, and
+subsidiary, public, large, or established. Do not REJECT solely because U.S.,
+funding, ownership, category, or external coverage remains unclear; absence of
+verification is not negative evidence. Record that uncertainty as the concern. KEEP
+requires credible enterprise/government buyer and
 technical/workflow/business-value depth. Scores >90 are exceptional. There is
 no third option: every call resolves to KEEP or REJECT, never an in-between.
 
@@ -263,27 +264,11 @@ async def classify(
         max_institutional_rounds=MAX_INSTITUTIONAL_ROUNDS,
     )
 
-    # Very early companies may have no external coverage -- but with no
-    # MAYBE to fall back on, unverifiable is not a pass. REJECT rather than
-    # treat missing information as anything other than not-yet-qualified.
+    # Very early companies may have no external coverage. Missing coverage is
+    # a follow-up concern, not proof that the company is a bad investment.
     if not urls:
-        assessment["decision"] = "REJECT"
-        assessment["fit_score"] = min(assessment["fit_score"], 55)
-        assessment["concerns"] = "No external coverage"
-
-    # KEEP is a notification-grade approval, not merely a positive model
-    # impression. It requires Claude's external diligence to verify the
-    # U.S. location; unverified resolves to REJECT, never KEEP.
-    if (
-        assessment.get("decision") == "KEEP"
-        and assessment.get("us_based") != "yes"
-    ):
-        assessment["decision"] = "REJECT"
-        assessment["fit_score"] = min(
-            to_int(assessment.get("fit_score", 0), 0), 69
-        )
         assessment["concerns"] = (
-            clean(assessment.get("concerns")) or "U.S. status unverified"
+            clean(assessment.get("concerns")) or "No external coverage"
         )
 
     return assessment
@@ -660,18 +645,10 @@ async def run() -> None:
         output["llm_fit_score"], errors="coerce"
     ).fillna(0)
 
-    # No MAYBE: KEEP is only allowed when U.S. status is verified and
-    # funding is within thesis. Anything else -- including a raw KEEP with
-    # unclear U.S. status -- resolves to REJECT, never an in-between.
+    # No MAYBE: confirmed hard guards have already converted factual
+    # disqualifiers to REJECT. Unverified facts do not manufacture a denial.
     approved = output[
         output["llm_decision"].eq("KEEP")
-        & (output["llm_us_based"] == "yes")
-        & (
-            pd.to_numeric(
-                output["llm_funding_millions_usd"], errors="coerce"
-            ).fillna(-1)
-            <= MAX_TOTAL_FUNDING_M
-        )
     ].copy()
 
     denied = output[~output.index.isin(approved.index)].copy()

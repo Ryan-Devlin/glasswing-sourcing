@@ -7,7 +7,7 @@ from typing import Any
 
 from common import clean
 
-DILIGENCE_VERSION = "2026-07-cost-controlled-v4"
+DILIGENCE_VERSION = "2026-08-evidence-not-absence-v5"
 OFFICIAL_CATEGORIES = {
     "vertical_ai",
     "physical_ai",
@@ -109,38 +109,20 @@ def apply_hard_guards(
         assessment["decision"] = "REJECT"
         assessment["fit_score"] = min(int(assessment["fit_score"]), 35)
         assessment["concerns"] = clamp_words(reasons[0], 5)
-    elif (
-        assessment["us_based"] == "unclear"
-        or funding < 0
-        or assessment["latest_round"] == "unknown"
-        or ownership == "unclear"
-    ):
-        # No middle ground: unverified U.S./funding/ownership status is not
-        # a pass. A KEEP requires the evidence to actually confirm it.
-        assessment["decision"] = "REJECT"
-        assessment["fit_score"] = min(int(assessment["fit_score"]), 69)
-        if ownership == "unclear":
-            assessment["concerns"] = "Ownership not verified"
-        elif assessment["us_based"] == "unclear":
-            assessment["concerns"] = "Location not verified"
-        else:
-            assessment["concerns"] = "Funding not verified"
+    elif assessment["decision"] == "KEEP":
+        # Missing evidence is not negative evidence. Preserve a substantive
+        # KEEP unless a confirmed hard disqualifier above exists, and surface
+        # the most important uncertainty for human follow-up.
+        if assessment["us_based"] == "unclear":
+            assessment["concerns"] = assessment.get("concerns") or "Location not verified"
+        elif ownership == "unclear":
+            assessment["concerns"] = assessment.get("concerns") or "Ownership not verified"
+        elif funding < 0 or assessment["latest_round"] == "unknown":
+            assessment["concerns"] = assessment.get("concerns") or "Funding not verified"
 
     if assessment["decision"] == "KEEP":
         if assessment["fit_score"] < 75:
             assessment["decision"] = "REJECT"
-        elif assessment.get("category") in {"", "unclear", "other"}:
-            assessment["decision"] = "REJECT"
-            assessment["concerns"] = "Category not verified"
-        elif not assessment.get("product_summary", "").strip():
-            assessment["decision"] = "REJECT"
-            assessment["concerns"] = "Product summary not verified"
-        elif not assessment.get("diligence_sources", "").strip():
-            assessment["decision"] = "REJECT"
-            assessment["concerns"] = "External sources not verified"
-        elif funding < 0:
-            assessment["decision"] = "REJECT"
-            assessment["concerns"] = "Funding not verified"
 
     return assessment
 
