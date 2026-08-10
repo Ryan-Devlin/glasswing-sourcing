@@ -29,6 +29,8 @@ for source in (ROOT, AI_SRC, ZONE_SRC):
 from ai_search.og_bridge import search_companies, search_stats
 from ai_search.database import connect as ai_connect, diagnostics as ai_diagnostics
 from classification_store import (
+    claude_decisions_for_domains,
+    connect_store,
     classification_bucket_counts,
     classification_source_label,
     hidden_domain_set,
@@ -50,12 +52,16 @@ from common import (
     remove_basket_entry,
     save_basket_entry,
     stable_domain,
+    RUN_CONFIG,
+    atomic_write_json,
 )
 from continuous_pipeline import read_status as read_local_pipeline_status
 from health_monitor import health_report
 from runtime_control import (
     SERVICES,
     read_pipeline_status,
+    read_pipeline_config,
+    publish_pipeline_config,
     request_services,
     runtime_status,
     shared_pipeline_backend_available,
@@ -123,6 +129,13 @@ class HiddenUpdate(BaseModel):
 
 class LoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=200)
+
+
+class PipelineFilters(BaseModel):
+    selected_extensions: list[str]
+    include_keywords: list[str] = []
+    exclude_keywords: list[str] = []
+    minimum_score: int = Field(55, ge=0, le=100)
 
 
 def _admin_password() -> str:
@@ -203,6 +216,20 @@ def _safe_corpus_rows(rows: list[dict]) -> list[dict]:
     return safe
 
 
+def _with_claude(rows: list[dict]) -> list[dict]:
+    decisions = claude_decisions_for_domains(row.get("domain", "") for row in rows)
+    return [
+        {
+            **row,
+            "claude_decision": decisions.get(row.get("domain", ""), {}).get("decision", ""),
+            "claude_score": decisions.get(row.get("domain", ""), {}).get("fit_score", ""),
+            "claude_reasoning": decisions.get(row.get("domain", ""), {}).get("reasoning", ""),
+            "claude_reviewed_at": decisions.get(row.get("domain", ""), {}).get("updated_at", ""),
+        }
+        for row in rows
+    ]
+
+
 @app.get("/api/healthz")
 def healthz():
     return {"status": "ok"}
@@ -259,6 +286,41 @@ def overview():
     }
 
 
+@app.get("/api/pipeline/filters")
+def pipeline_filters():
+    config = read_pipeline_config() if shared_pipeline_backend_available() else {}
+    if not config and RUN_CONFIG.exists():
+        try:
+            config = json.loads(RUN_CONFIG.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            config = {}
+    return {
+        "selected_extensions": config.get("selected_extensions", [".ai", ".app", ".dev"]),
+        "include_keywords": config.get("include_keywords", []),
+        "exclude_keywords": config.get("exclude_keywords", []),
+        "minimum_score": int(config.get("minimum_score", 55)),
+    }
+
+
+@app.post("/api/pipeline/filters", dependencies=[Depends(_require_admin)])
+def save_pipeline_filters(update: PipelineFilters):
+    allowed = {".ai", ".app", ".dev", ".io", ".co", ".xyz", ".tech", ".com"}
+    extensions = list(dict.fromkeys(value.lower() for value in update.selected_extensions if value.lower() in allowed))
+    if not extensions:
+        raise HTTPException(400, "Select at least one extension")
+    current = read_pipeline_config() if shared_pipeline_backend_available() else {}
+    payload = {
+        **current,
+        **update.model_dump(),
+        "selected_extensions": extensions,
+        "include_keywords": [value.strip() for value in update.include_keywords if value.strip()],
+        "exclude_keywords": [value.strip() for value in update.exclude_keywords if value.strip()],
+    }
+    atomic_write_json(RUN_CONFIG, payload)
+    publish_pipeline_config(payload, requested_by="react_web")
+    return payload
+
+
 @app.get("/api/search")
 def global_search(q: str = Query(min_length=1, max_length=200)):
     company = [
@@ -288,7 +350,7 @@ def classifications(
     )
     hidden = hidden_domain_set([row["domain"] for row in rows])
     return {
-        "rows": [{**row, "hidden": row["domain"] in hidden} for row in rows],
+        "rows": _with_claude([{**row, "hidden": row["domain"] in hidden} for row in rows]),
         "total": counts[bucket],
         "page": page,
         "page_size": page_size,
@@ -335,6 +397,26 @@ def certstream_status():
             "queue": {},
         }
     return read_local_pipeline_status()
+
+
+@app.get("/api/claude/status")
+def claude_status():
+    with connect_store(read_only=True) as conn:
+        rows = conn.execute(
+            "SELECT decision,count(*) AS total,max(updated_at) AS latest "
+            "FROM claude_diligence GROUP BY decision"
+        ).fetchall()
+    counts = {str(row["decision"]): int(row["total"]) for row in rows}
+    latest = max((str(row["latest"] or "") for row in rows), default="")
+    status = read_pipeline_status() if shared_pipeline_backend_available() else read_local_pipeline_status()
+    return {
+        "reviewed": counts.get("KEEP", 0) + counts.get("REJECT", 0),
+        "kept": counts.get("KEEP", 0),
+        "rejected": counts.get("REJECT", 0),
+        "latest": latest,
+        "calls_this_run": int(status.get("claude_calls", 0) or 0),
+        "warning": str(status.get("claude_warning", "") or ""),
+    }
 
 
 @app.get("/api/runtime")
@@ -409,6 +491,7 @@ def corpus_companies(
     bucket: str = "all",
     page: int = Query(1, ge=1),
     page_size: int = Query(100, ge=25, le=250),
+    sort: str = "Recently classified",
 ):
     if bucket not in BUCKETS:
         raise HTTPException(400, "Unknown bucket")
@@ -419,8 +502,9 @@ def corpus_companies(
         BUCKETS[bucket],
         limit=page_size,
         offset=(page - 1) * page_size,
+        sort=sort,
     )
-    return {"rows": rows, "total": total, "page": page, "page_size": page_size}
+    return {"rows": _with_claude(rows), "total": total, "page": page, "page_size": page_size}
 
 
 @app.post("/api/ai/upload", dependencies=[Depends(_require_admin)])

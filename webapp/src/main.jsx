@@ -37,6 +37,18 @@ const BUCKET_TABS = [
 ];
 const AdminContext = createContext({ admin: false, requestLogin: () => {} });
 const useAdmin = () => useContext(AdminContext);
+function apiSort(sort) {
+  const names = {
+    company_name:
+      sort.direction === "asc" ? "Company: A to Z" : "Company: Z to A",
+    domain: sort.direction === "asc" ? "Domain: A to Z" : "Domain: Z to A",
+    fit_score:
+      sort.direction === "asc" ? "Fit: low to high" : "Fit: high to low",
+    updated_at:
+      sort.direction === "asc" ? "Oldest classified" : "Recently classified",
+  };
+  return names[sort.key] || "Recently classified";
+}
 async function api(path, options = {}) {
   const r = await fetch(path, {
     headers: {
@@ -187,7 +199,7 @@ function Pager({ page, setPage, total, pageSize = 100 }) {
     </div>
   );
 }
-function Table({ rows, columns, onLabel, onHide }) {
+function Table({ rows, columns, onLabel, onHide, sort, onSort }) {
   if (!rows?.length) return <div className="empty">No records found.</div>;
   return (
     <div className="table-wrap">
@@ -195,7 +207,22 @@ function Table({ rows, columns, onLabel, onHide }) {
         <thead>
           <tr>
             {columns.map((c) => (
-              <th key={c.key}>{c.label}</th>
+              <th key={c.key}>
+                {c.sortable && onSort ? (
+                  <button className="sort-button" onClick={() => onSort(c.key)}>
+                    {c.label}
+                    <span>
+                      {sort?.key === c.key
+                        ? sort.direction === "asc"
+                          ? "↑"
+                          : "↓"
+                        : "↕"}
+                    </span>
+                  </button>
+                ) : (
+                  c.label
+                )}
+              </th>
             ))}
             {(onLabel || onHide) && <th>Actions</th>}
           </tr>
@@ -268,10 +295,11 @@ function BucketTabs({ value, onChange, tabs = BUCKET_TABS }) {
   );
 }
 const companyCols = [
-  { key: "company_name", label: "Company" },
+  { key: "company_name", label: "Company", sortable: true },
   {
     key: "domain",
     label: "Domain",
+    sortable: true,
     render: (r) => (
       <a href={r.final_url || `https://${r.domain}`} target="_blank">
         {r.domain}
@@ -287,7 +315,23 @@ const companyCols = [
       </span>
     ),
   },
-  { key: "fit_score", label: "Score" },
+  { key: "fit_score", label: "Score", sortable: true },
+  {
+    key: "claude_decision",
+    label: "Claude review",
+    render: (r) =>
+      r.claude_decision ? (
+        <span
+          className={`pill claude-${r.claude_decision.toLowerCase()}`}
+          title={r.claude_reasoning || ""}
+        >
+          {r.claude_decision}{" "}
+          {r.claude_score !== "" ? `· ${r.claude_score}` : ""}
+        </span>
+      ) : (
+        <span className="muted">Not reviewed</span>
+      ),
+  },
   {
     key: "thesis_pillar",
     label: "Category",
@@ -508,10 +552,11 @@ function CompaniesTable() {
   const [refresh, setRefresh] = useState(0);
   const [label, setLabel] = useState(null);
   const [toast, setToast] = useState("");
+  const [sort, setSort] = useState({ key: "updated_at", direction: "desc" });
   const basket = bucket === "yes" || bucket === "no";
   const query = basket
     ? `/api/labels?label=${bucket}`
-    : `/api/classifications?bucket=${bucket}&page=${page}&page_size=100&sort=${encodeURIComponent("Recently classified")}`;
+    : `/api/classifications?bucket=${bucket}&page=${page}&page_size=100&sort=${encodeURIComponent(apiSort(sort))}`;
   const result = useApi(query, [bucket, page, refresh]);
   const save = (row, label) => setLabel({ domain: row.domain, label });
   const hide = async (row) => {
@@ -569,6 +614,17 @@ function CompaniesTable() {
             columns={companyCols}
             onLabel={admin ? save : (_, label) => requestLogin(label)}
             onHide={admin ? hide : requestLogin}
+            sort={sort}
+            onSort={(key) => {
+              setSort((current) => ({
+                key,
+                direction:
+                  current.key === key && current.direction === "desc"
+                    ? "asc"
+                    : "desc",
+              }));
+              setPage(1);
+            }}
           />
           <Pager page={page} setPage={setPage} total={result.data.total} />
         </>
@@ -588,11 +644,127 @@ function CompaniesTable() {
     </section>
   );
 }
+function RunFilters() {
+  const { admin, requestLogin } = useAdmin();
+  const result = useApi("/api/pipeline/filters", []);
+  const [form, setForm] = useState(null);
+  const [message, setMessage] = useState("");
+  useEffect(() => {
+    if (result.data) setForm(result.data);
+  }, [result.data]);
+  if (result.loading || !form) return <Loading />;
+  if (result.error) return <ErrorBox>{result.error}</ErrorBox>;
+  const extensions = [
+    ".ai",
+    ".app",
+    ".dev",
+    ".io",
+    ".co",
+    ".xyz",
+    ".tech",
+    ".com",
+  ];
+  const save = async () => {
+    if (!admin) return requestLogin();
+    const saved = await api("/api/pipeline/filters", {
+      method: "POST",
+      body: JSON.stringify(form),
+    });
+    setForm(saved);
+    setMessage(
+      "Filters saved. The pipeline will use them for incoming domains.",
+    );
+  };
+  return (
+    <section className="filter-panel">
+      <div className="section-title">
+        <div>
+          <h2>Run filters</h2>
+          <p>Control which certificate domains enter screening.</p>
+        </div>
+      </div>
+      <div className="extension-grid">
+        {extensions.map((extension) => (
+          <label key={extension}>
+            <input
+              type="checkbox"
+              checked={form.selected_extensions.includes(extension)}
+              onChange={(event) =>
+                setForm({
+                  ...form,
+                  selected_extensions: event.target.checked
+                    ? [...form.selected_extensions, extension]
+                    : form.selected_extensions.filter(
+                        (value) => value !== extension,
+                      ),
+                })
+              }
+            />
+            {extension}
+          </label>
+        ))}
+      </div>
+      <div className="filter-fields">
+        <label>
+          Include keywords
+          <input
+            value={form.include_keywords.join(", ")}
+            placeholder="robotics, security, infrastructure"
+            onChange={(e) =>
+              setForm({
+                ...form,
+                include_keywords: e.target.value
+                  .split(",")
+                  .map((x) => x.trim())
+                  .filter(Boolean),
+              })
+            }
+          />
+        </label>
+        <label>
+          Exclude keywords
+          <input
+            value={form.exclude_keywords.join(", ")}
+            placeholder="casino, dating, consumer"
+            onChange={(e) =>
+              setForm({
+                ...form,
+                exclude_keywords: e.target.value
+                  .split(",")
+                  .map((x) => x.trim())
+                  .filter(Boolean),
+              })
+            }
+          />
+        </label>
+        <label>
+          Minimum score
+          <input
+            type="number"
+            min="0"
+            max="100"
+            value={form.minimum_score}
+            onChange={(e) =>
+              setForm({ ...form, minimum_score: Number(e.target.value) })
+            }
+          />
+        </label>
+      </div>
+      <div className="filter-actions">
+        <button className="primary" onClick={save}>
+          {admin ? "Save filters" : "Admin login to edit"}
+        </button>
+        {message && <span>{message}</span>}
+      </div>
+    </section>
+  );
+}
 function CertStreamPage() {
   const { admin, requestLogin } = useAdmin();
   const [tick, setTick] = useState(0);
   const [controlBusy, setControlBusy] = useState(false);
   const status = useApi("/api/certstream/status", [tick]);
+  const claude = useApi("/api/claude/status", [tick]);
   useEffect(() => {
     const id = setInterval(() => setTick((x) => x + 1), 30000);
     return () => clearInterval(id);
@@ -656,12 +828,19 @@ function CertStreamPage() {
         <Metric label="Ignored repeats" value={fmt(s.repeat_events_ignored)} />
         <Metric label="Claude calls" value={fmt(s.claude_calls)} />
         <Metric label="Failed" value={fmt(s.failed_this_run)} />
+        <Metric label="Reviewed by Claude" value={fmt(claude.data?.reviewed)} />
+        <Metric label="Claude KEEP" value={fmt(claude.data?.kept)} />
+        <Metric label="Claude REJECT" value={fmt(claude.data?.rejected)} />
       </div>
+      {claude.data?.warning && (
+        <p className="notice">Claude: {claude.data.warning}</p>
+      )}
       {s.last_domain_received && (
         <p className="notice">
           Latest domain: <strong>{s.last_domain_received}</strong>
         </p>
       )}
+      <RunFilters />
       <CompaniesTable />
     </>
   );
@@ -673,11 +852,12 @@ function CorpusCompanies({ kind }) {
   const [page, setPage] = useState(1);
   const [refresh, setRefresh] = useState(0);
   const [label, setLabel] = useState(null);
+  const [sort, setSort] = useState({ key: "updated_at", direction: "desc" });
   const basket = bucket === "yes" || bucket === "no";
   const result = useApi(
     basket
       ? `/api/labels?label=${bucket}`
-      : `/api/corpus/${kind}?bucket=${bucket}&page=${page}&page_size=100`,
+      : `/api/corpus/${kind}?bucket=${bucket}&page=${page}&page_size=100&sort=${encodeURIComponent(apiSort(sort))}`,
     [bucket, page, refresh],
   );
   return (
@@ -723,6 +903,17 @@ function CorpusCompanies({ kind }) {
             onLabel={(row, label) =>
               admin ? setLabel({ domain: row.domain, label }) : requestLogin()
             }
+            sort={sort}
+            onSort={(key) => {
+              setSort((current) => ({
+                key,
+                direction:
+                  current.key === key && current.direction === "desc"
+                    ? "asc"
+                    : "desc",
+              }));
+              setPage(1);
+            }}
           />
           <Pager page={page} setPage={setPage} total={result.data.total} />
         </>

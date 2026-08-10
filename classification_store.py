@@ -834,8 +834,11 @@ def query_source_classifications(
         return []
     order = {
         "Fit: high to low": "fit_score DESC,priority_score DESC,domain",
+        "Fit: low to high": "fit_score ASC,priority_score ASC,domain",
         "Company: A to Z": "lower(company_name),domain",
+        "Company: Z to A": "lower(company_name) DESC,domain DESC",
         "Domain: A to Z": "domain",
+        "Domain: Z to A": "domain DESC",
     }.get(sort, "updated_at DESC,domain")
     source_clauses = " OR ".join("content_source LIKE ?" for _ in prefixes)
     bucket_marks = ",".join("?" for _ in bucket_values)
@@ -871,9 +874,13 @@ def query_classifications(
         return []
     order = {
         "Fit: high to low": "fit_score DESC, priority_score DESC, domain",
+        "Fit: low to high": "fit_score ASC, priority_score ASC, domain",
         "Recently classified": "updated_at DESC, domain",
+        "Oldest classified": "updated_at ASC, domain",
         "Company: A to Z": "lower(company_name), domain",
+        "Company: Z to A": "lower(company_name) DESC, domain DESC",
         "Domain: A to Z": "domain",
+        "Domain: Z to A": "domain DESC",
     }.get(sort, "priority_score DESC, fit_score DESC, domain")
     bounded_limit = max(1, min(int(limit), 250))
     bounded_offset = max(0, int(offset))
@@ -895,6 +902,23 @@ def query_classifications(
             params,
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def claude_decisions_for_domains(
+    domains: Iterable[str], *, path: Path | str = CLASSIFICATION_DB
+) -> dict[str, dict[str, object]]:
+    """Return compact Claude review fields for one displayed table page."""
+    normalized = list(dict.fromkeys(stable_domain(value) for value in domains if stable_domain(value)))
+    if not normalized or (not using_classification_postgres() and not Path(path).exists()):
+        return {}
+    marks = ",".join("?" for _ in normalized)
+    with connect_store(path, read_only=True) as conn:
+        rows = conn.execute(
+            "SELECT domain,decision,fit_score,reasoning,updated_at "
+            f"FROM claude_diligence WHERE domain IN ({marks})",
+            normalized,
+        ).fetchall()
+    return {str(row["domain"]): dict(row) for row in rows}
 
 
 def query_classifications_by_domains(

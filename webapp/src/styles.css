@@ -285,6 +285,18 @@ th {
   white-space: nowrap;
   z-index: 1;
 }
+.sort-button {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font-weight: inherit;
+  box-shadow: none !important;
+}
+.sort-button span {
+  color: #168f7d;
+  font-size: 11px;
+}
 td {
   padding: 11px 13px;
   border-bottom: 1px solid #edf1ef;
@@ -312,6 +324,65 @@ tbody tr:hover {
 .pill.reject {
   background: #fee6e1;
   color: #9d382c;
+}
+.pill.claude-keep {
+  background: #d9f4e8;
+  color: #116447;
+}
+.pill.claude-reject {
+  background: #fee6e1;
+  color: #9d382c;
+}
+.muted {
+  color: #8a9996;
+  font-size: 12px;
+}
+.filter-panel {
+  background: #fff;
+  border: 1px solid #dce6e2;
+  border-radius: 12px;
+  padding: 2px 18px 18px;
+}
+.extension-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.extension-grid label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 11px;
+  border: 1px solid #d5e0dc;
+  border-radius: 8px;
+  background: #f7faf9;
+  font-weight: 600;
+}
+.filter-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr minmax(130px, 0.35fr);
+  gap: 12px;
+  margin-top: 14px;
+}
+.filter-fields label {
+  display: grid;
+  gap: 6px;
+  color: #61736f;
+  font-size: 12px;
+  font-weight: 600;
+}
+.filter-fields input {
+  border: 1px solid #cedbd6;
+  border-radius: 8px;
+  padding: 9px 10px;
+}
+.filter-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+  color: #087365;
+  font-size: 13px;
 }
 .actions {
   white-space: nowrap;
@@ -447,6 +518,9 @@ tbody tr:hover {
   }
   .corpus-metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .filter-fields {
+    grid-template-columns: 1fr;
   }
   aside {
     position: static;
