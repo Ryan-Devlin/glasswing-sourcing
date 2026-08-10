@@ -1,6 +1,6 @@
 from openpyxl import Workbook, load_workbook
 
-from competitive_landscape import _write_workbook
+from competitive_landscape import DEFAULT_LANDSCAPE_TEMPLATE, _write_workbook
 
 
 def test_landscape_export_preserves_template_shape_and_adds_sources(tmp_path):
@@ -77,3 +77,35 @@ def test_landscape_export_flattens_nested_claude_company_objects(tmp_path):
     assert landscape["M3"].value == "NVIDIA, AWS"
     assert load_workbook(output)["Research Notes"]["B1"].value == "NEYON AI"
     assert "approach:" in load_workbook(output)["Research Notes"]["B3"].value
+
+
+def test_talvy_template_maps_direct_comp_fields(tmp_path):
+    output = tmp_path / "talvy-output.xlsx"
+    _write_workbook(DEFAULT_LANDSCAPE_TEMPLATE, output, {
+        "target_company": "Talvy",
+        "competitors": [{
+            "name": "Direct Co",
+            "type_of_player": "Direct competitor",
+            "vertical_broad": "Vertical",
+            "approach": "Workflow-specific AI platform",
+            "summary": "Direct product overlap.",
+            "hq": "Boston, MA",
+            "total_funding_m": 8,
+            "website": "https://direct.example",
+            "founded_years_in_operation": "2022 (4 years)",
+            "ownership_private_public": "Private",
+        }],
+    })
+
+    book = load_workbook(output)
+    sheet = book["Comps"]
+    assert sheet["A1"].value == "Incumbents"
+    assert sheet["A3"].value == "Name"
+    assert sheet["A4"].value == "Direct Co"
+    assert sheet["B4"].value == "Direct competitor"
+    assert sheet["D4"].value == "Workflow-specific AI platform"
+    assert sheet["G4"].value == 8
+    assert sheet["O4"].value == "https://direct.example"
+    assert sheet["O4"].hyperlink.target == "https://direct.example"
+    assert sheet["Q4"].value == "Private"
+    assert sheet.freeze_panes == "A4"

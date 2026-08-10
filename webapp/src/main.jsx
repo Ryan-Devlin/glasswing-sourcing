@@ -2097,7 +2097,7 @@ function CompetitiveLandscapePage() {
     <header>
       <p className="eyebrow">MARKET INTELLIGENCE</p>
       <h1>Competitive Landscape</h1>
-      <p>Turn a company website and supporting materials into a sourced competitor workbook built on your Excel template.</p>
+      <p>Turn a company website and supporting materials into a sourced direct-competitor workbook using the Talvy template.</p>
     </header>
     <div className="metrics">
       <div className="metric"><span>Total analyses</span><strong>{fmt(rows.length)}</strong></div>

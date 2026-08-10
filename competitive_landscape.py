@@ -25,7 +25,7 @@ from common import DATA, get_model
 ROOT = Path(__file__).resolve().parent
 JOB_ROOT = Path(os.getenv("GLASSWING_LANDSCAPE_DIR", str(DATA / "competitive_landscapes"))).expanduser().resolve()
 MODEL = os.getenv("ANTHROPIC_DILIGENCE_MODEL", get_model())
-SHIP_ANGEL_TEMPLATE = ROOT / "templates" / "Competitive Analysis - Ship Angel.xlsx"
+DEFAULT_LANDSCAPE_TEMPLATE = ROOT / "templates" / "Talvy_Direct_Comps.xlsx"
 
 
 def now() -> str:
@@ -149,7 +149,7 @@ def _research(record: dict, folder: Path) -> dict:
     material_context = "\n\n".join(_material_text(folder / name) for name in materials)
     count = int(record.get("requested_count") or 25)
     prompt = f"""You are preparing a venture-capital competitive landscape for the target company at {website}.
-Find the {count} most relevant direct and adjacent competitors. Research current, defensible facts using web search. Do not invent missing financing, pricing, customers, or capabilities; use null when not verified. Exclude the target itself and duplicate brands. Favor comprehensive global coverage and include source URLs for every company.
+Find the {count} most relevant direct competitors. Include adjacent competitors only when there are not enough credible direct competitors, and label their player type clearly. Research current, defensible facts using web search. Do not invent missing financing, customers, founding history, or ownership; use null when not verified. Exclude the target itself and duplicate brands. Favor comprehensive global coverage and include source URLs for every company.
 
 Target website text:
 {context}
@@ -161,8 +161,8 @@ Supporting material:
 {material_context or 'None'}
 
 Return ONLY valid JSON with keys target_company, methodology, and competitors. competitors must be an array of objects with exactly these keys:
-name, website, level_of_competition (H/M/L), summary (max 35 words), focus, hq, total_funding_m, last_round_size_m, date_raised, valuation_m, notable_investors, pricing, generating_revenue, partners_brands, real_time_visibility, ai_ml_utilization, predictive_analytics, quote_rate_management, digital_dashboard_order_management, automated_broker_experience, air_freight_quoting, ocean_freight_quoting, ground_freight_quoting, contract_management, spot_bidding_marketplace, freight_audit, sources.
-For product capabilities use Yes, No, Partial, or Unknown. Dates use YYYY-MM-DD where known. Monetary fields are numeric USD millions or null."""
+name, website, type_of_player, vertical_broad, approach, summary (max 45 words), hq, total_funding_m, last_round_size_m, date_raised, valuation_m, notable_investors, generating_revenue, partners_brands, notes, founded_years_in_operation, ownership_private_public, sources.
+Dates use YYYY-MM-DD where known. Monetary fields are numeric USD millions or null. founded_years_in_operation should state the founding year and current years in operation when verified."""
     client = Anthropic()
     response = client.messages.create(
         model=MODEL,
@@ -175,7 +175,8 @@ For product capabilities use Yes, No, Partial, or Unknown. Dates use YYYY-MM-DD 
     return _json_object(text)
 
 
-KEYS = ["name", "level_of_competition", "summary", "focus", "hq", "total_funding_m", "last_round_size_m", "date_raised", "valuation_m", "notable_investors", "pricing", "generating_revenue", "partners_brands", "real_time_visibility", "ai_ml_utilization", "predictive_analytics", "quote_rate_management", "digital_dashboard_order_management", "automated_broker_experience", "air_freight_quoting", "ocean_freight_quoting", "ground_freight_quoting", "contract_management", "spot_bidding_marketplace", "freight_audit"]
+SHIP_ANGEL_KEYS = ["name", "level_of_competition", "summary", "focus", "hq", "total_funding_m", "last_round_size_m", "date_raised", "valuation_m", "notable_investors", "pricing", "generating_revenue", "partners_brands", "real_time_visibility", "ai_ml_utilization", "predictive_analytics", "quote_rate_management", "digital_dashboard_order_management", "automated_broker_experience", "air_freight_quoting", "ocean_freight_quoting", "ground_freight_quoting", "contract_management", "spot_bidding_marketplace", "freight_audit"]
+TALVY_KEYS = ["name", "type_of_player", "vertical_broad", "approach", "summary", "hq", "total_funding_m", "last_round_size_m", "date_raised", "valuation_m", "notable_investors", "generating_revenue", "partners_brands", "notes", "website", "founded_years_in_operation", "ownership_private_public"]
 
 HEADERS = ["", "Level of Competition (H/M/L)", "Summary", "Focus", "HQ", "Total Funding ($M)", "Last Round Size ($M)", "Date Raised", "Valuation ($M)", "Notable Investors", "Pricing\n(* + italic indicates pulled from third-party source)", "Generating Revenue?", "Partners / Brands", "Real-Time Visibility", "AI/ML Utilization", "Predictive Analytics", "Quote/Rate Management", "Digital Dashboard/\nOrder Management", "Automated Broker Experience", "Air Freight Quoting", "Ocean Freight Quoting", "Ground Freight Quoting", "Contract Management", "Spot Bidding / Marketplace", "Freight Audit"]
 
@@ -240,21 +241,26 @@ def _excel_value(value, key: str = ""):
 def _write_workbook(template: Path, output: Path, result: dict) -> int:
     shutil.copyfile(template, output)
     book = load_workbook(output)
-    sheet = book["Competitive Landscape"] if "Competitive Landscape" in book.sheetnames else book.active
-    style_row = 3
-    for row in range(3, max(sheet.max_row, 3) + 1):
-        for col in range(1, 26):
+    talvy = "Comps" in book.sheetnames
+    sheet = book["Comps"] if talvy else (book["Competitive Landscape"] if "Competitive Landscape" in book.sheetnames else book.active)
+    keys = TALVY_KEYS if talvy else SHIP_ANGEL_KEYS
+    style_row = 4 if talvy else 3
+    header_row = 3 if talvy else 2
+    column_count = len(keys)
+    for row in range(style_row, max(sheet.max_row, style_row) + 1):
+        for col in range(1, column_count + 1):
             sheet.cell(row, col).value = None
+            sheet.cell(row, col).hyperlink = None
         sheet.row_dimensions[row].hidden = False
     competitors = result.get("competitors") or []
-    for index, company in enumerate(competitors, start=3):
+    for index, company in enumerate(competitors, start=style_row):
         if not isinstance(company, dict):
             company = {"name": _excel_value(company)}
         nested = company.get("name")
         if isinstance(nested, dict):
             company = {**nested, **{key: value for key, value in company.items() if key != "name"}}
         if index != style_row:
-            for col in range(1, 26):
+            for col in range(1, column_count + 1):
                 source, target = sheet.cell(style_row, col), sheet.cell(index, col)
                 target._style = copy(source._style)
                 target.number_format = source.number_format
@@ -263,14 +269,16 @@ def _write_workbook(template: Path, output: Path, result: dict) -> int:
                 target.fill = copy(source.fill)
                 target.font = copy(source.font)
         sheet.row_dimensions[index].height = 54.75
-        for col, key in enumerate(KEYS, start=1):
+        for col, key in enumerate(keys, start=1):
             sheet.cell(index, col).value = _excel_value(company.get(key), key)
         website = _excel_value(company.get("website"), "website")
         if website:
-            sheet.cell(index, 1).hyperlink = str(website)
-    last = max(3, len(competitors) + 2)
-    sheet.auto_filter.ref = f"A2:Y{last}"
-    sheet.freeze_panes = "B3"
+            website_col = keys.index("website") + 1 if "website" in keys else 1
+            sheet.cell(index, website_col).hyperlink = str(website)
+    last = max(style_row, len(competitors) + style_row - 1)
+    last_letter = get_column_letter(column_count)
+    sheet.auto_filter.ref = f"A{header_row}:{last_letter}{last}"
+    sheet.freeze_panes = "A4" if talvy else "B3"
     metadata = book.create_sheet("Research Notes")
     metadata.append([
         "Target company",

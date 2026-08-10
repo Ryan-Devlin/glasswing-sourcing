@@ -105,7 +105,7 @@ from zone_universe.database import (
 )
 from competitive_landscape import (
     JOB_ROOT as LANDSCAPE_ROOT,
-    SHIP_ANGEL_TEMPLATE,
+    DEFAULT_LANDSCAPE_TEMPLATE,
     claim_job as claim_landscape_job,
     create_job as create_landscape_job,
     create_default_template,
@@ -843,8 +843,8 @@ async def submit_competitive_landscape(
     folder.mkdir(parents=True, exist_ok=True)
     if template_bytes:
         (folder / "template.xlsx").write_bytes(template_bytes)
-    elif SHIP_ANGEL_TEMPLATE.is_file():
-        (folder / "template.xlsx").write_bytes(SHIP_ANGEL_TEMPLATE.read_bytes())
+    elif DEFAULT_LANDSCAPE_TEMPLATE.is_file():
+        (folder / "template.xlsx").write_bytes(DEFAULT_LANDSCAPE_TEMPLATE.read_bytes())
     else:
         create_default_template(folder / "template.xlsx")
     for name, content in safe_materials:
