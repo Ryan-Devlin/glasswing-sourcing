@@ -105,6 +105,7 @@ from zone_universe.database import (
 )
 from competitive_landscape import (
     JOB_ROOT as LANDSCAPE_ROOT,
+    SHIP_ANGEL_TEMPLATE,
     claim_job as claim_landscape_job,
     create_job as create_landscape_job,
     create_default_template,
@@ -810,9 +811,9 @@ async def submit_competitive_landscape(
         raise HTTPException(400, "Enter a valid company website")
     if not 5 <= requested_count <= 75:
         raise HTTPException(400, "Competitor count must be between 5 and 75")
-    if template and not (template.filename or "").lower().endswith(".xlsx"):
+    if template and template.filename and not template.filename.lower().endswith(".xlsx"):
         raise HTTPException(400, "The template must be an .xlsx workbook")
-    template_bytes = await template.read() if template else b""
+    template_bytes = await template.read() if template and template.filename else b""
     if len(template_bytes) > 15_000_000:
         raise HTTPException(413, "Template exceeds the 15 MB limit")
     safe_materials: list[tuple[str, bytes]] = []
@@ -832,6 +833,8 @@ async def submit_competitive_landscape(
     folder.mkdir(parents=True, exist_ok=True)
     if template_bytes:
         (folder / "template.xlsx").write_bytes(template_bytes)
+    elif SHIP_ANGEL_TEMPLATE.is_file():
+        (folder / "template.xlsx").write_bytes(SHIP_ANGEL_TEMPLATE.read_bytes())
     else:
         create_default_template(folder / "template.xlsx")
     for name, content in safe_materials:

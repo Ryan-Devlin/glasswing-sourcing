@@ -25,6 +25,7 @@ from common import DATA, get_model
 ROOT = Path(__file__).resolve().parent
 JOB_ROOT = Path(os.getenv("GLASSWING_LANDSCAPE_DIR", str(DATA / "competitive_landscapes"))).expanduser().resolve()
 MODEL = os.getenv("ANTHROPIC_DILIGENCE_MODEL", get_model())
+SHIP_ANGEL_TEMPLATE = ROOT / "templates" / "Competitive Analysis - Ship Angel.xlsx"
 
 
 def now() -> str:

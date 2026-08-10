@@ -2092,8 +2092,7 @@ function CompetitiveLandscapePage() {
       <div className="section-title"><div><h2>Build a landscape</h2><p>Claude researches the market and fills every applicable field without fabricating unknown data.</p></div></div>
       <div className="form-grid">
         <label className="wide"><span>Company website *</span><input name="website" type="text" inputMode="url" placeholder="https://company.com" required /></label>
-        <label><span>Competitors</span><input name="requested_count" type="number" min="5" max="75" defaultValue="25" required /></label>
-        <label><span>Excel template <small>optional · Ship Angel layout is the default</small></span><input name="template" type="file" accept=".xlsx" /></label>
+        <label className="wide"><span>Competitors</span><input name="requested_count" type="number" min="5" max="75" defaultValue="25" required /></label>
         <label className="wide"><span>Supporting materials <small>optional · PDF, DOCX, XLSX, CSV, TXT</small></span><input name="materials" type="file" accept=".pdf,.docx,.xlsx,.csv,.txt,.md" multiple /></label>
         <label className="wide"><span>Research notes <small>optional</small></span><textarea name="notes" rows="3" placeholder="Product positioning, geographies, competitor types, or special questions…" /></label>
       </div>
