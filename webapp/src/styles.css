@@ -282,6 +282,23 @@ header p {
   background: #eef2f1;
   color: #697b77;
 }
+.claude-send-badge {
+  border: 0;
+  width: auto;
+}
+.claude-send-badge .send-label {
+  display: none;
+}
+.claude-send-badge:hover:not(:disabled) {
+  background: #dff4ed;
+  color: #087365;
+}
+.claude-send-badge:hover:not(:disabled) .unreviewed-label {
+  display: none;
+}
+.claude-send-badge:hover:not(:disabled) .send-label {
+  display: inline;
+}
 .top-pick > p {
   min-height: 49px;
   margin: 11px 0;

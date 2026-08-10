@@ -605,6 +605,9 @@ function HomePage() {
 function GoodDeals() {
   const { admin, requestLogin } = useAdmin();
   const [refresh, setRefresh] = useState(0);
+  const [claudeOverride, setClaudeOverride] = useState(null);
+  const [claudeBusy, setClaudeBusy] = useState("");
+  const [message, setMessage] = useState("");
   const deals = useApi(
     "/api/classifications?bucket=investable&page=1&page_size=25&sort=Highest%20score",
     [refresh],
@@ -621,6 +624,20 @@ function GoodDeals() {
     });
     setRefresh((value) => value + 1);
   };
+  const sendClaude = async (row, overrideDailyLimit = false) => {
+    if (!admin) return requestLogin();
+    setClaudeBusy(row.domain);
+    try {
+      await requestClaudeReview(row.domain, overrideDailyLimit);
+      setClaudeOverride(null);
+      setMessage(`${row.domain} queued for Claude diligence`);
+    } catch (error) {
+      if (error.status === 429) setClaudeOverride(row);
+      else setMessage(`Claude could not review ${row.domain}: ${error.message}`);
+    } finally {
+      setClaudeBusy("");
+    }
+  };
   return (
     <section className="top-picks">
       <div className="section-title">
@@ -629,6 +646,7 @@ function GoodDeals() {
           <p>Strong sourcing candidates ranked by the Glasswing screen, independent of Claude review status.</p>
         </div>
       </div>
+      {message && <p className="notice">{message}</p>}
       <div className="top-pick-grid">
         {rows.map((row) => (
           <article className="top-pick" key={row.domain}>
@@ -642,7 +660,7 @@ function GoodDeals() {
             {row.claude_decision ? (
               <div className="deal-claude-review">
                 <span
-                  className={`pill claude-${row.claude_decision.toLowerCase()}`}
+                  className={`pill claude-pill claude-${row.claude_decision.toLowerCase()}`}
                   title={claudeScorecard(row)}
                   data-tooltip={claudeScorecard(row)}
                   tabIndex="0"
@@ -652,7 +670,16 @@ function GoodDeals() {
               </div>
             ) : (
               <div className="deal-claude-review">
-                <span className="pill claude-unreviewed">Not reviewed by Claude</span>
+                <button
+                  className="pill claude-unreviewed claude-send-badge"
+                  disabled={claudeBusy === row.domain}
+                  onClick={() => sendClaude(row)}
+                >
+                  <span className="unreviewed-label">
+                    {claudeBusy === row.domain ? "Queueing…" : "Not reviewed by Claude"}
+                  </span>
+                  <span className="send-label">Send to Claude</span>
+                </button>
               </div>
             )}
             <p className="clamp-text" title={row.description}>{row.description || row.routing_reason}</p>
@@ -660,6 +687,13 @@ function GoodDeals() {
           </article>
         ))}
       </div>
+      {claudeOverride && (
+        <ClaudeOverrideModal
+          domain={claudeOverride.domain}
+          onClose={() => setClaudeOverride(null)}
+          onOverride={() => sendClaude(claudeOverride, true)}
+        />
+      )}
     </section>
   );
 }
