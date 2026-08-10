@@ -56,6 +56,11 @@ def test_landscape_export_flattens_nested_claude_company_objects(tmp_path):
             "website": "https://neyon.ai",
             "description": "AI factory operations platform",
         },
+        "methodology": {
+            "approach": "Mapped direct and adjacent competitors",
+            "data_sources": ["Company websites", "Press releases"],
+            "exclusions": "Pure hardware vendors",
+        },
         "competitors": [{
             "name": {
                 "name": "NEYON AI",
@@ -71,3 +76,4 @@ def test_landscape_export_flattens_nested_claude_company_objects(tmp_path):
     assert landscape["A3"].hyperlink.target == "https://neyon.ai"
     assert landscape["M3"].value == "NVIDIA, AWS"
     assert load_workbook(output)["Research Notes"]["B1"].value == "NEYON AI"
+    assert "approach:" in load_workbook(output)["Research Notes"]["B3"].value

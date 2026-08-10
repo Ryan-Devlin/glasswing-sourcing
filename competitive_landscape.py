@@ -277,7 +277,10 @@ def _write_workbook(template: Path, output: Path, result: dict) -> int:
         _excel_value(result.get("target_company", ""), "name"),
     ])
     metadata.append(["Generated", now()])
-    metadata.append(["Methodology", result.get("methodology", "")])
+    metadata.append([
+        "Methodology",
+        _excel_value(result.get("methodology", ""), "methodology"),
+    ])
     metadata.append([])
     metadata.append(["Competitor", "Source URLs"])
     for company in competitors:
