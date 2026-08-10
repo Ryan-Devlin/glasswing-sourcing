@@ -285,7 +285,10 @@ async def classify(
     async with sem:
         response = await client.messages.create(
             model=model,
-            max_tokens=500,
+            # The evidence-first rubric has substantially more required tags
+            # than the legacy five-word response. Leave enough headroom so a
+            # valid answer is not truncated before the closing evidence tags.
+            max_tokens=1000,
             system=SYSTEM_PROMPT,
             messages=[{
                 "role": "user",
@@ -660,6 +663,10 @@ async def run() -> None:
                     stable_domain(row.get("domain", "")) for row in rows
                 ],
                 "failed_domains": [domain for domain, _ in failures if domain],
+                "failure_details": {
+                    domain: f"{type(exc).__name__}: {str(exc)[:500]}"
+                    for domain, exc in failures if domain
+                },
             })
 
     if not rows:

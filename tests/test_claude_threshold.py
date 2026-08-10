@@ -66,6 +66,11 @@ class ClaudeThresholdTests(unittest.TestCase):
         """
         claude_classifier.validate_response_text(response)
 
+    def test_rubric_response_has_sufficient_token_headroom(self):
+        source = Path(claude_classifier.__file__).read_text(encoding="utf-8")
+        self.assertIn("max_tokens=1000", source)
+        self.assertIn('"failure_details"', source)
+
     def test_weighted_score_is_deterministic_and_confidence_is_separate(self):
         assessment = {
             "thesis_fit": 5, "enterprise_value": 4, "product_depth": 4,

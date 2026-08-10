@@ -649,6 +649,12 @@ def _execute_queued_claude(target: str, *, override_budget: bool = False) -> Non
             finish_claude_review(target, error="Claude review timed out")
             return
         attempted = report_path.exists()
+        attempt_data = {}
+        if attempted:
+            try:
+                attempt_data = json.loads(report_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                attempt_data = {}
     if attempted:
         pipeline = connect_pipeline_db()
         try:
@@ -665,7 +671,14 @@ def _execute_queued_claude(target: str, *, override_budget: bool = False) -> Non
         return
     result = claude_decisions_for_domains([target]).get(target)
     if not result:
-        finish_claude_review(target, error="Claude completed without saving a decision")
+        failure = str(
+            (attempt_data.get("failure_details") or {}).get(target, "")
+        ).strip()
+        detail = failure or (completed.stdout or completed.stderr or "").strip()[-600:]
+        finish_claude_review(
+            target,
+            error=detail or "Claude returned no valid diligence decision",
+        )
         return
     finish_claude_review(target)
     record_admin_audit("claude_completed", target, f"{result.get('decision')} score {result.get('fit_score')}")
