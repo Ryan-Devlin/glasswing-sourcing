@@ -375,6 +375,8 @@ td {
   padding: 11px 13px;
   border-bottom: 1px solid #edf1ef;
   max-width: 300px;
+  height: 86px;
+  vertical-align: middle;
 }
 td a {
   color: #087e70;
@@ -382,6 +384,30 @@ td a {
 }
 tbody tr:hover {
   background: #f7fbf9;
+}
+.clamp-text {
+  display: -webkit-box;
+  max-width: 100%;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.cell-description {
+  min-width: 220px;
+  width: 32%;
+}
+.cell-company_name,
+.cell-title {
+  min-width: 150px;
+}
+.cell-error .clamp-text,
+.cell-Detail .clamp-text,
+.cell-detail .clamp-text {
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
 }
 .pill {
   display: inline-block;

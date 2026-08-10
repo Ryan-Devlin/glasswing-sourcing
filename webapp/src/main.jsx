@@ -269,8 +269,28 @@ function Table({
           {rows.map((row, i) => (
             <tr key={row.domain || i}>
               {columns.map((c) => (
-                <td key={c.key}>
-                  {c.render ? c.render(row) : String(row[c.key] ?? "")}
+                <td key={c.key} className={`cell-${c.key}`}>
+                  {c.render ? (
+                    c.render(row)
+                  ) : [
+                      "company_name",
+                      "title",
+                      "description",
+                      "snippet",
+                      "thesis_pillar",
+                      "Detail",
+                      "detail",
+                      "error",
+                    ].includes(c.key) ? (
+                    <span
+                      className="clamp-text"
+                      title={String(row[c.key] ?? "")}
+                    >
+                      {String(row[c.key] ?? "")}
+                    </span>
+                  ) : (
+                    String(row[c.key] ?? "")
+                  )}
                 </td>
               ))}
               {(onLabel || onHide || onClaude) && (
@@ -397,7 +417,14 @@ const companyCols = [
   {
     key: "thesis_pillar",
     label: "Category",
-    render: (r) => String(r.thesis_pillar || "").replaceAll("_", " "),
+    render: (r) => {
+      const value = String(r.thesis_pillar || "").replaceAll("_", " ");
+      return (
+        <span className="clamp-text" title={value}>
+          {value}
+        </span>
+      );
+    },
   },
   { key: "description", label: "Description" },
 ];
@@ -523,7 +550,7 @@ function HomePage() {
           <Metric label="Hard denied" value={fmt(d.buckets.denied)} />
         </div>
       </section>
-      <LabelsPanel />
+      <CompaniesTable />
     </>
   );
 }
@@ -1196,7 +1223,11 @@ function SearchCorpusPage({ kind }) {
     {
       key: "snippet",
       label: "Match",
-      render: (r) => plainSnippet(r.snippet),
+      render: (r) => (
+        <span className="clamp-text" title={plainSnippet(r.snippet)}>
+          {plainSnippet(r.snippet)}
+        </span>
+      ),
     },
     { key: "word_count", label: "Words" },
     { key: "crawled_at", label: "Crawled" },

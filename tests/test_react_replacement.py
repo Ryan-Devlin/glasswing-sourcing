@@ -30,6 +30,8 @@ def test_react_app_has_every_primary_page_and_no_streamlit_dependency():
     assert "data-tooltip" in source
     assert "Pause CertStream to unlock" in source
     assert "<RunFilters running={Boolean(s.running)} />" in source
+    assert source.count("<CompaniesTable />") >= 2
+    assert "clamp-text" in source
 
 
 def test_production_entrypoint_is_fastapi():
