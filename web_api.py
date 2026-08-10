@@ -34,7 +34,11 @@ for source in (ROOT, AI_SRC, ZONE_SRC):
         sys.path.insert(0, str(source))
 
 from ai_search.og_bridge import search_companies, search_stats
-from ai_search.database import connect as ai_connect, diagnostics as ai_diagnostics
+from ai_search.database import (
+    connect as ai_connect,
+    diagnostics as ai_diagnostics,
+    worker_state as ai_worker_state,
+)
 from classification_store import (
     admin_audit_rows,
     claim_claude_review,
@@ -93,7 +97,11 @@ from runtime_control import (
     shared_pipeline_backend_available,
 )
 from zone_universe.search import search_pages
-from zone_universe.database import connect as zone_connect, diagnostics as zone_diagnostics
+from zone_universe.database import (
+    connect as zone_connect,
+    diagnostics as zone_diagnostics,
+    get_state as zone_worker_state,
+)
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -709,7 +717,38 @@ async def _claude_queue_worker() -> None:
 
 @app.get("/api/runtime")
 def workers():
-    return runtime_status()
+    snapshot = runtime_status()
+    services = snapshot.get("services", {})
+    pipeline = (
+        read_pipeline_status()
+        if shared_pipeline_backend_available()
+        else read_local_pipeline_status()
+    )
+    if "pipeline" in services:
+        services["pipeline"]["actual_status"] = str(
+            pipeline.get("stage", "unknown")
+        )
+    try:
+        with ai_connect(AI_SEARCH_DB, read_only=True) as conn:
+            ai_state = ai_worker_state(conn)
+        if "ai_crawler" in services:
+            services["ai_crawler"]["actual_status"] = ai_state.get(
+                "crawler_status", "unknown"
+            )
+    except Exception:
+        if "ai_crawler" in services:
+            services["ai_crawler"]["actual_status"] = "unknown"
+    try:
+        with zone_connect(ZONE_UNIVERSE_DB, read_only=True) as conn:
+            zone_state = zone_worker_state(conn)
+        if "zone_crawler" in services:
+            services["zone_crawler"]["actual_status"] = zone_state.get(
+                "crawler_status", zone_state.get("crawler_phase", "unknown")
+            )
+    except Exception:
+        if "zone_crawler" in services:
+            services["zone_crawler"]["actual_status"] = "unknown"
+    return snapshot
 
 
 @app.post("/api/runtime/{service}", dependencies=[Depends(_require_admin)])

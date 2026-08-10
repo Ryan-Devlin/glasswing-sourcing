@@ -1724,7 +1724,9 @@ function HealthPage() {
             <div className="worker" key={key}>
               <div>
                 <strong>{key.replaceAll("_", " ")}</strong>
-                <span>Desired: {row.desired ? "running" : "paused"}</span>
+                <span>
+                  {row.desired ? "Enabled" : "Paused"} · actual: {String(row.actual_status || "unknown").replaceAll("_", " ")}
+                </span>
               </div>
               <div>
                 <button
@@ -1974,6 +1976,11 @@ function GlobalWorkerControls() {
   const values = Object.values(services);
   const allRunning = values.length > 0 && values.every((row) => row.desired);
   const allPaused = values.length > 0 && values.every((row) => !row.desired);
+  const activeCount = values.filter((row) =>
+    row.desired && /running|screening|crawling|importing|starting/.test(
+      String(row.actual_status || "").toLowerCase(),
+    )
+  ).length;
   const control = async (desired) => {
     if (!desired && !window.confirm("Pause every worker safely?")) return;
     setBusy(true);
@@ -1993,7 +2000,7 @@ function GlobalWorkerControls() {
         <span className={`dot ${allPaused ? "paused" : ""}`} />
         <strong>
           {allRunning
-            ? "All workers running"
+            ? `All workers enabled · ${activeCount}/${values.length} active`
             : allPaused
               ? "All workers paused"
               : "Mixed worker state"}
