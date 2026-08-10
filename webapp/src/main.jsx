@@ -2,6 +2,7 @@ import React, { createContext, useContext, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Activity,
+  Bot,
   CheckCircle2,
   Database,
   EyeOff,
@@ -199,7 +200,16 @@ function Pager({ page, setPage, total, pageSize = 100 }) {
     </div>
   );
 }
-function Table({ rows, columns, onLabel, onHide, sort, onSort }) {
+function Table({
+  rows,
+  columns,
+  onLabel,
+  onHide,
+  onClaude,
+  claudeBusy,
+  sort,
+  onSort,
+}) {
   if (!rows?.length) return <div className="empty">No records found.</div>;
   return (
     <div className="table-wrap">
@@ -224,7 +234,7 @@ function Table({ rows, columns, onLabel, onHide, sort, onSort }) {
                 )}
               </th>
             ))}
-            {(onLabel || onHide) && <th>Actions</th>}
+            {(onLabel || onHide || onClaude) && <th>Actions</th>}
           </tr>
         </thead>
         <tbody>
@@ -235,7 +245,7 @@ function Table({ rows, columns, onLabel, onHide, sort, onSort }) {
                   {c.render ? c.render(row) : String(row[c.key] ?? "")}
                 </td>
               ))}
-              {(onLabel || onHide) && (
+              {(onLabel || onHide || onClaude) && (
                 <td className="actions">
                   {onLabel && (
                     <>
@@ -258,6 +268,28 @@ function Table({ rows, columns, onLabel, onHide, sort, onSort }) {
                     >
                       <EyeOff size={13} />
                       Hide
+                    </button>
+                  )}
+                  {onClaude && (
+                    <button
+                      className="claude"
+                      disabled={
+                        claudeBusy === row.domain ||
+                        Boolean(row.claude_decision)
+                      }
+                      title={
+                        row.claude_decision
+                          ? `Reviewed: ${row.claude_decision}`
+                          : "Send this company through Claude diligence"
+                      }
+                      onClick={() => onClaude(row)}
+                    >
+                      <Bot size={13} />
+                      {claudeBusy === row.domain
+                        ? "Reviewing…"
+                        : row.claude_decision
+                          ? "Reviewed"
+                          : "Send to Claude"}
                     </button>
                   )}
                 </td>
@@ -553,6 +585,7 @@ function CompaniesTable() {
   const [label, setLabel] = useState(null);
   const [toast, setToast] = useState("");
   const [sort, setSort] = useState({ key: "updated_at", direction: "desc" });
+  const [claudeBusy, setClaudeBusy] = useState("");
   const basket = bucket === "yes" || bucket === "no";
   const query = basket
     ? `/api/labels?label=${bucket}`
@@ -567,6 +600,27 @@ function CompaniesTable() {
     setToast(`${row.domain} hidden from review tables`);
     setRefresh((x) => x + 1);
     setTimeout(() => setToast(""), 2500);
+  };
+  const sendClaude = async (row) => {
+    if (!admin) return requestLogin();
+    setClaudeBusy(row.domain);
+    try {
+      const response = await api(
+        `/api/claude/review/${encodeURIComponent(row.domain)}`,
+        { method: "POST" },
+      );
+      setToast(
+        response.status === "already_reviewed"
+          ? `${row.domain} was already reviewed by Claude`
+          : `${row.domain}: Claude ${response.decision} · score ${response.fit_score}`,
+      );
+      setRefresh((value) => value + 1);
+    } catch (error) {
+      setToast(`Claude could not review ${row.domain}: ${error.message}`);
+    } finally {
+      setClaudeBusy("");
+      setTimeout(() => setToast(""), 5000);
+    }
   };
   return (
     <section>
@@ -614,6 +668,8 @@ function CompaniesTable() {
             columns={companyCols}
             onLabel={admin ? save : (_, label) => requestLogin(label)}
             onHide={admin ? hide : requestLogin}
+            onClaude={admin ? sendClaude : requestLogin}
+            claudeBusy={claudeBusy}
             sort={sort}
             onSort={(key) => {
               setSort((current) => ({
@@ -853,6 +909,8 @@ function CorpusCompanies({ kind }) {
   const [refresh, setRefresh] = useState(0);
   const [label, setLabel] = useState(null);
   const [sort, setSort] = useState({ key: "updated_at", direction: "desc" });
+  const [claudeBusy, setClaudeBusy] = useState("");
+  const [toast, setToast] = useState("");
   const basket = bucket === "yes" || bucket === "no";
   const result = useApi(
     basket
@@ -862,6 +920,7 @@ function CorpusCompanies({ kind }) {
   );
   return (
     <section>
+      <Toast>{toast}</Toast>
       <div className="table-toolbar table-heading">
         <div>
           <h2>Crawled company buckets</h2>
@@ -903,6 +962,30 @@ function CorpusCompanies({ kind }) {
             onLabel={(row, label) =>
               admin ? setLabel({ domain: row.domain, label }) : requestLogin()
             }
+            onClaude={async (row) => {
+              if (!admin) return requestLogin();
+              setClaudeBusy(row.domain);
+              try {
+                const response = await api(
+                  `/api/claude/review/${encodeURIComponent(row.domain)}`,
+                  { method: "POST" },
+                );
+                setToast(
+                  response.status === "already_reviewed"
+                    ? `${row.domain} was already reviewed`
+                    : `${row.domain}: Claude ${response.decision} · score ${response.fit_score}`,
+                );
+                setRefresh((value) => value + 1);
+              } catch (error) {
+                setToast(
+                  `Claude could not review ${row.domain}: ${error.message}`,
+                );
+              } finally {
+                setClaudeBusy("");
+                setTimeout(() => setToast(""), 5000);
+              }
+            }}
+            claudeBusy={claudeBusy}
             sort={sort}
             onSort={(key) => {
               setSort((current) => ({

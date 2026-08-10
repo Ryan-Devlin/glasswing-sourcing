@@ -128,3 +128,15 @@ def test_ai_search_always_returns_a_rows_array(monkeypatch):
     assert response.status_code == 200
     assert response.json()["rows"] == []
     assert response.json()["stats"]["domains"] == 12
+
+
+def test_manual_claude_review_does_not_repeat_completed_domain(monkeypatch):
+    monkeypatch.setattr(
+        web_api,
+        "claude_decisions_for_domains",
+        lambda domains: {"reviewed.ai": {"domain": "reviewed.ai", "decision": "KEEP", "fit_score": 91}},
+    )
+    response = client.post("/api/claude/review/reviewed.ai")
+    assert response.status_code == 200
+    assert response.json()["status"] == "already_reviewed"
+    assert response.json()["decision"] == "KEEP"

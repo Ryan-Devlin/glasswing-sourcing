@@ -921,6 +921,25 @@ def claude_decisions_for_domains(
     return {str(row["domain"]): dict(row) for row in rows}
 
 
+def classification_record_for_domain(
+    domain: str, *, path: Path | str = CLASSIFICATION_DB
+) -> dict[str, object] | None:
+    """Return one complete stored screening record for manual diligence."""
+    target = stable_domain(domain)
+    if not target or (not using_classification_postgres() and not Path(path).exists()):
+        return None
+    with connect_store(path, read_only=True) as conn:
+        row = conn.execute("SELECT * FROM classifications WHERE domain=?", (target,)).fetchone()
+    if not row:
+        return None
+    plain = dict(row)
+    try:
+        stored = json.loads(str(plain.get("record_json") or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        stored = {}
+    return {**stored, **plain, "domain": target}
+
+
 def query_classifications_by_domains(
     domains: Iterable[str],
     *,

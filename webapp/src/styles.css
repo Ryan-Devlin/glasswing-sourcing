@@ -427,6 +427,11 @@ tbody tr:hover {
 .actions .no {
   color: #9d382c;
 }
+.actions .claude {
+  color: #6650a4;
+  border-color: #d8d0eb;
+  background: #f7f4fc;
+}
 .pager {
   display: flex;
   justify-content: space-between;

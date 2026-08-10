@@ -7,8 +7,11 @@ import hashlib
 import hmac
 import os
 import re
+import subprocess
 import sys
+import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -32,6 +35,7 @@ from classification_store import (
     claude_decisions_for_domains,
     connect_store,
     classification_bucket_counts,
+    classification_record_for_domain,
     classification_source_label,
     hidden_domain_set,
     hide_domains,
@@ -55,7 +59,11 @@ from common import (
     RUN_CONFIG,
     atomic_write_json,
 )
-from continuous_pipeline import read_status as read_local_pipeline_status
+from continuous_pipeline import (
+    claude_allowance,
+    connect_db as connect_pipeline_db,
+    read_status as read_local_pipeline_status,
+)
 from health_monitor import health_report
 from runtime_control import (
     SERVICES,
@@ -417,6 +425,69 @@ def claude_status():
         "calls_this_run": int(status.get("claude_calls", 0) or 0),
         "warning": str(status.get("claude_warning", "") or ""),
     }
+
+
+@app.post("/api/claude/review/{domain}", dependencies=[Depends(_require_admin)])
+def manual_claude_review(domain: str):
+    target = stable_domain(domain)
+    if not target:
+        raise HTTPException(400, "Invalid domain")
+    existing = claude_decisions_for_domains([target]).get(target)
+    if existing and str(existing.get("decision", "")).upper() in {"KEEP", "REJECT"}:
+        return {"status": "already_reviewed", **existing}
+    if not os.getenv("ANTHROPIC_API_KEY", "").strip():
+        raise HTTPException(503, "Anthropic API key is not configured")
+    pipeline = connect_pipeline_db()
+    try:
+        if claude_allowance(pipeline) <= 0:
+            raise HTTPException(429, "Claude daily/hourly budget is currently exhausted")
+    finally:
+        pipeline.close()
+    record = classification_record_for_domain(target)
+    if not record:
+        raise HTTPException(404, "Company not found")
+    import pandas as pd
+
+    with tempfile.TemporaryDirectory(prefix="glasswing-claude-") as folder:
+        input_path = Path(folder) / "company.csv"
+        report_path = Path(folder) / "attempt.json"
+        pd.DataFrame([{**record, "qualified_for_llm": "true"}]).to_csv(input_path, index=False)
+        try:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "claude_classifier.py"),
+                    str(input_path),
+                    "--reclassify", "--limit", "1", "--minimum-score", "0",
+                    "--percentage-cap", "1", "--max-calls", "1",
+                    "--exceptional-score", "0", "--workers", "1",
+                    "--attempt-report", str(report_path),
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                timeout=240,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise HTTPException(504, "Claude review timed out; check results before retrying") from exc
+        attempted = report_path.exists()
+    if attempted:
+        pipeline = connect_pipeline_db()
+        try:
+            pipeline.execute(
+                "INSERT INTO claude_calls(called_at,domain) VALUES (?,?)",
+                (datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), target),
+            )
+            pipeline.commit()
+        finally:
+            pipeline.close()
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "Claude review failed")[-600:]
+        raise HTTPException(502, detail)
+    result = claude_decisions_for_domains([target]).get(target)
+    if not result:
+        raise HTTPException(502, "Claude completed without saving a decision")
+    return {"status": "completed", **result}
 
 
 @app.get("/api/runtime")
