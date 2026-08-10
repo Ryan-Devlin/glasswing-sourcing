@@ -1000,16 +1000,6 @@ else:
         runtime_status()["services"]["pipeline"]["desired"]
     )
 
-# Refresh the complete dashboard at a deliberately slow, predictable cadence
-# while the pipeline is active.  This keeps new rows flowing in without the
-# rapid rerun/flicker that made tables and checkboxes feel unstable.  Stopped
-# runs never schedule an automatic refresh.
-if running:
-    st_autorefresh(
-        interval=30_000,
-        limit=None,
-        key="pipeline_dashboard_refresh_30s",
-    )
 saved_config = load_dashboard_run_config()
 backlog_mode = str(
     stream_status.get("backlog_mode", "normal")
@@ -2890,3 +2880,15 @@ with tabs[7]:
             )
         else:
             st.caption("No pipeline log yet.")
+
+# Mount the refresh timer only after the complete page has rendered. All
+# History can require a substantial shared-store read and score refresh; when
+# this timer lived near the top of the script, its next tick could interrupt
+# that work before the funnel/chart/tabs were ever emitted, leaving the page
+# permanently truncated at the Results view caption.
+if running:
+    st_autorefresh(
+        interval=30_000,
+        limit=None,
+        key="pipeline_dashboard_refresh_30s",
+    )

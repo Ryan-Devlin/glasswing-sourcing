@@ -11,6 +11,16 @@ class SmoothRefreshTests(unittest.TestCase):
         self.assertIn("interval=30_000", self.source)
         self.assertIn("if running:", self.source)
 
+    def test_refresh_timer_mounts_after_the_expensive_page_content(self):
+        self.assertGreater(
+            self.source.rfind("st_autorefresh("),
+            self.source.index('bucket_chart = pd.DataFrame({'),
+        )
+        self.assertGreater(
+            self.source.rfind("st_autorefresh("),
+            self.source.index('"Latest continuous pipeline log"'),
+        )
+
     def test_manual_refresh_button(self):
         self.assertIn('"Refresh now"', self.source)
         self.assertIn("manual_dashboard_refresh", self.source)
