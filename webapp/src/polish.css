@@ -84,6 +84,37 @@ td a {
   color: #087365;
   box-shadow: 0 2px 8px #173d3515;
 }
+.bucket-tabs {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  padding: 0 0 1px;
+  margin: 8px 0 14px;
+  border-bottom: 1px solid #d7e2de;
+}
+.bucket-tabs button {
+  flex: 0 0 auto;
+  border: 0;
+  border-bottom: 3px solid transparent;
+  border-radius: 7px 7px 0 0;
+  background: transparent;
+  color: #667a76;
+  box-shadow: none;
+  padding: 11px 16px 10px;
+  font-weight: 650;
+}
+.bucket-tabs button:hover:not(:disabled) {
+  background: #eaf3f0;
+  box-shadow: none;
+}
+.bucket-tabs button.active {
+  color: #087365;
+  border-bottom-color: #18a38f;
+  background: #eef7f4;
+}
+.table-heading {
+  margin-bottom: 4px;
+}
 .toast {
   position: fixed;
   right: 24px;

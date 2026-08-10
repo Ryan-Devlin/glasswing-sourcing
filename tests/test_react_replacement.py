@@ -12,6 +12,10 @@ def test_react_app_has_every_primary_page_and_no_streamlit_dependency():
     ):
         assert label in source
     assert "streamlit" not in source.lower()
+    for bucket in ("Investable", "Needs Review", "Hard Denied", "YES", "NO"):
+        assert bucket in source
+    assert 'aria-label="Classification bucket"' not in source
+    assert 'aria-label="Crawler bucket"' not in source
 
 
 def test_production_entrypoint_is_fastapi():

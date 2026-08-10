@@ -26,6 +26,13 @@ const NAV = [
   ["domains", "Domain Crawler (.com, .app)", Globe2],
   ["health", "System Health", HeartPulse],
 ];
+const BUCKET_TABS = [
+  ["investable", "Investable"],
+  ["review", "Needs Review"],
+  ["denied", "Hard Denied"],
+  ["yes", "YES"],
+  ["no", "NO"],
+];
 async function api(path, options = {}) {
   const r = await fetch(path, {
     headers: {
@@ -187,6 +194,23 @@ function Toast({ children }) {
       {children}
     </div>
   ) : null;
+}
+function BucketTabs({ value, onChange, tabs = BUCKET_TABS }) {
+  return (
+    <div className="bucket-tabs" role="tablist" aria-label="Company buckets">
+      {tabs.map(([id, label]) => (
+        <button
+          key={id}
+          role="tab"
+          aria-selected={value === id}
+          className={value === id ? "active" : ""}
+          onClick={() => onChange(id)}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  );
 }
 const companyCols = [
   { key: "company_name", label: "Company" },
@@ -368,20 +392,14 @@ function LabelsPanel() {
             Explicit company decisions shared across every worker and reviewer.
           </p>
         </div>
-        <div className="segmented">
-          <button
-            className={label === "yes" ? "active" : ""}
-            onClick={() => setLabel("yes")}
-          >
-            YES basket
-          </button>
-          <button
-            className={label === "no" ? "active" : ""}
-            onClick={() => setLabel("no")}
-          >
-            NO basket
-          </button>
-        </div>
+        <BucketTabs
+          value={label}
+          onChange={setLabel}
+          tabs={[
+            ["yes", "YES"],
+            ["no", "NO"],
+          ]}
+        />
       </div>
       {result.loading ? (
         <Loading />
@@ -423,12 +441,15 @@ function LabelsPanel() {
 }
 
 function CompaniesTable() {
-  const [bucket, setBucket] = useState("all");
+  const [bucket, setBucket] = useState("investable");
   const [page, setPage] = useState(1);
   const [refresh, setRefresh] = useState(0);
   const [label, setLabel] = useState(null);
   const [toast, setToast] = useState("");
-  const query = `/api/classifications?bucket=${bucket}&page=${page}&page_size=100&sort=${encodeURIComponent("Recently classified")}`;
+  const basket = bucket === "yes" || bucket === "no";
+  const query = basket
+    ? `/api/labels?label=${bucket}`
+    : `/api/classifications?bucket=${bucket}&page=${page}&page_size=100&sort=${encodeURIComponent("Recently classified")}`;
   const result = useApi(query, [bucket, page, refresh]);
   const save = (row, label) => setLabel({ domain: row.domain, label });
   const hide = async (row) => {
@@ -443,7 +464,7 @@ function CompaniesTable() {
   return (
     <section>
       <Toast>{toast}</Toast>
-      <div className="table-toolbar">
+      <div className="table-toolbar table-heading">
         <div>
           <h2>Classification results</h2>
           <p>
@@ -451,24 +472,34 @@ function CompaniesTable() {
             corpus.
           </p>
         </div>
-        <select
-          aria-label="Classification bucket"
-          value={bucket}
-          onChange={(e) => {
-            setBucket(e.target.value);
-            setPage(1);
-          }}
-        >
-          <option value="all">All results</option>
-          <option value="investable">Investable</option>
-          <option value="review">Needs review</option>
-          <option value="denied">Hard denied</option>
-        </select>
       </div>
+      <BucketTabs
+        value={bucket}
+        onChange={(value) => {
+          setBucket(value);
+          setPage(1);
+        }}
+      />
       {result.loading ? (
         <Loading />
       ) : result.error ? (
         <ErrorBox>{result.error}</ErrorBox>
+      ) : basket ? (
+        <Table
+          rows={result.data.rows}
+          columns={[
+            {
+              key: "domain",
+              label: "Domain",
+              render: (row) => (
+                <a href={row.url} target="_blank">
+                  {row.domain}
+                </a>
+              ),
+            },
+            { key: "rating", label: "Glasswing score" },
+          ]}
+        />
       ) : (
         <>
           <Table
@@ -572,39 +603,52 @@ function CertStreamPage() {
 }
 
 function CorpusCompanies({ kind }) {
-  const [bucket, setBucket] = useState("all");
+  const [bucket, setBucket] = useState("investable");
   const [page, setPage] = useState(1);
   const [refresh, setRefresh] = useState(0);
   const [label, setLabel] = useState(null);
+  const basket = bucket === "yes" || bucket === "no";
   const result = useApi(
-    `/api/corpus/${kind}?bucket=${bucket}&page=${page}&page_size=100`,
+    basket
+      ? `/api/labels?label=${bucket}`
+      : `/api/corpus/${kind}?bucket=${bucket}&page=${page}&page_size=100`,
     [bucket, page, refresh],
   );
   return (
     <section>
-      <div className="table-toolbar">
+      <div className="table-toolbar table-heading">
         <div>
           <h2>Crawled company buckets</h2>
           <p>Only records sourced from this crawler are included.</p>
         </div>
-        <select
-          aria-label="Crawler bucket"
-          value={bucket}
-          onChange={(e) => {
-            setBucket(e.target.value);
-            setPage(1);
-          }}
-        >
-          <option value="all">All results</option>
-          <option value="investable">Investable</option>
-          <option value="review">Needs review</option>
-          <option value="denied">Hard denied</option>
-        </select>
       </div>
+      <BucketTabs
+        value={bucket}
+        onChange={(value) => {
+          setBucket(value);
+          setPage(1);
+        }}
+      />
       {result.loading ? (
         <Loading />
       ) : result.error ? (
         <ErrorBox>{result.error}</ErrorBox>
+      ) : basket ? (
+        <Table
+          rows={result.data.rows}
+          columns={[
+            {
+              key: "domain",
+              label: "Domain",
+              render: (row) => (
+                <a href={row.url} target="_blank">
+                  {row.domain}
+                </a>
+              ),
+            },
+            { key: "rating", label: "Glasswing score" },
+          ]}
+        />
       ) : (
         <>
           <Table
