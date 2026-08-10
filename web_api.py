@@ -343,6 +343,13 @@ def pipeline_filters():
 
 @app.post("/api/pipeline/filters", dependencies=[Depends(_require_admin)])
 def save_pipeline_filters(update: PipelineFilters):
+    status = (
+        read_pipeline_status()
+        if shared_pipeline_backend_available()
+        else read_local_pipeline_status()
+    )
+    if bool(status.get("running")):
+        raise HTTPException(409, "Pause CertStream before changing run filters")
     allowed = {".ai", ".app", ".dev", ".io", ".co", ".xyz", ".tech", ".com"}
     extensions = list(dict.fromkeys(value.lower() for value in update.selected_extensions if value.lower() in allowed))
     if not extensions:

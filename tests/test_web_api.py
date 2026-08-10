@@ -141,3 +141,20 @@ def test_manual_claude_review_does_not_repeat_completed_domain(monkeypatch):
     assert response.status_code == 200
     assert response.json()["status"] == "already_reviewed"
     assert response.json()["decision"] == "KEEP"
+
+
+def test_run_filters_cannot_change_while_certstream_is_running(monkeypatch):
+    monkeypatch.setattr(web_api, "shared_pipeline_backend_available", lambda: False)
+    monkeypatch.setattr(web_api, "read_local_pipeline_status", lambda: {"running": True})
+    response = client.post(
+        "/api/pipeline/filters",
+        json={
+            "selected_extensions": [".ai"],
+            "include_keywords": [],
+            "exclude_keywords": [],
+            "minimum_score": 55,
+            "claude_daily_limit": 400,
+        },
+    )
+    assert response.status_code == 409
+    assert "Pause CertStream" in response.text

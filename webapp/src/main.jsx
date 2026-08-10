@@ -783,7 +783,7 @@ function CompaniesTable() {
     </section>
   );
 }
-function RunFilters() {
+function RunFilters({ running }) {
   const { admin, requestLogin } = useAdmin();
   const result = useApi("/api/pipeline/filters", []);
   const [form, setForm] = useState(null);
@@ -805,6 +805,7 @@ function RunFilters() {
   ];
   const save = async () => {
     if (!admin) return requestLogin();
+    if (running) return;
     const saved = await api("/api/pipeline/filters", {
       method: "POST",
       body: JSON.stringify(form),
@@ -822,11 +823,17 @@ function RunFilters() {
           <p>Control which certificate domains enter screening.</p>
         </div>
       </div>
+      {running && (
+        <p className="notice">
+          Pause CertStream to unlock and change these filters.
+        </p>
+      )}
       <div className="extension-grid">
         {extensions.map((extension) => (
           <label key={extension}>
             <input
               type="checkbox"
+              disabled={running}
               checked={form.selected_extensions.includes(extension)}
               onChange={(event) =>
                 setForm({
@@ -847,6 +854,7 @@ function RunFilters() {
         <label>
           Include keywords
           <input
+            disabled={running}
             value={form.include_keywords.join(", ")}
             placeholder="robotics, security, infrastructure"
             onChange={(e) =>
@@ -863,6 +871,7 @@ function RunFilters() {
         <label>
           Exclude keywords
           <input
+            disabled={running}
             value={form.exclude_keywords.join(", ")}
             placeholder="casino, dating, consumer"
             onChange={(e) =>
@@ -880,6 +889,7 @@ function RunFilters() {
           Minimum score
           <input
             type="number"
+            disabled={running}
             min="0"
             max="100"
             value={form.minimum_score}
@@ -893,6 +903,7 @@ function RunFilters() {
           <div>
             <input
               type="range"
+              disabled={running}
               min="1"
               max="1000"
               step="25"
@@ -903,6 +914,7 @@ function RunFilters() {
             />
             <input
               type="number"
+              disabled={running}
               min="1"
               max="5000"
               value={form.claude_daily_limit ?? 400}
@@ -923,8 +935,12 @@ function RunFilters() {
         </label>
       </div>
       <div className="filter-actions">
-        <button className="primary" onClick={save}>
-          {admin ? "Save filters" : "Admin login to edit"}
+        <button className="primary" disabled={running} onClick={save}>
+          {running
+            ? "Pause to edit filters"
+            : admin
+              ? "Save filters"
+              : "Admin login to edit"}
         </button>
         {message && <span>{message}</span>}
       </div>
@@ -1012,7 +1028,7 @@ function CertStreamPage() {
           Latest domain: <strong>{s.last_domain_received}</strong>
         </p>
       )}
-      <RunFilters />
+      <RunFilters running={Boolean(s.running)} />
       <CompaniesTable />
     </>
   );
