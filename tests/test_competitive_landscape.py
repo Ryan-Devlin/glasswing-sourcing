@@ -37,3 +37,32 @@ def test_landscape_export_preserves_template_shape_and_adds_sources(tmp_path):
     assert landscape.auto_filter.ref == "A2:Y3"
     assert landscape.freeze_panes == "B3"
     assert generated["Research Notes"]["B1"].value == "Target"
+
+
+def test_landscape_export_flattens_nested_claude_company_objects(tmp_path):
+    template = tmp_path / "template.xlsx"
+    output = tmp_path / "output.xlsx"
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "Competitive Landscape"
+    sheet.append(["Competitors"] + [""] * 24)
+    sheet.append([""] * 25)
+    sheet.append([""] * 25)
+    book.save(template)
+
+    _write_workbook(template, output, {
+        "target_company": "Target",
+        "competitors": [{
+            "name": {
+                "name": "NEYON AI",
+                "website": "https://neyon.ai",
+                "description": "AI factory deployment platform",
+            },
+            "partners_brands": [{"name": "NVIDIA"}, {"name": "AWS"}],
+        }],
+    })
+
+    landscape = load_workbook(output)["Competitive Landscape"]
+    assert landscape["A3"].value == "NEYON AI"
+    assert landscape["A3"].hyperlink.target == "https://neyon.ai"
+    assert landscape["M3"].value == "NVIDIA, AWS"

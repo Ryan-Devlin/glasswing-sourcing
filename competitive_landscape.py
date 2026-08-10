@@ -58,6 +58,16 @@ def job(job_id: str) -> dict | None:
     return dict(row) if row else None
 
 
+def retry_job(job_id: str) -> bool:
+    with connect_store() as conn:
+        cursor = conn.execute(
+            "UPDATE competitive_landscape_jobs SET status='queued',error='',completed_at='' WHERE job_id=? AND status='failed'",
+            (job_id,),
+        )
+        conn.commit()
+    return int(cursor.rowcount or 0) > 0
+
+
 def claim_job() -> dict | None:
     with connect_store() as conn:
         row = conn.execute(
@@ -202,6 +212,31 @@ def create_default_template(path: Path) -> None:
     book.save(path)
 
 
+def _excel_value(value, key: str = ""):
+    """Collapse occasionally nested model JSON into a valid Excel scalar."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, list):
+        return ", ".join(
+            str(item) for item in (_excel_value(item, key) for item in value)
+            if item not in (None, "")
+        )
+    if isinstance(value, dict):
+        preferred = {
+            "name": ("name", "company_name", "title"),
+            "website": ("website", "url", "domain"),
+            "summary": ("summary", "description", "value"),
+        }.get(key, (key, "value", "description", "summary", "name"))
+        for candidate in preferred:
+            if candidate and candidate in value and value[candidate] not in (None, ""):
+                return _excel_value(value[candidate], candidate)
+        return "; ".join(
+            f"{label}: {_excel_value(child, label)}"
+            for label, child in value.items() if child not in (None, "", [], {})
+        )
+    return str(value)
+
+
 def _write_workbook(template: Path, output: Path, result: dict) -> int:
     shutil.copyfile(template, output)
     book = load_workbook(output)
@@ -213,6 +248,11 @@ def _write_workbook(template: Path, output: Path, result: dict) -> int:
         sheet.row_dimensions[row].hidden = False
     competitors = result.get("competitors") or []
     for index, company in enumerate(competitors, start=3):
+        if not isinstance(company, dict):
+            company = {"name": _excel_value(company)}
+        nested = company.get("name")
+        if isinstance(nested, dict):
+            company = {**nested, **{key: value for key, value in company.items() if key != "name"}}
         if index != style_row:
             for col in range(1, 26):
                 source, target = sheet.cell(style_row, col), sheet.cell(index, col)
@@ -224,11 +264,10 @@ def _write_workbook(template: Path, output: Path, result: dict) -> int:
                 target.font = copy(source.font)
         sheet.row_dimensions[index].height = 54.75
         for col, key in enumerate(KEYS, start=1):
-            value = company.get(key)
-            if isinstance(value, list): value = ", ".join(map(str, value))
-            sheet.cell(index, col).value = value
-        if company.get("website"):
-            sheet.cell(index, 1).hyperlink = str(company["website"])
+            sheet.cell(index, col).value = _excel_value(company.get(key), key)
+        website = _excel_value(company.get("website"), "website")
+        if website:
+            sheet.cell(index, 1).hyperlink = str(website)
     last = max(3, len(competitors) + 2)
     sheet.auto_filter.ref = f"A2:Y{last}"
     sheet.freeze_panes = "B3"
@@ -239,8 +278,13 @@ def _write_workbook(template: Path, output: Path, result: dict) -> int:
     metadata.append([])
     metadata.append(["Competitor", "Source URLs"])
     for company in competitors:
+        if not isinstance(company, dict):
+            company = {"name": company}
         sources = company.get("sources") or []
-        metadata.append([company.get("name", ""), "\n".join(sources) if isinstance(sources, list) else str(sources)])
+        metadata.append([
+            _excel_value(company.get("name", ""), "name"),
+            _excel_value(sources, "sources"),
+        ])
     metadata.column_dimensions["A"].width = 30
     metadata.column_dimensions["B"].width = 100
     book.save(output)
@@ -251,7 +295,14 @@ def execute_job(record: dict) -> None:
     job_id = str(record["job_id"])
     folder = JOB_ROOT / job_id
     try:
-        result = _research(record, folder)
+        stored = str(record.get("result_json") or "").strip()
+        result = json.loads(stored) if stored and stored != "{}" else _research(record, folder)
+        with connect_store() as conn:
+            conn.execute(
+                "UPDATE competitive_landscape_jobs SET status='exporting',company_name=?,result_json=? WHERE job_id=?",
+                (str(result.get("target_company") or ""), json.dumps(result), job_id),
+            )
+            conn.commit()
         output = folder / "competitive-landscape.xlsx"
         count = _write_workbook(folder / str(record["template_name"]), output, result)
         with connect_store() as conn:

@@ -113,6 +113,7 @@ from competitive_landscape import (
     job as landscape_job,
     list_jobs as list_landscape_jobs,
     recover_jobs as recover_landscape_jobs,
+    retry_job as retry_landscape_job,
 )
 
 @asynccontextmanager
@@ -874,6 +875,14 @@ def download_competitive_landscape(job_id: str):
         raise HTTPException(404, "Workbook file is unavailable")
     name = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(result.get("company_name") or "competitive" )).strip("-").lower()
     return FileResponse(path, filename=f"{name or 'competitive'}-landscape.xlsx", media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+@app.post("/api/competitive-landscapes/{job_id}/retry", dependencies=[Depends(_require_admin)])
+def retry_competitive_landscape(job_id: str):
+    if not retry_landscape_job(job_id):
+        raise HTTPException(409, "Only failed landscape jobs can be retried")
+    record_admin_audit("competitive_landscape_retried", job_id, "export/research retry")
+    return {"job_id": job_id, "status": "queued"}
 
 
 @app.get("/api/runtime")

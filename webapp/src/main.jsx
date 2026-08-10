@@ -2057,7 +2057,7 @@ function CompetitiveLandscapePage() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const jobs = useApi(`/api/competitive-landscapes?t=${tick}`, [tick]);
-  const active = (jobs.data?.jobs || []).some((job) => ["queued", "researching"].includes(job.status));
+  const active = (jobs.data?.jobs || []).some((job) => ["queued", "researching", "exporting"].includes(job.status));
   useEffect(() => {
     if (!active) return undefined;
     const timer = setInterval(() => setTick((value) => value + 1), 5000);
@@ -2083,6 +2083,16 @@ function CompetitiveLandscapePage() {
   };
   const rows = jobs.data?.jobs || [];
   const completed = rows.filter((job) => job.status === "completed").length;
+  const retry = async (jobId) => {
+    if (!admin) return requestLogin();
+    setError("");
+    try {
+      await api(`/api/competitive-landscapes/${jobId}/retry`, { method: "POST" });
+      setTick((value) => value + 1);
+    } catch (err) {
+      setError(err.payload?.detail || err.message || "Retry failed");
+    }
+  };
   return <section className="landscape-page">
     <header>
       <p className="eyebrow">MARKET INTELLIGENCE</p>
@@ -2114,7 +2124,7 @@ function CompetitiveLandscapePage() {
     {jobs.loading && !jobs.data ? <p className="loading"><RefreshCw size={15}/> Loading analyses…</p> :
       rows.length === 0 ? <p className="empty">No competitive landscapes yet.</p> :
       <div className="table-wrap"><table><thead><tr><th>Company</th><th>Website</th><th>Status</th><th>Competitors</th><th>Requested</th><th>Completed</th><th>Action</th></tr></thead><tbody>
-      {rows.map((job) => <tr key={job.job_id}><td><strong>{job.company_name || "Researching…"}</strong></td><td>{job.website}</td><td><span className={`pill job-${job.status}`}>{job.status}</span>{job.error && <small className="row-error">{job.error}</small>}</td><td>{fmt(job.competitor_count || 0)}</td><td>{new Date(job.created_at).toLocaleString()}</td><td>{job.completed_at ? new Date(job.completed_at).toLocaleString() : "—"}</td><td>{job.status === "completed" ? <a className="button-link" href={`/api/competitive-landscapes/${job.job_id}/download`}><Download size={15}/> Download</a> : "—"}</td></tr>)}
+      {rows.map((job) => <tr key={job.job_id}><td><strong>{job.company_name || "Researching…"}</strong></td><td>{job.website}</td><td><span className={`pill job-${job.status}`}>{job.status}</span>{job.error && <small className="row-error">{job.error}</small>}</td><td>{fmt(job.competitor_count || 0)}</td><td>{new Date(job.created_at).toLocaleString()}</td><td>{job.completed_at ? new Date(job.completed_at).toLocaleString() : "—"}</td><td>{job.status === "completed" ? <a className="button-link" href={`/api/competitive-landscapes/${job.job_id}/download`}><Download size={15}/> Download</a> : job.status === "failed" ? <button onClick={() => retry(job.job_id)}><RefreshCw size={15}/> Retry</button> : "—"}</td></tr>)}
       </tbody></table></div>}
   </section>;
 }
