@@ -75,6 +75,16 @@ function claudeScorecard(row) {
   const unknowns = row.claude_unknowns && row.claude_unknowns !== "none" ? ` Unknowns: ${row.claude_unknowns}.` : "";
   return shortClaudeReason(`${row.claude_reasoning || row.claude_concerns || "No written rationale."}.${breakdown}${unknowns}`);
 }
+function ClaudeReviewBadge({ row, prefix = "" }) {
+  const score = row.claude_score !== "" && row.claude_score !== undefined
+    ? ` · ${row.claude_score}${prefix ? "/100" : ""}` : "";
+  return (
+    <span className={`pill claude-badge claude-${row.claude_decision.toLowerCase()}`} tabIndex="0">
+      {prefix}{row.claude_decision}{score}
+      <span className="claude-tooltip" role="tooltip">{claudeScorecard(row)}</span>
+    </span>
+  );
+}
 async function api(path, options = {}) {
   const r = await fetch(path, {
     headers: {
@@ -446,15 +456,7 @@ const companyCols = [
     label: "Claude review",
     render: (r) =>
       r.claude_decision ? (
-        <span
-          className={`pill claude-pill claude-${r.claude_decision.toLowerCase()}`}
-          data-tooltip={claudeScorecard(r)}
-          title={claudeScorecard(r)}
-          tabIndex="0"
-        >
-          {r.claude_decision}{" "}
-          {r.claude_score !== "" ? `· ${r.claude_score}` : ""}
-        </span>
+        <ClaudeReviewBadge row={r} />
       ) : (
         <span className="muted">Not reviewed</span>
       ),
@@ -659,14 +661,7 @@ function GoodDeals() {
             <a href={row.final_url || `https://${row.domain}`} target="_blank">{row.domain}</a>
             {row.claude_decision ? (
               <div className="deal-claude-review">
-                <span
-                  className={`pill claude-pill claude-${row.claude_decision.toLowerCase()}`}
-                  title={claudeScorecard(row)}
-                  data-tooltip={claudeScorecard(row)}
-                  tabIndex="0"
-                >
-                  Claude {row.claude_decision} · {row.claude_score}/100
-                </span>
+                <ClaudeReviewBadge row={row} prefix="Claude " />
               </div>
             ) : (
               <div className="deal-claude-review">

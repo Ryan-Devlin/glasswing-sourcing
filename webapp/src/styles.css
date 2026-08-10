@@ -560,17 +560,18 @@ tbody tr:hover {
   background: #fee6e1;
   color: #9d382c;
 }
-.claude-pill {
+.claude-badge {
   position: relative;
   cursor: help;
   outline: none;
 }
-.claude-pill::after {
-  content: attr(data-tooltip);
+.claude-tooltip {
+  display: block;
   position: absolute;
-  left: 50%;
-  bottom: calc(100% + 10px);
-  width: min(320px, 70vw);
+  left: 0;
+  top: calc(100% + 9px);
+  width: 300px;
+  max-width: min(300px, 75vw);
   padding: 10px 12px;
   border-radius: 8px;
   background: #102f2c;
@@ -583,16 +584,21 @@ tbody tr:hover {
   white-space: normal;
   opacity: 0;
   pointer-events: none;
-  transform: translate(-50%, 5px);
+  transform: translateY(-5px);
   transition:
     opacity 0.14s ease,
     transform 0.14s ease;
-  z-index: 20;
+  z-index: 100;
 }
-.claude-pill:hover::after,
-.claude-pill:focus::after {
+.claude-badge:hover .claude-tooltip,
+.claude-badge:focus .claude-tooltip,
+.claude-badge:focus-within .claude-tooltip {
   opacity: 1;
-  transform: translate(-50%, 0);
+  transform: translateY(0);
+}
+.top-pick:hover,
+.top-pick:focus-within {
+  z-index: 40;
 }
 .muted {
   color: #8a9996;
