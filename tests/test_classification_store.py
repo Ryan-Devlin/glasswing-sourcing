@@ -81,6 +81,14 @@ def test_master_bucket_queries_are_paged_and_source_labeled(tmp_path):
     )
     assert [row["domain"] for row in domain_rows] == ["zone.app"]
 
+    assert classification_store.source_bucket_counts(
+        ["zone_universe"], path=database
+    ) == {"reject": 1}
+    source_rows = classification_store.query_source_classifications(
+        ["zone_universe"], ["reject"], path=database
+    )
+    assert [row["domain"] for row in source_rows] == ["zone.app"]
+
 
 def test_claude_diligence_is_shared_and_upserted(tmp_path):
     database = tmp_path / "classifications.sqlite3"

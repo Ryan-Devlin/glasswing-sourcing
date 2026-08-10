@@ -180,6 +180,8 @@ def migrate(conn: sqlite3.Connection | PostgresConnection) -> None:
             ON classifications(availability_status, updated_at DESC);
         CREATE INDEX IF NOT EXISTS idx_classifications_updated
             ON classifications(updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_classifications_bucket_updated
+            ON classifications(routing_bucket, updated_at DESC, domain);
 
         CREATE TABLE IF NOT EXISTS manual_decisions (
             domain TEXT PRIMARY KEY,
@@ -790,6 +792,66 @@ def classification_bucket_counts(
         str(row["routing_bucket"]): int(row["total"])
         for row in rows
     }
+
+
+def source_bucket_counts(
+    source_prefixes: Iterable[str],
+    *,
+    path: Path | str = CLASSIFICATION_DB,
+) -> dict[str, int]:
+    """Fast bucket counts for one crawler source without cross-DB scans."""
+    prefixes = [clean(value) for value in source_prefixes if clean(value)]
+    if not prefixes or (
+        not using_classification_postgres() and not Path(path).exists()
+    ):
+        return {}
+    clauses = " OR ".join("content_source LIKE ?" for _ in prefixes)
+    params = [f"{prefix}%" for prefix in prefixes]
+    with connect_store(path, read_only=True) as conn:
+        rows = conn.execute(
+            "SELECT routing_bucket,count(*) AS total FROM classifications "
+            f"WHERE ({clauses}) GROUP BY routing_bucket",
+            params,
+        ).fetchall()
+    return {str(row["routing_bucket"]): int(row["total"]) for row in rows}
+
+
+def query_source_classifications(
+    source_prefixes: Iterable[str],
+    buckets: Iterable[str],
+    *,
+    limit: int = 100,
+    offset: int = 0,
+    sort: str = "Recently classified",
+    path: Path | str = CLASSIFICATION_DB,
+) -> list[dict[str, object]]:
+    """Page classifications for a crawler using indexed lightweight columns."""
+    prefixes = [clean(value) for value in source_prefixes if clean(value)]
+    bucket_values = list(dict.fromkeys(clean(value) for value in buckets if clean(value)))
+    if not prefixes or not bucket_values or (
+        not using_classification_postgres() and not Path(path).exists()
+    ):
+        return []
+    order = {
+        "Fit: high to low": "fit_score DESC,priority_score DESC,domain",
+        "Company: A to Z": "lower(company_name),domain",
+        "Domain: A to Z": "domain",
+    }.get(sort, "updated_at DESC,domain")
+    source_clauses = " OR ".join("content_source LIKE ?" for _ in prefixes)
+    bucket_marks = ",".join("?" for _ in bucket_values)
+    params: list[object] = [f"{prefix}%" for prefix in prefixes]
+    params.extend(bucket_values)
+    params.extend([max(1, min(int(limit), 250)), max(0, int(offset))])
+    with connect_store(path, read_only=True) as conn:
+        rows = conn.execute(
+            "SELECT domain,company_name,final_url,description,routing_bucket,"
+            "routing_reason,fit_score,priority_score,thesis_pillar,"
+            "content_source,updated_at FROM classifications "
+            f"WHERE ({source_clauses}) AND routing_bucket IN ({bucket_marks}) "
+            f"ORDER BY {order} LIMIT ? OFFSET ?",
+            params,
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def query_classifications(

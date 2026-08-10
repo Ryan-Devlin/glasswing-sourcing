@@ -46,8 +46,10 @@ chmod +x run_dashboard.sh diagnose.sh
 Open `http://localhost:8501`, choose the extensions and filters, then press
 **Start**.
 
-The first launch creates the local Python environment and installs the declared
-packages automatically. Later launches use the same environment.
+The interface is a React application backed by a FastAPI API. The first launch
+creates the local Python environment, installs the declared packages, and builds
+the web interface. Later launches reuse the installed environments and create a
+fresh optimized frontend bundle.
 
 ## Sending a clean copy to someone
 
@@ -87,10 +89,11 @@ seed only fills missing labels: it never overwrites a rating or basket choice
 you have edited manually. Cards that link only to an acquirer/social profile or
 provide no company website are excluded to protect training-data quality.
 
-Python and Claude classifications never become training truth automatically.
-Only explicit human actions and verified Glasswing portfolio positives enter
-the protected Yes/No training set. A Python Hard Denial removes expendable
-crawl payloads when safe, but it does not manufacture a human No label.
+Python classifications never become training truth automatically. Explicit
+human actions and verified Glasswing portfolio positives are protected labels;
+Claude KEEP/REJECT decisions are appended as lower-priority silver labels to
+the Yes/No baskets. A Python Hard Denial removes expendable crawl payloads when
+safe, but it does not manufacture a human No label.
 
 Every visible company has a deterministic 0-100 Glasswing-fit score calculated
 from its extracted website HTML rather than its dashboard tab. The scorer uses
@@ -141,7 +144,7 @@ and controls all local workers through a bounded-restart supervisor.
 
 The application is local-first but cloud-portable. Configure storage roots
 with `.env.example`. It is deployed today on Railway as four services --
-`web` (this dashboard) plus `pipeline-worker`, `ai-worker`, and
+`web` (the React/FastAPI application) plus `pipeline-worker`, `ai-worker`, and
 `zone-worker`, each running its own crawler continuously -- backed by a
 shared PostgreSQL instance (classification store, pipeline queue, `.AI`
 search, Zone Universe, each in its own schema) and S3-compatible object
