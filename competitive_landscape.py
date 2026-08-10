@@ -272,7 +272,10 @@ def _write_workbook(template: Path, output: Path, result: dict) -> int:
     sheet.auto_filter.ref = f"A2:Y{last}"
     sheet.freeze_panes = "B3"
     metadata = book.create_sheet("Research Notes")
-    metadata.append(["Target company", result.get("target_company", "")])
+    metadata.append([
+        "Target company",
+        _excel_value(result.get("target_company", ""), "name"),
+    ])
     metadata.append(["Generated", now()])
     metadata.append(["Methodology", result.get("methodology", "")])
     metadata.append([])
@@ -297,16 +300,17 @@ def execute_job(record: dict) -> None:
     try:
         stored = str(record.get("result_json") or "").strip()
         result = json.loads(stored) if stored and stored != "{}" else _research(record, folder)
+        target_name = _excel_value(result.get("target_company", ""), "name") or ""
         with connect_store() as conn:
             conn.execute(
                 "UPDATE competitive_landscape_jobs SET status='exporting',company_name=?,result_json=? WHERE job_id=?",
-                (str(result.get("target_company") or ""), json.dumps(result), job_id),
+                (str(target_name), json.dumps(result), job_id),
             )
             conn.commit()
         output = folder / "competitive-landscape.xlsx"
         count = _write_workbook(folder / str(record["template_name"]), output, result)
         with connect_store() as conn:
-            conn.execute("UPDATE competitive_landscape_jobs SET status='completed',company_name=?,competitor_count=?,output_path=?,result_json=?,completed_at=? WHERE job_id=?", (str(result.get("target_company") or ""), count, str(output), json.dumps(result), now(), job_id))
+            conn.execute("UPDATE competitive_landscape_jobs SET status='completed',company_name=?,competitor_count=?,output_path=?,result_json=?,completed_at=? WHERE job_id=?", (str(target_name), count, str(output), json.dumps(result), now(), job_id))
             conn.commit()
     except Exception as exc:
         with connect_store() as conn:

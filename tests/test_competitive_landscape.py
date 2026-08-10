@@ -51,7 +51,11 @@ def test_landscape_export_flattens_nested_claude_company_objects(tmp_path):
     book.save(template)
 
     _write_workbook(template, output, {
-        "target_company": "Target",
+        "target_company": {
+            "name": "NEYON AI",
+            "website": "https://neyon.ai",
+            "description": "AI factory operations platform",
+        },
         "competitors": [{
             "name": {
                 "name": "NEYON AI",
@@ -66,3 +70,4 @@ def test_landscape_export_flattens_nested_claude_company_objects(tmp_path):
     assert landscape["A3"].value == "NEYON AI"
     assert landscape["A3"].hyperlink.target == "https://neyon.ai"
     assert landscape["M3"].value == "NVIDIA, AWS"
+    assert load_workbook(output)["Research Notes"]["B1"].value == "NEYON AI"
