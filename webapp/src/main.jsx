@@ -63,6 +63,19 @@ async function api(path, options = {}) {
   if (!r.ok) throw new Error((await r.text()) || `Request failed ${r.status}`);
   return r.json();
 }
+async function waitForClaude(domain, onStatus) {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    const state = await api(`/api/claude/review/${encodeURIComponent(domain)}`);
+    onStatus(state.status);
+    if (state.status === "completed") return state.result;
+    if (state.status === "failed")
+      throw new Error(state.error || "Claude review failed");
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+  }
+  throw new Error(
+    "Claude review is still queued and will continue in the background",
+  );
+}
 function useApi(path, deps = []) {
   const [state, set] = useState({ data: null, error: "", loading: true });
   useEffect(() => {
@@ -609,11 +622,19 @@ function CompaniesTable() {
         `/api/claude/review/${encodeURIComponent(row.domain)}`,
         { method: "POST" },
       );
-      setToast(
-        response.status === "already_reviewed"
-          ? `${row.domain} was already reviewed by Claude`
-          : `${row.domain}: Claude ${response.decision} · score ${response.fit_score}`,
-      );
+      if (response.status === "already_reviewed") {
+        setToast(`${row.domain} was already reviewed by Claude`);
+      } else {
+        setToast(`${row.domain} queued for Claude`);
+        const decision = await waitForClaude(row.domain, (status) =>
+          setToast(
+            `${row.domain}: ${status === "reviewing" ? "Claude is reviewing…" : "queued for Claude"}`,
+          ),
+        );
+        setToast(
+          `${row.domain}: Claude ${decision.decision} · score ${decision.fit_score}`,
+        );
+      }
       setRefresh((value) => value + 1);
     } catch (error) {
       setToast(`Claude could not review ${row.domain}: ${error.message}`);
@@ -970,11 +991,19 @@ function CorpusCompanies({ kind }) {
                   `/api/claude/review/${encodeURIComponent(row.domain)}`,
                   { method: "POST" },
                 );
-                setToast(
-                  response.status === "already_reviewed"
-                    ? `${row.domain} was already reviewed`
-                    : `${row.domain}: Claude ${response.decision} · score ${response.fit_score}`,
-                );
+                if (response.status === "already_reviewed") {
+                  setToast(`${row.domain} was already reviewed`);
+                } else {
+                  setToast(`${row.domain} queued for Claude`);
+                  const decision = await waitForClaude(row.domain, (status) =>
+                    setToast(
+                      `${row.domain}: ${status === "reviewing" ? "Claude is reviewing…" : "queued for Claude"}`,
+                    ),
+                  );
+                  setToast(
+                    `${row.domain}: Claude ${decision.decision} · score ${decision.fit_score}`,
+                  );
+                }
                 setRefresh((value) => value + 1);
               } catch (error) {
                 setToast(
@@ -1314,7 +1343,37 @@ function HealthPage() {
           ]}
         />
       </section>
+      {admin && <AdminActivity />}
     </>
+  );
+}
+
+function AdminActivity() {
+  const activity = useApi("/api/admin/audit?limit=100", []);
+  return (
+    <section>
+      <div className="table-toolbar">
+        <div>
+          <h2>Admin activity</h2>
+          <p>Append-only history of operational and review actions.</p>
+        </div>
+      </div>
+      {activity.loading ? (
+        <Loading />
+      ) : activity.error ? (
+        <ErrorBox>{activity.error}</ErrorBox>
+      ) : (
+        <Table
+          rows={activity.data.rows}
+          columns={[
+            { key: "created_at", label: "Time" },
+            { key: "action", label: "Action" },
+            { key: "target", label: "Target" },
+            { key: "detail", label: "Detail" },
+          ]}
+        />
+      )}
+    </section>
   );
 }
 

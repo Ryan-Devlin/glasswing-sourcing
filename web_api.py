@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import hashlib
 import hmac
@@ -12,6 +13,7 @@ import sys
 import tempfile
 import time
 from datetime import datetime, timezone
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 
@@ -32,8 +34,13 @@ for source in (ROOT, AI_SRC, ZONE_SRC):
 from ai_search.og_bridge import search_companies, search_stats
 from ai_search.database import connect as ai_connect, diagnostics as ai_diagnostics
 from classification_store import (
+    admin_audit_rows,
+    claim_claude_review,
     claude_decisions_for_domains,
+    claude_review_status,
     connect_store,
+    enqueue_claude_review,
+    finish_claude_review,
     classification_bucket_counts,
     classification_record_for_domain,
     classification_source_label,
@@ -42,6 +49,8 @@ from classification_store import (
     query_classifications,
     query_classifications_by_domains,
     query_source_classifications,
+    record_admin_audit,
+    recover_claude_review_queue,
     search_classifications,
     source_bucket_counts,
     unhide_domains,
@@ -77,7 +86,20 @@ from runtime_control import (
 from zone_universe.search import search_pages
 from zone_universe.database import connect as zone_connect, diagnostics as zone_diagnostics
 
-app = FastAPI(title="Glasswing Sourcing API", version="1.0.0")
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    task = asyncio.create_task(_claude_queue_worker())
+    try:
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+app = FastAPI(title="Glasswing Sourcing API", version="1.0.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -326,6 +348,7 @@ def save_pipeline_filters(update: PipelineFilters):
     }
     atomic_write_json(RUN_CONFIG, payload)
     publish_pipeline_config(payload, requested_by="react_web")
+    record_admin_audit("filters_updated", detail=json.dumps(update.model_dump(), default=str))
     return payload
 
 
@@ -381,18 +404,21 @@ def labels(label: Literal["yes", "no"]):
 @app.post("/api/labels", dependencies=[Depends(_require_admin)])
 def set_label(update: LabelUpdate):
     save_basket_entry(update.domain, update.label, update.rating, source="human", reason=update.reason)
+    record_admin_audit("label_set", update.domain, f"{update.label} score {update.rating}")
     return {"ok": True, "domain": stable_domain(update.domain), "label": update.label}
 
 
 @app.delete("/api/labels/{domain}", dependencies=[Depends(_require_admin)])
 def delete_label(domain: str):
     remove_basket_entry(domain)
+    record_admin_audit("label_removed", domain)
     return {"ok": True}
 
 
 @app.post("/api/hidden", dependencies=[Depends(_require_admin)])
 def set_hidden(update: HiddenUpdate):
     changed = hide_domains(update.domains) if update.hidden else unhide_domains(update.domains)
+    record_admin_audit("domains_hidden" if update.hidden else "domains_unhidden", ",".join(update.domains), f"changed={changed}")
     return {"ok": True, "changed": changed}
 
 
@@ -435,17 +461,37 @@ def manual_claude_review(domain: str):
     existing = claude_decisions_for_domains([target]).get(target)
     if existing and str(existing.get("decision", "")).upper() in {"KEEP", "REJECT"}:
         return {"status": "already_reviewed", **existing}
+    if not classification_record_for_domain(target):
+        raise HTTPException(404, "Company not found")
+    queued = enqueue_claude_review(target)
+    record_admin_audit("claude_queued", target)
+    return queued
+
+
+@app.get("/api/claude/review/{domain}")
+def manual_claude_review_status(domain: str):
+    queued = claude_review_status(domain)
+    decision = claude_decisions_for_domains([domain]).get(stable_domain(domain))
+    if not queued and not decision:
+        raise HTTPException(404, "Claude review not found")
+    return {**(queued or {}), "result": decision}
+
+
+def _execute_queued_claude(target: str) -> None:
     if not os.getenv("ANTHROPIC_API_KEY", "").strip():
-        raise HTTPException(503, "Anthropic API key is not configured")
+        finish_claude_review(target, error="Anthropic API key is not configured")
+        return
     pipeline = connect_pipeline_db()
     try:
         if claude_allowance(pipeline) <= 0:
-            raise HTTPException(429, "Claude daily/hourly budget is currently exhausted")
+            finish_claude_review(target, error="Claude daily/hourly budget is currently exhausted")
+            return
     finally:
         pipeline.close()
     record = classification_record_for_domain(target)
     if not record:
-        raise HTTPException(404, "Company not found")
+        finish_claude_review(target, error="Company not found")
+        return
     import pandas as pd
 
     with tempfile.TemporaryDirectory(prefix="glasswing-claude-") as folder:
@@ -469,7 +515,8 @@ def manual_claude_review(domain: str):
                 timeout=240,
             )
         except subprocess.TimeoutExpired as exc:
-            raise HTTPException(504, "Claude review timed out; check results before retrying") from exc
+            finish_claude_review(target, error="Claude review timed out")
+            return
         attempted = report_path.exists()
     if attempted:
         pipeline = connect_pipeline_db()
@@ -483,11 +530,24 @@ def manual_claude_review(domain: str):
             pipeline.close()
     if completed.returncode != 0:
         detail = (completed.stderr or completed.stdout or "Claude review failed")[-600:]
-        raise HTTPException(502, detail)
+        finish_claude_review(target, error=detail)
+        return
     result = claude_decisions_for_domains([target]).get(target)
     if not result:
-        raise HTTPException(502, "Claude completed without saving a decision")
-    return {"status": "completed", **result}
+        finish_claude_review(target, error="Claude completed without saving a decision")
+        return
+    finish_claude_review(target)
+    record_admin_audit("claude_completed", target, f"{result.get('decision')} score {result.get('fit_score')}")
+
+
+async def _claude_queue_worker() -> None:
+    recover_claude_review_queue()
+    while True:
+        queued = await asyncio.to_thread(claim_claude_review)
+        if queued:
+            await asyncio.to_thread(_execute_queued_claude, str(queued["domain"]))
+        else:
+            await asyncio.sleep(3)
 
 
 @app.get("/api/runtime")
@@ -501,7 +561,13 @@ def worker_control(service: str, update: WorkerUpdate):
         raise HTTPException(404, "Unknown worker")
     targets = SERVICES if service == "all" else (service,)
     request_services({name: update.desired for name in targets}, requested_by="react_web")
+    record_admin_audit("workers_resumed" if update.desired else "workers_paused", service)
     return {"ok": True, "services": list(targets), "desired": update.desired}
+
+
+@app.get("/api/admin/audit", dependencies=[Depends(_require_admin)])
+def admin_activity(limit: int = Query(100, ge=1, le=500)):
+    return {"rows": admin_audit_rows(limit)}
 
 
 @app.get("/api/health")
@@ -597,6 +663,7 @@ async def upload_domains(file: UploadFile = File(...)):
         conn.commit()
         after = int(conn.execute("SELECT count(*) AS count FROM domains").fetchone()["count"])
         added = max(0, after - before)
+    record_admin_audit("domains_uploaded", file.filename or "upload", f"received={len(domains)} added={added}")
     return {
         "received": len(domains),
         "added": added,

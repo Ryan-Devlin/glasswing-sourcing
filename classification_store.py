@@ -283,6 +283,27 @@ def migrate(conn: sqlite3.Connection | PostgresConnection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_claude_diligence_decision_score
             ON claude_diligence(decision, fit_score DESC, updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS claude_review_queue (
+            domain TEXT PRIMARY KEY,
+            status TEXT NOT NULL DEFAULT 'queued',
+            requested_at TEXT NOT NULL,
+            started_at TEXT NOT NULL DEFAULT '',
+            completed_at TEXT NOT NULL DEFAULT '',
+            error TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_claude_review_queue_status
+            ON claude_review_queue(status, requested_at);
+
+        CREATE TABLE IF NOT EXISTS admin_audit_log (
+            {movement_id_column},
+            action TEXT NOT NULL,
+            target TEXT NOT NULL DEFAULT '',
+            detail TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_admin_audit_created
+            ON admin_audit_log(created_at DESC);
         """
     )
     if postgres:
@@ -938,6 +959,89 @@ def classification_record_for_domain(
     except (TypeError, ValueError, json.JSONDecodeError):
         stored = {}
     return {**stored, **plain, "domain": target}
+
+
+def enqueue_claude_review(domain: str, *, path: Path | str = CLASSIFICATION_DB) -> dict[str, object]:
+    target = stable_domain(domain)
+    if not target:
+        raise ValueError("Invalid domain")
+    now = utc_now()
+    with connect_store(path) as conn:
+        conn.execute(
+            "INSERT INTO claude_review_queue(domain,status,requested_at,started_at,completed_at,error) "
+            "VALUES (?, 'queued', ?, '', '', '') ON CONFLICT(domain) DO UPDATE SET "
+            "status='queued',requested_at=excluded.requested_at,started_at='',completed_at='',error=''",
+            (target, now),
+        )
+        conn.commit()
+    return {"domain": target, "status": "queued", "requested_at": now}
+
+
+def recover_claude_review_queue(*, path: Path | str = CLASSIFICATION_DB) -> int:
+    with connect_store(path) as conn:
+        cursor = conn.execute(
+            "UPDATE claude_review_queue SET status='queued',started_at='',error='' WHERE status='reviewing'"
+        )
+        conn.commit()
+        return max(0, int(cursor.rowcount or 0))
+
+
+def claim_claude_review(*, path: Path | str = CLASSIFICATION_DB) -> dict[str, object] | None:
+    with connect_store(path) as conn:
+        begin_immediate(conn)
+        row = conn.execute(
+            "SELECT domain,requested_at FROM claude_review_queue WHERE status='queued' "
+            "ORDER BY requested_at LIMIT 1"
+        ).fetchone()
+        if not row:
+            conn.commit()
+            return None
+        now = utc_now()
+        conn.execute(
+            "UPDATE claude_review_queue SET status='reviewing',started_at=?,error='' "
+            "WHERE domain=? AND status='queued'",
+            (now, row["domain"]),
+        )
+        conn.commit()
+        return {"domain": str(row["domain"]), "status": "reviewing", "started_at": now}
+
+
+def finish_claude_review(domain: str, *, error: str = "", path: Path | str = CLASSIFICATION_DB) -> None:
+    with connect_store(path) as conn:
+        conn.execute(
+            "UPDATE claude_review_queue SET status=?,completed_at=?,error=? WHERE domain=?",
+            ("failed" if error else "completed", utc_now(), clean(error)[:1000], stable_domain(domain)),
+        )
+        conn.commit()
+
+
+def claude_review_status(domain: str, *, path: Path | str = CLASSIFICATION_DB) -> dict[str, object] | None:
+    with connect_store(path, read_only=True) as conn:
+        row = conn.execute(
+            "SELECT domain,status,requested_at,started_at,completed_at,error "
+            "FROM claude_review_queue WHERE domain=?",
+            (stable_domain(domain),),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def record_admin_audit(action: str, target: str = "", detail: str = "", *, path: Path | str = CLASSIFICATION_DB) -> None:
+    with connect_store(path) as conn:
+        conn.execute(
+            "INSERT INTO admin_audit_log(action,target,detail,created_at) VALUES (?,?,?,?)",
+            (clean(action), clean(target), clean(detail)[:1000], utc_now()),
+        )
+        conn.commit()
+
+
+def admin_audit_rows(limit: int = 100, *, path: Path | str = CLASSIFICATION_DB) -> list[dict[str, object]]:
+    with connect_store(path, read_only=True) as conn:
+        rows = conn.execute(
+            "SELECT action,target,detail,created_at FROM admin_audit_log "
+            "ORDER BY created_at DESC LIMIT ?",
+            (max(1, min(int(limit), 500)),),
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def query_classifications_by_domains(

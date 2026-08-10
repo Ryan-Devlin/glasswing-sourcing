@@ -844,3 +844,20 @@ def test_delete_bucket_classifications_protects_human_truth(tmp_path, monkeypatc
         "protected-comp.ai",
         "real-investable.ai",
     }
+
+
+def test_claude_queue_recovers_and_audit_is_append_only(tmp_path):
+    database = tmp_path / "classifications.sqlite3"
+    queued = classification_store.enqueue_claude_review("Example.ai", path=database)
+    assert queued["status"] == "queued"
+    claimed = classification_store.claim_claude_review(path=database)
+    assert claimed["domain"] == "example.ai"
+    assert classification_store.claude_review_status("example.ai", path=database)["status"] == "reviewing"
+    assert classification_store.recover_claude_review_queue(path=database) == 1
+    assert classification_store.claude_review_status("example.ai", path=database)["status"] == "queued"
+    classification_store.finish_claude_review("example.ai", path=database)
+    assert classification_store.claude_review_status("example.ai", path=database)["status"] == "completed"
+    classification_store.record_admin_audit("claude_completed", "example.ai", path=database)
+    rows = classification_store.admin_audit_rows(path=database)
+    assert rows[0]["action"] == "claude_completed"
+    assert rows[0]["target"] == "example.ai"
