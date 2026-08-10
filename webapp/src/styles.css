@@ -681,6 +681,13 @@ tbody tr:hover {
   font-size: 11px;
   margin-right: 4px;
 }
+.already-bucketed .actions .yes:disabled,
+.already-bucketed .actions .no:disabled {
+  border-color: #d7dfdc;
+  background: #eef2f0;
+  color: #899692;
+  opacity: 0.72;
+}
 .actions .no {
   color: #9d382c;
 }

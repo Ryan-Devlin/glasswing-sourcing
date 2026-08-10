@@ -1047,7 +1047,7 @@ def query_source_classifications(
         rows = conn.execute(
             "SELECT domain,company_name,final_url,description,routing_bucket,"
             "routing_reason,fit_score,priority_score,thesis_pillar,"
-            "content_source,updated_at FROM classifications "
+            "content_source,manual_override,manual_override_target,updated_at FROM classifications "
             f"WHERE ({source_clauses}) AND routing_bucket IN ({bucket_marks}) "
             f"ORDER BY {order} LIMIT ? OFFSET ?",
             params,
@@ -1096,7 +1096,7 @@ def query_classifications(
         rows = conn.execute(
             "SELECT domain,company_name,final_url,description,"
             "routing_bucket,routing_reason,fit_score,priority_score,"
-            "thesis_pillar,content_source,classified_at,updated_at "
+            "thesis_pillar,content_source,manual_override,manual_override_target,classified_at,updated_at "
             "FROM classifications WHERE "
             + " AND ".join(clauses)
             + f" ORDER BY {order} LIMIT ? OFFSET ?",
@@ -1348,7 +1348,7 @@ def query_classifications_by_domains(
             rows.extend(conn.execute(
                 "SELECT domain,company_name,final_url,description,"
                 "routing_bucket,routing_reason,fit_score,priority_score,"
-                "thesis_pillar,content_source,updated_at "
+                "thesis_pillar,content_source,manual_override,manual_override_target,updated_at "
                 f"FROM classifications WHERE domain IN ({marks})",
                 batch,
             ).fetchall())

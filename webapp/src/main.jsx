@@ -327,8 +327,11 @@ function Table({
           </tr>
         </thead>
         <tbody>
-          {rows.map((row, i) => (
-            <tr key={row.domain || i}>
+          {rows.map((row, i) => {
+            const bucketed = Number(row.manual_override || 0) === 1 || Boolean(row.manual_override_target || row.label);
+            const bucketLabel = String(row.manual_override_target || row.label || "").toUpperCase();
+            return (
+            <tr key={row.domain || i} className={bucketed ? "already-bucketed" : ""}>
               {columns.map((c) => (
                 <td key={c.key} className={`cell-${c.key}`}>
                   {c.render ? (
@@ -360,11 +363,13 @@ function Table({
                     <>
                       <button
                         className="yes"
+                        disabled={bucketed}
+                        title={bucketed ? `Already bucketed ${bucketLabel}` : "Move to YES"}
                         onClick={() => onLabel(row, "yes")}
                       >
                         Yes
                       </button>
-                      <button className="no" onClick={() => onLabel(row, "no")}>
+                      <button className="no" disabled={bucketed} title={bucketed ? `Already bucketed ${bucketLabel}` : "Move to NO"} onClick={() => onLabel(row, "no")}>
                         No
                       </button>
                     </>
@@ -372,7 +377,8 @@ function Table({
                   {onReject && (
                     <button
                       className="no"
-                      title="Reject to Hard Denied and NO"
+                      disabled={bucketed}
+                      title={bucketed ? `Already bucketed ${bucketLabel}` : "Reject to Hard Denied and NO"}
                       aria-label={`Reject ${row.domain}`}
                       onClick={() => onReject(row)}
                     >
@@ -404,7 +410,7 @@ function Table({
                 </td>
               )}
             </tr>
-          ))}
+          )})}
         </tbody>
       </table>
     </div>
