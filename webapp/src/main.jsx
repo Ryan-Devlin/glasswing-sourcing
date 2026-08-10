@@ -22,7 +22,6 @@ import {
   Search,
   Trash2,
   Upload,
-  X,
 } from "lucide-react";
 import "./styles.css";
 import "./polish.css";
@@ -358,10 +357,10 @@ function Table({
                     <button
                       className="hide"
                       title="Dismiss from this view"
-                      aria-label={`Dismiss ${row.domain}`}
+                      aria-label={`Pass on ${row.domain}`}
                       onClick={() => onHide(row)}
                     >
-                      <X size={14} />
+                      Pass
                     </button>
                   )}
                   {onClaude && (
@@ -634,7 +633,7 @@ function GoodDeals() {
       <div className="top-pick-grid">
         {rows.map((row) => (
           <article className="top-pick" key={row.domain}>
-            <button className="card-dismiss" title="Dismiss from this view" onClick={() => dismiss(row)}><X size={15} /></button>
+            <button className="card-dismiss" title="Pass on this company" onClick={() => dismiss(row)}>Pass</button>
             <div className="top-pick-head">
               <span className="score-ring">{row.fit_score}<small>/100</small></span>
               <span className="pill">Investable</span>
@@ -675,14 +674,14 @@ function ClaudeTopPicks() {
           );
           return (
             <article className="top-pick" key={row.domain}>
-              <button className="card-dismiss" title="Dismiss from this view" onClick={async () => {
+              <button className="card-dismiss" title="Pass on this company" onClick={async () => {
                 if (!admin) return requestLogin();
                 await api("/api/hidden", {
                   method: "POST",
                   body: JSON.stringify({ domains: [row.domain], hidden: true }),
                 });
                 setRefresh((value) => value + 1);
-              }}><X size={15} /></button>
+              }}>Pass</button>
               <div className="top-pick-head">
                 <span className="score-ring">
                   {row.fit_score}
