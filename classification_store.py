@@ -110,7 +110,9 @@ def connect_store(
             # race to run this same schema DDL and deadlock on conflicting
             # locks (confirmed live for ai_search's identical pattern).
             locked = acquire_advisory_lock_with_timeout(
-                conn, "classification_store_migration"
+                conn,
+                "classification_store_migration_v2",
+                transactional=True,
             )
             try:
                 # PostgreSQL DDL still takes catalog locks even when guarded
@@ -119,11 +121,9 @@ def connect_store(
                 if locked:
                     migrate(conn)
             finally:
-                if locked:
-                    conn.execute(
-                        "SELECT pg_advisory_unlock(hashtext(?))",
-                        ("classification_store_migration",),
-                    )
+                # The transaction-scoped lock is released by migrate's
+                # commit, including through connection poolers.
+                pass
         return conn
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

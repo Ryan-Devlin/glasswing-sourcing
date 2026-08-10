@@ -160,6 +160,7 @@ def acquire_advisory_lock_with_timeout(
     *,
     timeout_seconds: float = 10.0,
     poll_seconds: float = 0.5,
+    transactional: bool = False,
 ) -> bool:
     """pg_advisory_lock() blocks forever if never released -- and every
     startup migration path in this app (continuous_pipeline, ai_search,
@@ -182,8 +183,12 @@ def acquire_advisory_lock_with_timeout(
     """
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
+        function = (
+            "pg_try_advisory_xact_lock" if transactional
+            else "pg_try_advisory_lock"
+        )
         row = conn.execute(
-            "SELECT pg_try_advisory_lock(hashtext(?)) AS locked", (key,)
+            f"SELECT {function}(hashtext(?)) AS locked", (key,)
         ).fetchone()
         if bool(row["locked"]):
             return True
