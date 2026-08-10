@@ -65,6 +65,17 @@ function shortClaudeReason(value) {
     .trim();
   return reason.length > 260 ? `${reason.slice(0, 257)}…` : reason;
 }
+function claudeScorecard(row) {
+  const d = row.claude_dimensions || {};
+  const dimensions = [
+    ["Thesis", d.thesis_fit], ["Enterprise", d.enterprise_value],
+    ["Product", d.product_depth], ["Moat", d.technical_moat],
+    ["Stage", d.stage_fit], ["Evidence", d.evidence_confidence],
+  ].filter(([, value]) => value !== "" && value !== undefined);
+  const breakdown = dimensions.length ? ` ${dimensions.map(([name, value]) => `${name} ${value}/5`).join(" · ")}.` : "";
+  const unknowns = row.claude_unknowns && row.claude_unknowns !== "none" ? ` Unknowns: ${row.claude_unknowns}.` : "";
+  return shortClaudeReason(`${row.claude_reasoning || row.claude_concerns || "No written rationale."}.${breakdown}${unknowns}`);
+}
 async function api(path, options = {}) {
   const r = await fetch(path, {
     headers: {
@@ -403,8 +414,8 @@ const companyCols = [
       r.claude_decision ? (
         <span
           className={`pill claude-pill claude-${r.claude_decision.toLowerCase()}`}
-          data-tooltip={shortClaudeReason(r.claude_reasoning)}
-          title={shortClaudeReason(r.claude_reasoning)}
+          data-tooltip={claudeScorecard(r)}
+          title={claudeScorecard(r)}
           tabIndex="0"
         >
           {r.claude_decision}{" "}
@@ -596,6 +607,14 @@ function ClaudeTopPicks() {
               <p className="clamp-text" title={reason}>
                 {reason}
               </p>
+              {row.thesis_fit !== undefined && (
+                <div className="dimension-row" title={`Evidence confidence ${row.evidence_confidence}/5`}>
+                  <span>Thesis {row.thesis_fit}/5</span>
+                  <span>Enterprise {row.enterprise_value}/5</span>
+                  <span>Product {row.product_depth}/5</span>
+                  <span>Moat {row.technical_moat}/5</span>
+                </div>
+              )}
               {row.thesis_pillar && (
                 <span className="top-pick-category">
                   {String(row.thesis_pillar).replaceAll("_", " ")}
@@ -1100,6 +1119,7 @@ function CertStreamPage() {
         <Metric label="Reviewed by Claude" value={fmt(claude.data?.reviewed)} />
         <Metric label="Claude KEEP" value={fmt(claude.data?.kept)} />
         <Metric label="Claude REJECT" value={fmt(claude.data?.rejected)} />
+        <Metric label="Awaiting new rubric" value={fmt(claude.data?.awaiting_rescore)} />
       </div>
       {claude.data?.warning && (
         <p className="notice">Claude: {claude.data.warning}</p>
@@ -1643,7 +1663,22 @@ function ClaudeQueuePage() {
               ),
             },
             { key: "decision", label: "Decision" },
-            { key: "fit_score", label: "Claude score" },
+          { key: "fit_score", label: "Claude score" },
+          {
+            key: "rubric",
+            label: "Rubric",
+            render: (row) => row.thesis_fit !== undefined ? (
+              <span className="rubric-summary" title={claudeScorecard({
+                ...row,
+                claude_reasoning: row.reasoning,
+                claude_concerns: row.concerns,
+                claude_unknowns: row.unknowns,
+                claude_dimensions: row,
+              })}>
+                T{row.thesis_fit} · E{row.enterprise_value} · P{row.product_depth} · M{row.technical_moat} · S{row.stage_fit}
+              </span>
+            ) : "Legacy review",
+          },
             { key: "requested_at", label: "Requested" },
             { key: "error", label: "Error" },
             {

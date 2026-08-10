@@ -753,13 +753,21 @@ def query_claude_diligence(
                    fit_score AS llm_fit_score,
                    product_summary AS llm_product_summary,
                    reasoning AS llm_reasoning,
-                   concerns AS llm_concerns,
+                   concerns AS llm_concerns,result_json,
                    model AS llm_model,diligence_version,updated_at
             FROM claude_diligence
             """ + where + " ORDER BY updated_at DESC",
             params,
         ).fetchall()
-    return [dict(row) for row in rows]
+    result = []
+    for row in rows:
+        plain = dict(row)
+        try:
+            detail = json.loads(str(plain.pop("result_json", "{}") or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            detail = {}
+        result.append({**plain, **{f"llm_{key}": value for key, value in detail.items()}})
+    return result
 
 
 def claude_diligenced_domains(
@@ -935,11 +943,19 @@ def claude_decisions_for_domains(
     marks = ",".join("?" for _ in normalized)
     with connect_store(path, read_only=True) as conn:
         rows = conn.execute(
-            "SELECT domain,decision,fit_score,reasoning,updated_at "
+            "SELECT domain,decision,fit_score,reasoning,concerns,diligence_version,result_json,updated_at "
             f"FROM claude_diligence WHERE domain IN ({marks})",
             normalized,
         ).fetchall()
-    return {str(row["domain"]): dict(row) for row in rows}
+    result = {}
+    for row in rows:
+        plain = dict(row)
+        try:
+            detail = json.loads(str(plain.pop("result_json", "{}") or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            detail = {}
+        result[str(row["domain"])] = {**plain, **detail}
+    return result
 
 
 def classification_record_for_domain(
@@ -1071,25 +1087,50 @@ def claude_review_queue_rows(limit: int = 200, *, path: Path | str = CLASSIFICAT
     with connect_store(path, read_only=True) as conn:
         rows = conn.execute(
             "SELECT q.domain,q.status,q.requested_at,q.started_at,q.completed_at,q.error,"
-            "d.decision,d.fit_score FROM claude_review_queue q "
+            "d.decision,d.fit_score,d.reasoning,d.concerns,d.diligence_version,d.result_json "
+            "FROM claude_review_queue q "
             "LEFT JOIN claude_diligence d ON d.domain=q.domain "
             "ORDER BY q.requested_at DESC LIMIT ?",
             (max(1, min(int(limit), 500)),),
         ).fetchall()
-    return [dict(row) for row in rows]
+    result = []
+    for row in rows:
+        plain = dict(row)
+        try:
+            detail = json.loads(str(plain.pop("result_json", "{}") or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            detail = {}
+        result.append({**plain, **detail})
+    return result
 
 
-def top_claude_keeps(limit: int = 6, *, path: Path | str = CLASSIFICATION_DB) -> list[dict[str, object]]:
+def top_claude_keeps(
+    limit: int = 6,
+    *,
+    diligence_version: str = "",
+    path: Path | str = CLASSIFICATION_DB,
+) -> list[dict[str, object]]:
     """Highest-conviction decisive Claude approvals for the homepage."""
     with connect_store(path, read_only=True) as conn:
         rows = conn.execute(
-            "SELECT d.domain,d.fit_score,d.reasoning,d.product_summary,d.updated_at,"
+            "SELECT d.domain,d.fit_score,d.reasoning,d.product_summary,d.result_json,d.updated_at,"
             "c.company_name,c.final_url,c.description,c.thesis_pillar "
             "FROM claude_diligence d LEFT JOIN classifications c ON c.domain=d.domain "
-            "WHERE d.decision='KEEP' ORDER BY d.fit_score DESC,d.updated_at DESC LIMIT ?",
-            (max(1, min(int(limit), 20)),),
+            "WHERE d.decision='KEEP' "
+            + ("AND d.diligence_version=? " if clean(diligence_version) else "")
+            + "ORDER BY d.fit_score DESC,d.updated_at DESC LIMIT ?",
+            ([clean(diligence_version)] if clean(diligence_version) else [])
+            + [max(1, min(int(limit), 20))],
         ).fetchall()
-    return [dict(row) for row in rows]
+    result = []
+    for row in rows:
+        plain = dict(row)
+        try:
+            detail = json.loads(str(plain.pop("result_json", "{}") or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            detail = {}
+        result.append({**plain, **detail})
+    return result
 
 
 def query_classifications_by_domains(

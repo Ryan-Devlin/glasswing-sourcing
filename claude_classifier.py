@@ -42,22 +42,37 @@ MAX_TOTAL_FUNDING_M = float(os.getenv("MAX_TOTAL_FUNDING_USD_M", "8"))
 MAX_INSTITUTIONAL_ROUNDS = int(os.getenv("MAX_INSTITUTIONAL_ROUNDS", "2"))
 
 
-SYSTEM_PROMPT = """You classify Glasswing Ventures fit. Be terse.
-Target: U.S. pre-seed/seed enterprise B2B/cybersecurity; vertical/physical AI,
-AI infrastructure, enterprise defense, collaborative intelligence, or compute.
-Search once using exact name+domain to verify U.S. base, funding/stage/rounds,
-ownership, acquisition/public status. REJECT if confirmed non-U.S., consumer, agency,
-generic wrapper/weak moat, >$8M, Series A+, >2 institutional rounds, acquired,
-subsidiary, public, large, or established. Do not REJECT solely because U.S.,
-funding, ownership, category, or external coverage remains unclear; absence of
-verification is not negative evidence. Record that uncertainty as the concern. KEEP
-requires credible enterprise/government buyer and
-technical/workflow/business-value depth. Scores >90 are exceptional. There is
-no third option: every call resolves to KEEP or REJECT, never an in-between.
+SYSTEM_PROMPT = """You are Glasswing Ventures' evidence-first early-stage diligence analyst.
+Target: pre-seed/seed enterprise B2B technology in vertical AI, physical AI,
+AI-adaptive infrastructure, intelligent enterprise defense, collaborative
+intelligence, and next-generation compute.
+
+Use the supplied first-party website evidence and one exact company+domain web
+search. Separate confirmed facts from unknowns. Missing verification is NEVER
+negative evidence. Confirmed non-U.S., consumer, agency, generic wrapper,
+funding >$8M, Series A+, >2 institutional rounds, acquired/subsidiary/public,
+or established/large status is a hard disqualifier.
+
+Score each dimension independently from 0-5:
+- thesis_fit: direct fit to a Glasswing category and market thesis
+- enterprise_value: clear enterprise/government buyer, painful workflow, ROI
+- product_depth: specific product, deployment, workflow, and user evidence
+- technical_moat: proprietary technical depth, data/workflow advantage, defensibility
+- stage_fit: credible early-stage profile; unknown stage is neutral, not zero
+- evidence_confidence: quality/coverage of evidence only; this does not measure fit
+
+A 5 requires unusually strong concrete evidence; 3 is credible; 0 means evidence
+of no fit, not merely missing information. Recommend KEEP only for substantive
+high-conviction fit. There is no MAYBE. Return concise evidence, not marketing copy.
 
 Return ONLY these tags, with no prose before or after:
 <decision>KEEP|REJECT</decision>
-<score>integer 0-95</score>
+<thesis_fit>integer 0-5</thesis_fit>
+<enterprise_value>integer 0-5</enterprise_value>
+<product_depth>integer 0-5</product_depth>
+<technical_moat>integer 0-5</technical_moat>
+<stage_fit>integer 0-5</stage_fit>
+<evidence_confidence>integer 0-5</evidence_confidence>
 <category>official category</category>
 <us_based>yes|no|unclear</us_based>
 <funding_millions_usd>number or -1</funding_millions_usd>
@@ -66,16 +81,24 @@ Return ONLY these tags, with no prose before or after:
 <company_maturity>very_early|early_stage|established|large_or_public|unknown</company_maturity>
 <ownership_status>independent|acquired|subsidiary|merged|public|unclear</ownership_status>
 <ownership_evidence>twenty words maximum</ownership_evidence>
-<summary>five words maximum</summary>
-<reason>five words maximum</reason>
-<concern>five words maximum</concern>
-<funding_evidence>twelve words maximum</funding_evidence>
-<location_evidence>twelve words maximum</location_evidence>
+<summary>sixteen words maximum</summary>
+<reason>thirty words maximum</reason>
+<concern>eighteen words maximum</concern>
+<funding_evidence>eighteen words maximum</funding_evidence>
+<location_evidence>eighteen words maximum</location_evidence>
+<positive_evidence>thirty-five words maximum</positive_evidence>
+<negative_evidence>twenty-five words maximum; "none" if none</negative_evidence>
+<unknowns>twenty-five words maximum; "none" if none</unknowns>
 """
 
 FIELDS = [
     "decision",
-    "score",
+    "thesis_fit",
+    "enterprise_value",
+    "product_depth",
+    "technical_moat",
+    "stage_fit",
+    "evidence_confidence",
     "category",
     "us_based",
     "funding_millions_usd",
@@ -89,6 +112,9 @@ FIELDS = [
     "concern",
     "funding_evidence",
     "location_evidence",
+    "positive_evidence",
+    "negative_evidence",
+    "unknowns",
 ]
 
 
@@ -178,7 +204,13 @@ def response_text_and_urls(response: Any) -> tuple[str, list[str]]:
 def dry_assessment(row: dict) -> dict:
     return apply_hard_guards({
         "decision": "REJECT",
-        "fit_score": min(to_int(row.get("rule_score", 0), 0), 69),
+        "model_recommendation": "REJECT",
+        "thesis_fit": 2,
+        "enterprise_value": 2,
+        "product_depth": 2,
+        "technical_moat": 1,
+        "stage_fit": 2,
+        "evidence_confidence": 1,
         "category": clean(row.get("rule_thesis_pillar", "unclear")),
         "us_based": "yes" if row.get("location_status") == "US" else "unclear",
         "funding_millions_usd": -1.0,
@@ -193,6 +225,9 @@ def dry_assessment(row: dict) -> dict:
         "funding_evidence": "",
         "location_evidence": clean(row.get("location_evidence", "")),
         "diligence_sources": "",
+        "positive_evidence": "Website gate passed",
+        "negative_evidence": "none",
+        "unknowns": "External diligence not run",
         "diligence_version": DILIGENCE_VERSION,
     }, max_total_funding_m=MAX_TOTAL_FUNDING_M,
        max_institutional_rounds=MAX_INSTITUTIONAL_ROUNDS)
@@ -205,7 +240,11 @@ class DiligenceResponseError(ValueError):
 
 def validate_response_text(text: str) -> None:
     """Reject empty/malformed responses as retryable call failures."""
-    required = ("decision", "score", "summary", "reason")
+    required = (
+        "decision", "thesis_fit", "enterprise_value", "product_depth",
+        "technical_moat", "stage_fit", "evidence_confidence", "summary",
+        "reason", "positive_evidence", "negative_evidence", "unknowns",
+    )
     missing = [
         name
         for name in required
@@ -246,7 +285,7 @@ async def classify(
     async with sem:
         response = await client.messages.create(
             model=model,
-            max_tokens=220,
+            max_tokens=500,
             system=SYSTEM_PROMPT,
             messages=[{
                 "role": "user",

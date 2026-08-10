@@ -78,6 +78,7 @@ from continuous_pipeline import (
     connect_db as connect_pipeline_db,
     read_status as read_local_pipeline_status,
 )
+from diligence_logic import DILIGENCE_VERSION
 from health_monitor import health_report
 from runtime_control import (
     SERVICES,
@@ -263,6 +264,12 @@ def _with_claude(rows: list[dict]) -> list[dict]:
             "claude_decision": decisions.get(row.get("domain", ""), {}).get("decision", ""),
             "claude_score": decisions.get(row.get("domain", ""), {}).get("fit_score", ""),
             "claude_reasoning": decisions.get(row.get("domain", ""), {}).get("reasoning", ""),
+            "claude_concerns": decisions.get(row.get("domain", ""), {}).get("concerns", ""),
+            "claude_unknowns": decisions.get(row.get("domain", ""), {}).get("unknowns", ""),
+            "claude_dimensions": {
+                name: decisions.get(row.get("domain", ""), {}).get(name, "")
+                for name in ("thesis_fit", "enterprise_value", "product_depth", "technical_moat", "stage_fit", "evidence_confidence")
+            },
             "claude_reviewed_at": decisions.get(row.get("domain", ""), {}).get("updated_at", ""),
         }
         for row in rows
@@ -464,8 +471,14 @@ def claude_status():
     with connect_store(read_only=True) as conn:
         rows = conn.execute(
             "SELECT decision,count(*) AS total,max(updated_at) AS latest "
-            "FROM claude_diligence GROUP BY decision"
+            "FROM claude_diligence WHERE diligence_version=? GROUP BY decision",
+            (DILIGENCE_VERSION,),
         ).fetchall()
+        legacy = int(conn.execute(
+            "SELECT count(*) AS total FROM claude_diligence "
+            "WHERE diligence_version<>? OR diligence_version IS NULL",
+            (DILIGENCE_VERSION,),
+        ).fetchone()["total"])
     counts = {str(row["decision"]): int(row["total"]) for row in rows}
     latest = max((str(row["latest"] or "") for row in rows), default="")
     status = read_pipeline_status() if shared_pipeline_backend_available() else read_local_pipeline_status()
@@ -474,6 +487,8 @@ def claude_status():
         "kept": counts.get("KEEP", 0),
         "rejected": counts.get("REJECT", 0),
         "latest": latest,
+        "rubric_version": DILIGENCE_VERSION,
+        "awaiting_rescore": legacy,
         "calls_this_run": int(status.get("claude_calls", 0) or 0),
         "warning": str(status.get("claude_warning", "") or ""),
     }
@@ -481,7 +496,7 @@ def claude_status():
 
 @app.get("/api/claude/top")
 def claude_top_companies(limit: int = Query(6, ge=1, le=20)):
-    return {"rows": top_claude_keeps(limit)}
+    return {"rows": top_claude_keeps(limit, diligence_version=DILIGENCE_VERSION)}
 
 
 @app.post("/api/claude/review/{domain}", dependencies=[Depends(_require_admin)])
@@ -490,6 +505,8 @@ def manual_claude_review(domain: str):
     if not target:
         raise HTTPException(400, "Invalid domain")
     existing = claude_decisions_for_domains([target]).get(target)
+    if existing and existing.get("diligence_version") not in {None, "", DILIGENCE_VERSION}:
+        existing = None
     if existing and str(existing.get("decision", "")).upper() in {"KEEP", "REJECT"}:
         return {"status": "already_reviewed", **existing}
     if not classification_record_for_domain(target):

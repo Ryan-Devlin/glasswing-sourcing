@@ -6,14 +6,15 @@ from unittest.mock import patch
 import pandas as pd
 
 import claude_classifier
-from diligence_logic import apply_hard_guards
+from diligence_logic import apply_hard_guards, dimension_score, parse_assessment
 
 
 class ClaudeThresholdTests(unittest.TestCase):
     def test_unverified_facts_do_not_turn_a_keep_into_reject(self):
         assessment = {
             "decision": "KEEP",
-            "fit_score": 88,
+            "thesis_fit": 5, "enterprise_value": 4, "product_depth": 4,
+            "technical_moat": 4, "stage_fit": 3,
             "us_based": "unclear",
             "funding_millions_usd": -1,
             "latest_round": "unknown",
@@ -32,6 +33,8 @@ class ClaudeThresholdTests(unittest.TestCase):
     def test_confirmed_non_us_still_forces_reject(self):
         assessment = {
             "decision": "KEEP", "fit_score": 90, "us_based": "no",
+            "thesis_fit": 5, "enterprise_value": 5, "product_depth": 5,
+            "technical_moat": 5, "stage_fit": 5,
             "funding_millions_usd": -1, "latest_round": "unknown",
             "institutional_rounds": -1, "ownership_status": "unclear",
             "company_maturity": "unknown", "category": "vertical_ai",
@@ -53,10 +56,45 @@ class ClaudeThresholdTests(unittest.TestCase):
 
     def test_complete_binary_response_is_valid(self):
         response = """
-        <decision>REJECT</decision><score>20</score>
+        <decision>REJECT</decision>
+        <thesis_fit>1</thesis_fit><enterprise_value>1</enterprise_value>
+        <product_depth>1</product_depth><technical_moat>0</technical_moat>
+        <stage_fit>2</stage_fit><evidence_confidence>4</evidence_confidence>
         <summary>Consumer photo editor</summary><reason>Not enterprise software</reason>
+        <positive_evidence>Working consumer product</positive_evidence>
+        <negative_evidence>No enterprise buyer</negative_evidence><unknowns>none</unknowns>
         """
         claude_classifier.validate_response_text(response)
+
+    def test_weighted_score_is_deterministic_and_confidence_is_separate(self):
+        assessment = {
+            "thesis_fit": 5, "enterprise_value": 4, "product_depth": 4,
+            "technical_moat": 3, "stage_fit": 4, "evidence_confidence": 1,
+        }
+        self.assertEqual(dimension_score(assessment), 81)
+        assessment["evidence_confidence"] = 5
+        self.assertEqual(dimension_score(assessment), 81)
+
+    def test_parser_preserves_evidence_and_computes_decision(self):
+        response = """
+        <decision>REJECT</decision><thesis_fit>5</thesis_fit>
+        <enterprise_value>4</enterprise_value><product_depth>4</product_depth>
+        <technical_moat>4</technical_moat><stage_fit>3</stage_fit>
+        <evidence_confidence>2</evidence_confidence><category>vertical_ai</category>
+        <us_based>unclear</us_based><funding_millions_usd>-1</funding_millions_usd>
+        <latest_round>unknown</latest_round><institutional_rounds>-1</institutional_rounds>
+        <company_maturity>unknown</company_maturity><ownership_status>unclear</ownership_status>
+        <ownership_evidence>none</ownership_evidence><summary>Enterprise AI workflow</summary>
+        <reason>Clear buyer and deep workflow</reason><concern>Funding unknown</concern>
+        <funding_evidence>none</funding_evidence><location_evidence>none</location_evidence>
+        <positive_evidence>Product and buyer are explicit</positive_evidence>
+        <negative_evidence>none</negative_evidence><unknowns>Location and funding</unknowns>
+        """
+        result = parse_assessment(response, ["https://example.ai"])
+        self.assertEqual(result["decision"], "KEEP")
+        self.assertEqual(result["model_recommendation"], "REJECT")
+        self.assertEqual(result["fit_score"], 82)
+        self.assertEqual(result["unknowns"], "Location and funding")
 
     def test_decisive_results_append_to_corresponding_baskets(self):
         approved = pd.DataFrame([

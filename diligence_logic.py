@@ -7,7 +7,16 @@ from typing import Any
 
 from common import clean
 
-DILIGENCE_VERSION = "2026-08-evidence-not-absence-v5"
+DILIGENCE_VERSION = "2026-08-glasswing-rubric-v6"
+KEEP_THRESHOLD = 70
+CORE_MINIMUM = 3
+SCORE_WEIGHTS = {
+    "thesis_fit": 25,
+    "enterprise_value": 20,
+    "product_depth": 20,
+    "technical_moat": 20,
+    "stage_fit": 15,
+}
 OFFICIAL_CATEGORIES = {
     "vertical_ai",
     "physical_ai",
@@ -20,7 +29,12 @@ OFFICIAL_CATEGORIES = {
 }
 FIELDS = [
     "decision",
-    "score",
+    "thesis_fit",
+    "enterprise_value",
+    "product_depth",
+    "technical_moat",
+    "stage_fit",
+    "evidence_confidence",
     "category",
     "us_based",
     "funding_millions_usd",
@@ -34,6 +48,9 @@ FIELDS = [
     "concern",
     "funding_evidence",
     "location_evidence",
+    "positive_evidence",
+    "negative_evidence",
+    "unknowns",
 ]
 
 
@@ -76,6 +93,27 @@ def recursively_collect_urls(value: Any, urls: set[str]) -> None:
             recursively_collect_urls(child, urls)
 
 
+def dimension_score(assessment: dict) -> int:
+    """Deterministic 0-100 Glasswing score from five bounded dimensions."""
+    total = 0.0
+    for name, weight in SCORE_WEIGHTS.items():
+        total += max(0, min(5, to_int(assessment.get(name), 0))) * weight / 5
+    return max(0, min(100, round(total)))
+
+
+def substantive_decision(assessment: dict) -> str:
+    core = (
+        to_int(assessment.get("thesis_fit"), 0),
+        to_int(assessment.get("enterprise_value"), 0),
+        to_int(assessment.get("product_depth"), 0),
+    )
+    return (
+        "KEEP"
+        if dimension_score(assessment) >= KEEP_THRESHOLD and min(core) >= CORE_MINIMUM
+        else "REJECT"
+    )
+
+
 def apply_hard_guards(
     assessment: dict,
     max_total_funding_m: float = 8.0,
@@ -105,10 +143,13 @@ def apply_hard_guards(
     if assessment["company_maturity"] in {"established", "large_or_public"}:
         reasons.append("Too mature")
 
+    assessment["fit_score"] = dimension_score(assessment)
+    assessment["decision"] = substantive_decision(assessment)
+    assessment["hard_disqualifiers"] = reasons
     if reasons:
         assessment["decision"] = "REJECT"
         assessment["fit_score"] = min(int(assessment["fit_score"]), 35)
-        assessment["concerns"] = clamp_words(reasons[0], 5)
+        assessment["concerns"] = clamp_words(reasons[0], 15)
     elif assessment["decision"] == "KEEP":
         # Missing evidence is not negative evidence. Preserve a substantive
         # KEEP unless a confirmed hard disqualifier above exists, and surface
@@ -119,10 +160,6 @@ def apply_hard_guards(
             assessment["concerns"] = assessment.get("concerns") or "Ownership not verified"
         elif funding < 0 or assessment["latest_round"] == "unknown":
             assessment["concerns"] = assessment.get("concerns") or "Funding not verified"
-
-    if assessment["decision"] == "KEEP":
-        if assessment["fit_score"] < 75:
-            assessment["decision"] = "REJECT"
 
     return assessment
 
@@ -135,9 +172,9 @@ def parse_assessment(
 ) -> dict:
     raw = {name: tag(text, name) for name in FIELDS}
 
-    decision = raw["decision"].upper()
-    if decision not in {"KEEP", "REJECT"}:
-        decision = "REJECT"
+    model_recommendation = raw["decision"].upper()
+    if model_recommendation not in {"KEEP", "REJECT"}:
+        model_recommendation = "REJECT"
 
     category = raw["category"].lower()
     if category not in OFFICIAL_CATEGORIES:
@@ -167,8 +204,10 @@ def parse_assessment(
         ownership = "unclear"
 
     assessment = {
-        "decision": decision,
-        "fit_score": max(0, min(to_int(raw["score"], 0), 95)),
+        "decision": model_recommendation,
+        "model_recommendation": model_recommendation,
+        **{name: max(0, min(5, to_int(raw[name], 0))) for name in SCORE_WEIGHTS},
+        "evidence_confidence": max(0, min(5, to_int(raw["evidence_confidence"], 0))),
         "category": category,
         "us_based": us_based,
         "funding_millions_usd": to_float(raw["funding_millions_usd"], -1),
@@ -177,11 +216,14 @@ def parse_assessment(
         "company_maturity": maturity,
         "ownership_status": ownership,
         "ownership_evidence": clamp_words(raw["ownership_evidence"], 20),
-        "product_summary": clamp_words(raw["summary"], 5),
-        "reasoning": clamp_words(raw["reason"], 5),
-        "concerns": clamp_words(raw["concern"], 5),
-        "funding_evidence": clamp_words(raw["funding_evidence"], 12),
-        "location_evidence": clamp_words(raw["location_evidence"], 12),
+        "product_summary": clamp_words(raw["summary"], 16),
+        "reasoning": clamp_words(raw["reason"], 30),
+        "concerns": clamp_words(raw["concern"], 18),
+        "funding_evidence": clamp_words(raw["funding_evidence"], 18),
+        "location_evidence": clamp_words(raw["location_evidence"], 18),
+        "positive_evidence": clamp_words(raw["positive_evidence"], 35),
+        "negative_evidence": clamp_words(raw["negative_evidence"], 25),
+        "unknowns": clamp_words(raw["unknowns"], 25),
         "diligence_sources": " | ".join(urls[:5]),
         "diligence_version": DILIGENCE_VERSION,
     }
