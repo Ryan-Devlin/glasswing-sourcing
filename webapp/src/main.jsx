@@ -86,8 +86,20 @@ async function api(path, options = {}) {
     },
     ...options,
   });
-  if (!r.ok) throw new Error((await r.text()) || `Request failed ${r.status}`);
+  if (!r.ok) {
+    const text = await r.text();
+    const error = new Error(text || `Request failed ${r.status}`);
+    error.status = r.status;
+    try { error.payload = JSON.parse(text); } catch {}
+    throw error;
+  }
   return r.json();
+}
+async function requestClaudeReview(domain, overrideDailyLimit = false) {
+  return api(`/api/claude/review/${encodeURIComponent(domain)}`, {
+    method: "POST",
+    body: JSON.stringify({ override_daily_limit: overrideDailyLimit }),
+  });
 }
 async function waitForClaude(domain, onStatus) {
   for (let attempt = 0; attempt < 80; attempt += 1) {
@@ -219,6 +231,29 @@ function AdminLogin({ onClose, onLogin }) {
           </button>
         </div>
       </form>
+    </div>
+  );
+}
+function ClaudeOverrideModal({ domain, onClose, onOverride }) {
+  const [busy, setBusy] = useState(false);
+  return (
+    <div className="modal-bg" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="modal">
+        <h3>Hit daily limit</h3>
+        <p>
+          Claude has reached today’s configured call limit. Override it for
+          <strong> {domain}</strong> and send one additional paid call?
+        </p>
+        <div className="modal-actions">
+          <button disabled={busy} onClick={onClose}>Cancel</button>
+          <button className="primary" disabled={busy} onClick={async () => {
+            setBusy(true);
+            try { await onOverride(); } finally { setBusy(false); }
+          }}>
+            {busy ? "Sending…" : "Override and send"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -740,6 +775,7 @@ function CompaniesTable() {
   const [toast, setToast] = useState("");
   const [sort, setSort] = useState({ key: "updated_at", direction: "desc" });
   const [claudeBusy, setClaudeBusy] = useState("");
+  const [claudeOverride, setClaudeOverride] = useState(null);
   const basket = bucket === "yes" || bucket === "no";
   const query = basket
     ? `/api/labels?label=${bucket}&page=${page}&page_size=100`
@@ -761,14 +797,12 @@ function CompaniesTable() {
     setRefresh((x) => x + 1);
     setTimeout(() => setToast(""), 2500);
   };
-  const sendClaude = async (row) => {
+  const sendClaude = async (row, overrideDailyLimit = false) => {
     if (!admin) return requestLogin();
     setClaudeBusy(row.domain);
     try {
-      const response = await api(
-        `/api/claude/review/${encodeURIComponent(row.domain)}`,
-        { method: "POST" },
-      );
+      const response = await requestClaudeReview(row.domain, overrideDailyLimit);
+      if (overrideDailyLimit) setClaudeOverride(null);
       if (response.status === "already_reviewed") {
         setToast(`${row.domain} was already reviewed by Claude`);
       } else {
@@ -784,7 +818,11 @@ function CompaniesTable() {
       }
       setRefresh((value) => value + 1);
     } catch (error) {
-      setToast(`Claude could not review ${row.domain}: ${error.message}`);
+      if (error.status === 429) {
+        setClaudeOverride(row);
+      } else {
+        setToast(`Claude could not review ${row.domain}: ${error.message}`);
+      }
     } finally {
       setClaudeBusy("");
       setTimeout(() => setToast(""), 5000);
@@ -878,6 +916,13 @@ function CompaniesTable() {
             setRefresh((x) => x + 1);
             setTimeout(() => setToast(""), 2500);
           }}
+        />
+      )}
+      {claudeOverride && (
+        <ClaudeOverrideModal
+          domain={claudeOverride.domain}
+          onClose={() => setClaudeOverride(null)}
+          onOverride={() => sendClaude(claudeOverride, true)}
         />
       )}
     </section>
@@ -1164,6 +1209,7 @@ function CorpusCompanies({ kind }) {
   const [label, setLabel] = useState(null);
   const [sort, setSort] = useState({ key: "updated_at", direction: "desc" });
   const [claudeBusy, setClaudeBusy] = useState("");
+  const [claudeOverride, setClaudeOverride] = useState(null);
   const [toast, setToast] = useState("");
   const basket = bucket === "yes" || bucket === "no";
   const result = useApi(
@@ -1220,10 +1266,7 @@ function CorpusCompanies({ kind }) {
               if (!admin) return requestLogin();
               setClaudeBusy(row.domain);
               try {
-                const response = await api(
-                  `/api/claude/review/${encodeURIComponent(row.domain)}`,
-                  { method: "POST" },
-                );
+                const response = await requestClaudeReview(row.domain);
                 if (response.status === "already_reviewed") {
                   setToast(`${row.domain} was already reviewed`);
                 } else {
@@ -1239,9 +1282,10 @@ function CorpusCompanies({ kind }) {
                 }
                 setRefresh((value) => value + 1);
               } catch (error) {
-                setToast(
-                  `Claude could not review ${row.domain}: ${error.message}`,
-                );
+                if (error.status === 429) setClaudeOverride(row);
+                else setToast(
+                    `Claude could not review ${row.domain}: ${error.message}`,
+                  );
               } finally {
                 setClaudeBusy("");
                 setTimeout(() => setToast(""), 5000);
@@ -1270,6 +1314,25 @@ function CorpusCompanies({ kind }) {
           onSaved={() => {
             setLabel(null);
             setRefresh((x) => x + 1);
+          }}
+        />
+      )}
+      {claudeOverride && (
+        <ClaudeOverrideModal
+          domain={claudeOverride.domain}
+          onClose={() => setClaudeOverride(null)}
+          onOverride={async () => {
+            setClaudeBusy(claudeOverride.domain);
+            try {
+              await requestClaudeReview(claudeOverride.domain, true);
+              setToast(`${claudeOverride.domain} queued with daily-limit override`);
+              setClaudeOverride(null);
+              setRefresh((value) => value + 1);
+            } catch (error) {
+              setToast(`Claude override failed: ${error.message}`);
+            } finally {
+              setClaudeBusy("");
+            }
           }}
         />
       )}

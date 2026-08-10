@@ -2,6 +2,7 @@ from fastapi.testclient import TestClient
 import pytest
 
 import web_api
+from types import SimpleNamespace
 
 
 client = TestClient(web_api.app)
@@ -158,6 +159,32 @@ def test_manual_claude_review_does_not_repeat_completed_domain(monkeypatch):
     assert response.status_code == 200
     assert response.json()["status"] == "already_reviewed"
     assert response.json()["decision"] == "KEEP"
+
+
+def test_manual_claude_review_requires_explicit_budget_override(monkeypatch):
+    monkeypatch.setattr(web_api, "claude_decisions_for_domains", lambda domains: {})
+    monkeypatch.setattr(web_api, "classification_record_for_domain", lambda domain: {"domain": domain})
+    monkeypatch.setattr(web_api, "connect_pipeline_db", lambda: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(web_api, "claude_allowance", lambda connection: 0)
+    captured = {}
+    monkeypatch.setattr(
+        web_api, "enqueue_claude_review",
+        lambda domain, override_budget=False: captured.update(
+            domain=domain, override_budget=override_budget
+        ) or {"domain": domain, "status": "queued", "override_budget": override_budget},
+    )
+    monkeypatch.setattr(web_api, "record_admin_audit", lambda *args, **kwargs: None)
+
+    limited = client.post("/api/claude/review/limit.ai", json={})
+    assert limited.status_code == 429
+    assert limited.json()["detail"]["message"] == "Hit daily limit"
+
+    overridden = client.post(
+        "/api/claude/review/limit.ai",
+        json={"override_daily_limit": True},
+    )
+    assert overridden.status_code == 200
+    assert captured == {"domain": "limit.ai", "override_budget": True}
 
 
 def test_run_filters_cannot_change_while_certstream_is_running(monkeypatch):

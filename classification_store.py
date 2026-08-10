@@ -290,7 +290,8 @@ def migrate(conn: sqlite3.Connection | PostgresConnection) -> None:
             requested_at TEXT NOT NULL,
             started_at TEXT NOT NULL DEFAULT '',
             completed_at TEXT NOT NULL DEFAULT '',
-            error TEXT NOT NULL DEFAULT ''
+            error TEXT NOT NULL DEFAULT '',
+            override_budget BOOLEAN NOT NULL DEFAULT FALSE
         );
         CREATE INDEX IF NOT EXISTS idx_claude_review_queue_status
             ON claude_review_queue(status, requested_at);
@@ -322,6 +323,18 @@ def migrate(conn: sqlite3.Connection | PostgresConnection) -> None:
         conn.execute(
             "ALTER TABLE movement_log ADD COLUMN "
             "model_version TEXT NOT NULL DEFAULT ''"
+        )
+    queue_columns = (
+        table_columns_postgres(conn, "claude_review_queue")
+        if postgres else {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(claude_review_queue)")
+        }
+    )
+    if "override_budget" not in queue_columns:
+        conn.execute(
+            "ALTER TABLE claude_review_queue ADD COLUMN "
+            "override_budget BOOLEAN NOT NULL DEFAULT FALSE"
         )
     conn.commit()
 
@@ -977,20 +990,29 @@ def classification_record_for_domain(
     return {**stored, **plain, "domain": target}
 
 
-def enqueue_claude_review(domain: str, *, path: Path | str = CLASSIFICATION_DB) -> dict[str, object]:
+def enqueue_claude_review(
+    domain: str,
+    *,
+    override_budget: bool = False,
+    path: Path | str = CLASSIFICATION_DB,
+) -> dict[str, object]:
     target = stable_domain(domain)
     if not target:
         raise ValueError("Invalid domain")
     now = utc_now()
     with connect_store(path) as conn:
         conn.execute(
-            "INSERT INTO claude_review_queue(domain,status,requested_at,started_at,completed_at,error) "
-            "VALUES (?, 'queued', ?, '', '', '') ON CONFLICT(domain) DO UPDATE SET "
-            "status='queued',requested_at=excluded.requested_at,started_at='',completed_at='',error=''",
-            (target, now),
+            "INSERT INTO claude_review_queue(domain,status,requested_at,started_at,completed_at,error,override_budget) "
+            "VALUES (?, 'queued', ?, '', '', '', ?) ON CONFLICT(domain) DO UPDATE SET "
+            "status='queued',requested_at=excluded.requested_at,started_at='',completed_at='',error='',"
+            "override_budget=excluded.override_budget",
+            (target, now, bool(override_budget)),
         )
         conn.commit()
-    return {"domain": target, "status": "queued", "requested_at": now}
+    return {
+        "domain": target, "status": "queued", "requested_at": now,
+        "override_budget": bool(override_budget),
+    }
 
 
 def recover_claude_review_queue(*, path: Path | str = CLASSIFICATION_DB) -> int:
@@ -1006,7 +1028,7 @@ def claim_claude_review(*, path: Path | str = CLASSIFICATION_DB) -> dict[str, ob
     with connect_store(path) as conn:
         begin_immediate(conn)
         row = conn.execute(
-            "SELECT domain,requested_at FROM claude_review_queue WHERE status='queued' "
+            "SELECT domain,requested_at,override_budget FROM claude_review_queue WHERE status='queued' "
             "ORDER BY requested_at LIMIT 1"
         ).fetchone()
         if not row:
@@ -1019,7 +1041,10 @@ def claim_claude_review(*, path: Path | str = CLASSIFICATION_DB) -> dict[str, ob
             (now, row["domain"]),
         )
         conn.commit()
-        return {"domain": str(row["domain"]), "status": "reviewing", "started_at": now}
+        return {
+            "domain": str(row["domain"]), "status": "reviewing",
+            "started_at": now, "override_budget": bool(row["override_budget"]),
+        }
 
 
 def finish_claude_review(domain: str, *, error: str = "", path: Path | str = CLASSIFICATION_DB) -> None:
@@ -1034,7 +1059,7 @@ def finish_claude_review(domain: str, *, error: str = "", path: Path | str = CLA
 def claude_review_status(domain: str, *, path: Path | str = CLASSIFICATION_DB) -> dict[str, object] | None:
     with connect_store(path, read_only=True) as conn:
         row = conn.execute(
-            "SELECT domain,status,requested_at,started_at,completed_at,error "
+            "SELECT domain,status,requested_at,started_at,completed_at,error,override_budget "
             "FROM claude_review_queue WHERE domain=?",
             (stable_domain(domain),),
         ).fetchone()

@@ -159,6 +159,10 @@ class WorkerUpdate(BaseModel):
     desired: bool
 
 
+class ClaudeReviewRequest(BaseModel):
+    override_daily_limit: bool = False
+
+
 class HiddenUpdate(BaseModel):
     domains: list[str]
     hidden: bool = True
@@ -508,7 +512,7 @@ def claude_top_companies(limit: int = Query(6, ge=1, le=20)):
 
 
 @app.post("/api/claude/review/{domain}", dependencies=[Depends(_require_admin)])
-def manual_claude_review(domain: str):
+def manual_claude_review(domain: str, request: ClaudeReviewRequest = ClaudeReviewRequest()):
     target = stable_domain(domain)
     if not target:
         raise HTTPException(400, "Invalid domain")
@@ -519,8 +523,23 @@ def manual_claude_review(domain: str):
         return {"status": "already_reviewed", **existing}
     if not classification_record_for_domain(target):
         raise HTTPException(404, "Company not found")
-    queued = enqueue_claude_review(target)
-    record_admin_audit("claude_queued", target)
+    if not request.override_daily_limit:
+        pipeline = connect_pipeline_db()
+        try:
+            if claude_allowance(pipeline) <= 0:
+                raise HTTPException(
+                    429,
+                    {"code": "CLAUDE_DAILY_LIMIT", "message": "Hit daily limit"},
+                )
+        finally:
+            pipeline.close()
+    queued = enqueue_claude_review(
+        target, override_budget=request.override_daily_limit
+    )
+    record_admin_audit(
+        "claude_limit_overridden" if request.override_daily_limit else "claude_queued",
+        target,
+    )
     return queued
 
 
@@ -578,13 +597,13 @@ def export_labels(label: Literal["yes", "no"]):
     return _csv_response(rows, f"glasswing-{label}-basket.csv")
 
 
-def _execute_queued_claude(target: str) -> None:
+def _execute_queued_claude(target: str, *, override_budget: bool = False) -> None:
     if not os.getenv("ANTHROPIC_API_KEY", "").strip():
         finish_claude_review(target, error="Anthropic API key is not configured")
         return
     pipeline = connect_pipeline_db()
     try:
-        if claude_allowance(pipeline) <= 0:
+        if not override_budget and claude_allowance(pipeline) <= 0:
             finish_claude_review(target, error="Claude daily/hourly budget is currently exhausted")
             return
     finally:
@@ -646,7 +665,11 @@ async def _claude_queue_worker() -> None:
     while True:
         queued = await asyncio.to_thread(claim_claude_review)
         if queued:
-            await asyncio.to_thread(_execute_queued_claude, str(queued["domain"]))
+            await asyncio.to_thread(
+                _execute_queued_claude,
+                str(queued["domain"]),
+                override_budget=bool(queued.get("override_budget")),
+            )
         else:
             await asyncio.sleep(3)
 
