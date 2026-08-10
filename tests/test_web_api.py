@@ -94,6 +94,23 @@ def test_worker_control_is_explicit_and_scoped(monkeypatch):
     assert captured["requested_by"] == "react_web"
 
 
+def test_certstream_status_exposes_pause_request(monkeypatch):
+    monkeypatch.setattr(web_api, "shared_pipeline_backend_available", lambda: True)
+    monkeypatch.setattr(
+        web_api, "read_pipeline_status",
+        lambda: {"running": True, "stage": "screening"},
+    )
+    monkeypatch.setattr(
+        web_api, "read_control",
+        lambda: {"desired": {"pipeline": False}},
+    )
+    response = client.get("/api/certstream/status")
+    assert response.status_code == 200
+    assert response.json()["running"] is True
+    assert response.json()["desired_running"] is False
+    assert response.json()["pause_requested"] is True
+
+
 def test_unknown_bucket_and_worker_are_rejected():
     assert client.get("/api/classifications?bucket=wat").status_code == 400
     assert client.post("/api/runtime/wat", json={"desired": True}).status_code == 404

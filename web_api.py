@@ -82,6 +82,7 @@ from diligence_logic import DILIGENCE_VERSION
 from health_monitor import health_report
 from runtime_control import (
     SERVICES,
+    read_control,
     read_pipeline_status,
     read_pipeline_config,
     publish_pipeline_config,
@@ -458,12 +459,19 @@ def set_hidden(update: HiddenUpdate):
 @app.get("/api/certstream/status")
 def certstream_status():
     if shared_pipeline_backend_available():
-        return read_pipeline_status() or {
+        status = read_pipeline_status() or {
             "running": False,
             "stage": "waiting for worker status",
             "queue": {},
         }
-    return read_local_pipeline_status()
+    else:
+        status = read_local_pipeline_status()
+    desired = bool(read_control()["desired"].get("pipeline", False))
+    return {
+        **status,
+        "desired_running": desired,
+        "pause_requested": not desired,
+    }
 
 
 @app.get("/api/claude/status")

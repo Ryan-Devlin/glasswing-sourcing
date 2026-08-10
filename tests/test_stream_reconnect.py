@@ -47,6 +47,13 @@ class StreamReconnectTests(unittest.TestCase):
             listener.count("selected_extensions()"), 2
         )
 
+    def test_listener_disconnects_while_pipeline_is_paused(self):
+        listener = self.pipeline.split("async def listener(", 1)[1].split(
+            "async def worker(", 1
+        )[0]
+        self.assertIn('stream_connection_state="paused"', listener)
+        self.assertIn('read_control()["desired"].get', listener)
+
 
 if __name__ == "__main__":
     unittest.main()

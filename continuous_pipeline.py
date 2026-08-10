@@ -1260,6 +1260,23 @@ async def listener(
     extensions_refreshed_at = time.monotonic()
 
     while not stop.is_set():
+        if RUNTIME_MODE != "local" and not read_control()["desired"].get(
+            "pipeline", True
+        ):
+            # A user pause means pause acquisition too, not merely screening.
+            # Disconnect so CertStream cannot buffer an invisible burst that
+            # floods the queue on resume.
+            write_status(
+                connected=False,
+                stream_connection_state="paused",
+                stage="paused",
+                updated_at=utc_now(),
+            )
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=1)
+            except asyncio.TimeoutError:
+                pass
+            continue
         try:
             # Connection state and processing state are independent. The
             # listener must never overwrite an active worker-owned
@@ -1288,6 +1305,18 @@ async def listener(
                 )
 
                 while not stop.is_set():
+                    if RUNTIME_MODE != "local" and not read_control()["desired"].get(
+                        "pipeline", True
+                    ):
+                        # Exiting the context closes the socket promptly. The
+                        # worker may safely finish its already-claimed batch.
+                        write_status(
+                            connected=False,
+                            stream_connection_state="paused",
+                            stage="paused",
+                            updated_at=utc_now(),
+                        )
+                        break
                     now_monotonic = time.monotonic()
                     if (
                         now_monotonic - extensions_refreshed_at

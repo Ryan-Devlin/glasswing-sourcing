@@ -1058,6 +1058,7 @@ function CertStreamPage() {
     return () => clearInterval(id);
   }, []);
   const s = status.data || {};
+  const desiredRunning = s.desired_running ?? s.running;
   const control = async (desired) => {
     setControlBusy(true);
     try {
@@ -1079,19 +1080,19 @@ function CertStreamPage() {
       </header>
       <div className="section-title">
         <h2>
-          {s.running ? "Running" : "Stopped"} ·{" "}
+          {desiredRunning ? (s.running ? "Running" : "Starting") : "Paused"} ·{" "}
           {String(s.stage || "waiting").replaceAll("_", " ")}
         </h2>
         <div>
           <button
-            disabled={controlBusy || s.running}
+            disabled={controlBusy || desiredRunning}
             onClick={() => (admin ? control(true) : requestLogin())}
           >
             <Play size={16} />
             Start
           </button>
           <button
-            disabled={controlBusy || !s.running}
+            disabled={controlBusy || !desiredRunning}
             onClick={() =>
               admin
                 ? window.confirm("Pause CertStream screening safely?") &&
