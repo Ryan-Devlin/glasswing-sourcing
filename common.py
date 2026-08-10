@@ -163,16 +163,41 @@ def upsert_csv(path: Path, new_rows: pd.DataFrame, key: str = "domain") -> pd.Da
     return combined
 
 
+def shared_training_label_rows() -> list[dict[str, object]]:
+    """Read labels shared across Railway services; local mode stays file-first."""
+    from classification_store import training_label_rows, using_classification_postgres
+
+    return training_label_rows() if using_classification_postgres() else []
+
+
 def read_basket_data(path: Path) -> pd.DataFrame:
-    """Read one two-column human training basket."""
+    """Read one basket, merging the shared cloud label store when active."""
     if not path.exists() or path.stat().st_size == 0:
-        return pd.DataFrame(columns=["domain_url", "rating"])
-    try:
-        frame = blank_missing(pd.read_csv(path, dtype=str))
-    except (pd.errors.EmptyDataError, pd.errors.ParserError):
-        return pd.DataFrame(columns=["domain_url", "rating"])
+        frame = pd.DataFrame(columns=["domain_url", "rating"])
+    else:
+        try:
+            frame = blank_missing(pd.read_csv(path, dtype=str))
+        except (pd.errors.EmptyDataError, pd.errors.ParserError):
+            frame = pd.DataFrame(columns=["domain_url", "rating"])
     if not {"domain_url", "rating"}.issubset(frame.columns):
-        return pd.DataFrame(columns=["domain_url", "rating"])
+        frame = pd.DataFrame(columns=["domain_url", "rating"])
+
+    # In Railway, the web and pipeline workers have different volumes. The
+    # database is therefore canonical for labels written by another service.
+    if path.resolve() in {YES_BASKET_DATA.resolve(), NO_BASKET_DATA.resolve()}:
+        wanted = "yes" if path.resolve() == YES_BASKET_DATA.resolve() else "no"
+        shared = pd.DataFrame(shared_training_label_rows())
+        if not shared.empty:
+            shared = shared[shared["label"].eq(wanted)].copy()
+            shared = pd.DataFrame({
+                "domain_url": shared["domain"].map(normalize_domain_url),
+                "rating": shared["rating"],
+            })
+            shared_domains = set(shared["domain_url"].map(stable_domain))
+            frame = frame[
+                ~frame["domain_url"].map(stable_domain).isin(shared_domains)
+            ]
+            frame = pd.concat([frame, shared], ignore_index=True)
     frame = frame[["domain_url", "rating"]].copy()
     frame["rating"] = pd.to_numeric(
         frame["rating"],
@@ -211,15 +236,26 @@ def read_label_metadata() -> pd.DataFrame:
     columns = ["domain", "label", "rating", "source", "reason", "labeled_at"]
     path = label_metadata_path()
     if not path.exists() or path.stat().st_size == 0:
-        return pd.DataFrame(columns=columns)
-    try:
-        frame = blank_missing(pd.read_csv(path, dtype=str))
-    except (pd.errors.EmptyDataError, pd.errors.ParserError):
-        return pd.DataFrame(columns=columns)
+        frame = pd.DataFrame(columns=columns)
+    else:
+        try:
+            frame = blank_missing(pd.read_csv(path, dtype=str))
+        except (pd.errors.EmptyDataError, pd.errors.ParserError):
+            frame = pd.DataFrame(columns=columns)
     for column in columns:
         if column not in frame:
             frame[column] = ""
     frame["domain"] = frame["domain"].map(stable_domain)
+    if path.resolve() == MANUAL.resolve() / "training_label_metadata.csv":
+        shared = pd.DataFrame(shared_training_label_rows())
+        if not shared.empty:
+            for column in columns:
+                if column not in shared:
+                    shared[column] = ""
+            shared["domain"] = shared["domain"].map(stable_domain)
+            shared_domains = set(shared["domain"])
+            frame = frame[~frame["domain"].isin(shared_domains)]
+            frame = pd.concat([frame[columns], shared[columns]], ignore_index=True)
     return frame[columns].drop_duplicates("domain", keep="last")
 
 
@@ -352,6 +388,45 @@ def save_basket_entries(
 
         create_manual_snapshot(reason=f"training_label:{normalized_basket}")
     return len(normalized_entries)
+
+
+def save_automated_basket_entries(
+    entries: object,
+    basket: str,
+    *,
+    source: str,
+    reason: str = "",
+) -> int:
+    """Append automated labels without replacing protected human truth.
+
+    Claude and rule classifications are useful silver labels, but a later
+    automated run must never move a domain that a person (or the verified
+    portfolio seed) already placed in the opposite basket.
+    """
+    normalized_source = normalized_label_source(source)
+    if normalized_source in {"", "human", "glasswing_portfolio"}:
+        raise ValueError("An automated label source is required.")
+
+    metadata = read_label_metadata()
+    protected = set(
+        metadata.loc[
+            metadata["source"].isin(["human", "glasswing_portfolio"]),
+            "domain",
+        ].map(stable_domain)
+    )
+    safe_entries = [
+        (domain_url, rating)
+        for domain_url, rating in entries
+        if stable_domain(domain_url) not in protected
+    ]
+    if not safe_entries:
+        return 0
+    return save_basket_entries(
+        safe_entries,
+        basket,
+        source=normalized_source,
+        reason=reason,
+    )
 
 
 def seed_yes_basket(domain_urls: object, rating: int = 100) -> int:

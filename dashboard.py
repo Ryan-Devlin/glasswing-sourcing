@@ -2167,6 +2167,31 @@ metric_1.metric("Investable", len(investable_candidates))
 metric_2.metric("Needs review", len(needs_review))
 metric_3.metric("Hard denied", len(hard_denied))
 
+bucket_chart = pd.DataFrame({
+    "Bucket": ["Investable", "Needs Review", "Hard Denied"],
+    "Companies": [
+        len(investable_candidates),
+        len(needs_review),
+        len(hard_denied),
+    ],
+})
+if int(bucket_chart["Companies"].sum()) > 0:
+    st.bar_chart(
+        bucket_chart,
+        x="Bucket",
+        y="Companies",
+        x_label="",
+        y_label="Companies",
+        height=280,
+        color="#34C6B3",
+    )
+else:
+    st.info(
+        "The classification chart has no saved outcomes to display for "
+        "this scope yet. Choose All History or wait for the first websites "
+        "to finish screening."
+    )
+
 retained_total = funnel_screened
 st.caption(
     f"The three review tabs contain {retained_total:,} retained records, "

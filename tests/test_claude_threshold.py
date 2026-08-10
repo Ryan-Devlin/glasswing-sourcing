@@ -9,6 +9,49 @@ import claude_classifier
 
 
 class ClaudeThresholdTests(unittest.TestCase):
+    def test_empty_response_is_retryable_failure_not_reject(self):
+        with self.assertRaises(claude_classifier.DiligenceResponseError):
+            claude_classifier.validate_response_text("")
+
+    def test_maybe_response_is_retryable_failure_not_bucket_output(self):
+        response = """
+        <decision>MAYBE</decision><score>50</score>
+        <summary>Unclear company</summary><reason>Needs more evidence</reason>
+        """
+        with self.assertRaises(claude_classifier.DiligenceResponseError):
+            claude_classifier.validate_response_text(response)
+
+    def test_complete_binary_response_is_valid(self):
+        response = """
+        <decision>REJECT</decision><score>20</score>
+        <summary>Consumer photo editor</summary><reason>Not enterprise software</reason>
+        """
+        claude_classifier.validate_response_text(response)
+
+    def test_decisive_results_append_to_corresponding_baskets(self):
+        approved = pd.DataFrame([
+            {"domain": "investable.ai", "llm_fit_score": 91},
+        ])
+        denied = pd.DataFrame([
+            {"domain": "hard-denied.ai", "llm_fit_score": 12},
+        ])
+
+        with patch.object(
+            claude_classifier, "save_automated_basket_entries"
+        ) as save:
+            save.side_effect = [1, 1]
+            counts = claude_classifier.append_claude_buckets(approved, denied)
+
+        self.assertEqual(counts, (1, 1))
+        self.assertEqual(save.call_args_list[0].args, (
+            [("investable.ai", 91)], "yes",
+        ))
+        self.assertEqual(save.call_args_list[1].args, (
+            [("hard-denied.ai", 12)], "no",
+        ))
+        self.assertEqual(save.call_args_list[0].kwargs["source"], "claude")
+        self.assertEqual(save.call_args_list[1].kwargs["source"], "claude")
+
     def test_payload_is_lean_but_keeps_core_evidence(self):
         payload = claude_classifier.company_payload({
             "domain": "example.ai",

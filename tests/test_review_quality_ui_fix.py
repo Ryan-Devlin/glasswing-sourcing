@@ -168,6 +168,16 @@ class ReviewQualityUiFixTests(unittest.TestCase):
         self.assertNotIn('.metric(\n    "Classified"', self.dashboard)
         self.assertNotIn('.metric("Classified"', self.dashboard)
 
+    def test_certstream_bucket_chart_has_a_real_render_and_empty_state(self):
+        self.assertIn('bucket_chart = pd.DataFrame({', self.dashboard)
+        self.assertIn('st.bar_chart(', self.dashboard)
+        self.assertIn('x="Bucket"', self.dashboard)
+        self.assertIn('y="Companies"', self.dashboard)
+        self.assertIn(
+            "The classification chart has no saved outcomes",
+            self.dashboard,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

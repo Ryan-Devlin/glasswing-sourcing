@@ -47,6 +47,32 @@ class InvestmentBasketTests(unittest.TestCase):
             self.assertEqual(saved.loc[0, "domain_url"], "https://strong.ai")
             self.assertEqual(saved.loc[0, "rating"], 88)
 
+    def test_cloud_basket_merges_labels_written_by_another_worker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            yes_path, no_path = self.basket_paths(directory)
+            pd.DataFrame([{
+                "domain_url": "https://local.ai", "rating": 70,
+            }]).to_csv(yes_path, index=False)
+            shared = [{
+                "domain": "remote.ai",
+                "label": "yes",
+                "rating": 89,
+                "source": "claude",
+                "reason": "claude_keep",
+                "labeled_at": "2026-08-10T00:00:00Z",
+            }]
+            with (
+                patch.object(common, "YES_BASKET_DATA", yes_path),
+                patch.object(common, "NO_BASKET_DATA", no_path),
+                patch.object(common, "shared_training_label_rows", return_value=shared),
+            ):
+                saved = common.read_basket_data(yes_path)
+
+            self.assertEqual(
+                set(saved.domain_url),
+                {"https://local.ai", "https://remote.ai"},
+            )
+
     def test_human_edit_records_separate_gold_provenance(self):
         with tempfile.TemporaryDirectory() as directory:
             yes_path, no_path = self.basket_paths(directory)
@@ -77,6 +103,49 @@ class InvestmentBasketTests(unittest.TestCase):
             self.assertTrue(yes.empty)
             self.assertEqual(no.loc[0, "domain_url"], "https://flip.ai")
             self.assertEqual(no.loc[0, "rating"], 0)
+
+    def test_automated_label_does_not_overwrite_human_decision(self):
+        with tempfile.TemporaryDirectory() as directory:
+            yes_path, no_path = self.basket_paths(directory)
+            with (
+                patch.object(common, "YES_BASKET_DATA", yes_path),
+                patch.object(common, "NO_BASKET_DATA", no_path),
+            ):
+                common.save_basket_entry(
+                    "protected.ai", "yes", 92, source="human"
+                )
+                saved = common.save_automated_basket_entries(
+                    [("protected.ai", 10), ("new-reject.ai", 20)],
+                    "no",
+                    source="claude",
+                    reason="claude_reject",
+                )
+                yes = common.read_basket_data(yes_path)
+                no = common.read_basket_data(no_path)
+
+            self.assertEqual(saved, 1)
+            self.assertEqual(yes.domain_url.tolist(), ["https://protected.ai"])
+            self.assertEqual(no.domain_url.tolist(), ["https://new-reject.ai"])
+
+    def test_automated_label_can_update_an_earlier_automated_label(self):
+        with tempfile.TemporaryDirectory() as directory:
+            yes_path, no_path = self.basket_paths(directory)
+            with (
+                patch.object(common, "YES_BASKET_DATA", yes_path),
+                patch.object(common, "NO_BASKET_DATA", no_path),
+            ):
+                common.save_automated_basket_entries(
+                    [("changed.ai", 40)], "no", source="claude"
+                )
+                common.save_automated_basket_entries(
+                    [("changed.ai", 88)], "yes", source="claude"
+                )
+                yes = common.read_basket_data(yes_path)
+                no = common.read_basket_data(no_path)
+
+            self.assertEqual(yes.domain_url.tolist(), ["https://changed.ai"])
+            self.assertEqual(yes.rating.tolist(), [88])
+            self.assertTrue(no.empty)
 
     def test_basket_rating_must_be_zero_to_one_hundred(self):
         with tempfile.TemporaryDirectory() as directory:

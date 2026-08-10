@@ -77,7 +77,7 @@ stage, ownership, maturity, and enterprise fit.
 
 - `KEEP` becomes a Silver Yes label.
 - `REJECT` becomes a Silver No label.
-- `MAYBE` remains unlabeled.
+- There is no third/MAYBE outcome.
 
 Hourly, daily, and batch limits live in `data/run_config.json`.
 

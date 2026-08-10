@@ -1142,6 +1142,9 @@ def maybe_run_claude(batch_path: Path) -> int:
             "--max-calls",
             str(calls),
         ]
+        attempt_report = LLM / "claude_attempt_report.json"
+        attempt_report.unlink(missing_ok=True)
+        command.extend(["--attempt-report", str(attempt_report)])
 
         completed_before = diligenced_domains()
         try:
@@ -1171,12 +1174,22 @@ def maybe_run_claude(batch_path: Path) -> int:
 
         now = utc_now()
         domains = sorted(diligenced_domains() - completed_before)
+        attempted_domains = domains
+        try:
+            report = json.loads(attempt_report.read_text(encoding="utf-8"))
+            attempted_domains = list(dict.fromkeys(
+                stable_domain(domain)
+                for domain in report.get("attempted_domains", [])
+                if stable_domain(domain)
+            ))
+        except (OSError, ValueError, TypeError):
+            pass
 
         conn.executemany(
             "INSERT INTO claude_calls(called_at, domain) VALUES (?, ?)",
             [
                 (now, domain)
-                for domain in domains
+                for domain in attempted_domains
                 if domain
             ],
         )
@@ -1197,7 +1210,7 @@ def maybe_run_claude(batch_path: Path) -> int:
             claude_warning=views_warning,
             updated_at=utc_now(),
         )
-        return len(domains)
+        return len(attempted_domains)
     finally:
         conn.close()
 

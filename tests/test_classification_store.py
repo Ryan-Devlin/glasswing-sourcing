@@ -108,6 +108,65 @@ def test_claude_diligence_is_shared_and_upserted(tmp_path):
     assert rows[0]["llm_fit_score"] == 88
 
 
+def test_historical_claude_results_backfill_baskets_without_overwriting_human(tmp_path):
+    database = tmp_path / "classifications.sqlite3"
+    upsert_claude_diligence([
+        {"domain": "keep.ai", "llm_decision": "KEEP", "llm_fit_score": 90},
+        {"domain": "reject.ai", "llm_decision": "REJECT", "llm_fit_score": 15},
+        {"domain": "human.ai", "llm_decision": "REJECT", "llm_fit_score": 5},
+    ], path=database)
+    upsert_training_labels([{
+        "domain": "human.ai", "label": "yes", "rating": 95, "source": "human",
+    }], path=database)
+
+    assert classification_store.backfill_claude_training_labels(path=database) == 2
+    labels = {
+        row["domain"]: row
+        for row in classification_store.training_label_rows(path=database)
+    }
+    assert labels["keep.ai"]["label"] == "yes"
+    assert labels["reject.ai"]["label"] == "no"
+    assert labels["human.ai"]["label"] == "yes"
+    assert labels["human.ai"]["source"] == "human"
+
+
+def test_failed_and_empty_claude_results_are_purged_for_retry(tmp_path):
+    database = tmp_path / "classifications.sqlite3"
+    upsert_claude_diligence([
+        {
+            "domain": "failed.ai",
+            "llm_decision": "REJECT",
+            "llm_reasoning": "Diligence call failed",
+            "llm_diligence_error": "TimeoutError",
+        },
+        {
+            "domain": "empty.ai",
+            "llm_decision": "REJECT",
+            "llm_product_summary": "",
+            "llm_reasoning": "",
+            "llm_diligence_sources": "",
+        },
+        {
+            "domain": "real-reject.ai",
+            "llm_decision": "REJECT",
+            "llm_product_summary": "Consumer photo editor",
+            "llm_reasoning": "Consumer product",
+        },
+    ], path=database)
+    classification_store.backfill_claude_training_labels(path=database)
+
+    assert classification_store.purge_invalid_claude_diligence(path=database) == 2
+    remaining = classification_store.query_claude_diligence(
+        ["failed.ai", "empty.ai", "real-reject.ai"], path=database
+    )
+    assert [row["domain"] for row in remaining] == ["real-reject.ai"]
+    labels = {
+        row["domain"]: row
+        for row in classification_store.training_label_rows(path=database)
+    }
+    assert set(labels) == {"real-reject.ai"}
+
+
 def test_automated_exclusion_is_tiny_and_human_truth_overrides_it(
     tmp_path,
     monkeypatch,

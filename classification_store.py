@@ -992,6 +992,105 @@ def upsert_training_labels(
     return len(normalized)
 
 
+def training_label_rows(
+    *,
+    path: Path | str = CLASSIFICATION_DB,
+) -> list[dict[str, object]]:
+    """Return the canonical cross-service Yes/No label set."""
+    if not using_classification_postgres() and not Path(path).exists():
+        return []
+    try:
+        with connect_store(path, read_only=True) as conn:
+            rows = conn.execute(
+                "SELECT domain,label,rating,source,reason,labeled_at "
+                "FROM training_labels"
+            ).fetchall()
+    except (sqlite3.OperationalError, PostgresError):
+        # Safe while an older deployment is still creating the table.
+        return []
+    return [dict(row) for row in rows]
+
+
+def backfill_claude_training_labels(
+    *,
+    path: Path | str = CLASSIFICATION_DB,
+) -> int:
+    """Reconcile historical decisive Claude results into shared baskets."""
+    now = utc_now()
+    with connect_store(path) as conn:
+        begin_immediate(conn)
+        before = conn.execute(
+            "SELECT COUNT(*) AS count FROM training_labels WHERE source='claude'"
+        ).fetchone()["count"]
+        conn.execute(
+            """
+            INSERT INTO training_labels(
+                domain,label,rating,source,reason,labeled_at
+            )
+            SELECT domain,
+                   CASE decision WHEN 'KEEP' THEN 'yes' ELSE 'no' END,
+                   fit_score,'claude',
+                   CASE decision WHEN 'KEEP' THEN 'claude_keep' ELSE 'claude_reject' END,
+                   COALESCE(NULLIF(updated_at, ''), ?)
+            FROM claude_diligence
+            WHERE decision IN ('KEEP','REJECT')
+            ON CONFLICT(domain) DO UPDATE SET
+                label=excluded.label,
+                rating=excluded.rating,
+                source=excluded.source,
+                reason=excluded.reason,
+                labeled_at=excluded.labeled_at
+            WHERE lower(training_labels.source) NOT IN ('human','glasswing_portfolio')
+            """,
+            (now,),
+        )
+        after = conn.execute(
+            "SELECT COUNT(*) AS count FROM training_labels WHERE source='claude'"
+        ).fetchone()["count"]
+        conn.commit()
+    return max(0, int(after) - int(before))
+
+
+def purge_invalid_claude_diligence(
+    *,
+    path: Path | str = CLASSIFICATION_DB,
+) -> int:
+    """Remove only failed/empty automated results so they can be retried."""
+    invalid_where = """
+        reasoning='Diligence call failed'
+        OR result_json LIKE '%\"diligence_error\"%'
+        OR (
+            trim(product_summary)=''
+            AND trim(reasoning)=''
+            AND trim(diligence_sources)=''
+        )
+    """
+    with connect_store(path) as conn:
+        invalid = [
+            str(row["domain"])
+            for row in conn.execute(
+                f"SELECT domain FROM claude_diligence WHERE {invalid_where}"
+            ).fetchall()
+        ]
+        if not invalid:
+            return 0
+        begin_immediate(conn)
+        for start in range(0, len(invalid), 800):
+            batch = invalid[start : start + 800]
+            marks = ",".join("?" for _ in batch)
+            conn.execute(
+                "DELETE FROM training_labels "
+                f"WHERE source='claude' AND domain IN ({marks})",
+                batch,
+            )
+            conn.execute(
+                f"DELETE FROM claude_diligence WHERE domain IN ({marks})",
+                batch,
+            )
+        conn.commit()
+    return len(invalid)
+
+
 def remove_training_labels(
     domains: Iterable[str],
     *,

@@ -16,11 +16,15 @@ from anthropic import AsyncAnthropic
 from dotenv import load_dotenv
 
 from common import (
-    FILTERED, LLM, clean, get_model, save_basket_entry, stable_domain,
-    upsert_csv,
+    FILTERED, LLM, atomic_write_json, clean, get_model,
+    save_automated_basket_entries, stable_domain, upsert_csv,
 )
 from filter import score_text
-from classification_store import upsert_claude_diligence
+from classification_store import (
+    backfill_claude_training_labels,
+    purge_invalid_claude_diligence,
+    upsert_claude_diligence,
+)
 from diligence_logic import (
     DILIGENCE_VERSION,
     apply_hard_guards,
@@ -122,6 +126,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--reclassify", action="store_true")
+    parser.add_argument("--attempt-report", default="")
     return parser.parse_args()
 
 
@@ -193,32 +198,31 @@ def dry_assessment(row: dict) -> dict:
 
 
 
-def failed_assessment(row: dict, exc: Exception) -> dict:
-    """Keep one bad API response from crashing the entire pipeline.
+class DiligenceResponseError(ValueError):
+    """The API returned no usable decisive diligence result."""
 
-    No MAYBE to fall back on -- a failed call must resolve to REJECT, never
-    an accidental KEEP.
-    """
-    return {
-        "decision": "REJECT",
-        "fit_score": min(to_int(row.get("rule_score", 0), 0), 50),
-        "category": clean(row.get("rule_thesis_pillar", "unclear")),
-        "us_based": "yes" if row.get("location_status") == "US" else "unclear",
-        "funding_millions_usd": -1.0,
-        "latest_round": "unknown",
-        "institutional_rounds": -1,
-        "company_maturity": "unknown",
-        "ownership_status": "unclear",
-        "ownership_evidence": "",
-        "product_summary": "Manual review required",
-        "reasoning": "Diligence call failed",
-        "concerns": clamp_words(type(exc).__name__, 5),
-        "funding_evidence": "",
-        "location_evidence": clean(row.get("location_evidence", "")),
-        "diligence_sources": "",
-        "diligence_version": DILIGENCE_VERSION,
-        "diligence_error": f"{type(exc).__name__}: {exc}"[:300],
-    }
+
+def validate_response_text(text: str) -> None:
+    """Reject empty/malformed responses as retryable call failures."""
+    required = ("decision", "score", "summary", "reason")
+    missing = [
+        name
+        for name in required
+        if not re.search(
+            rf"<{name}>\s*[^<]+?\s*</{name}>",
+            text or "",
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+    ]
+    decision_match = re.search(
+        r"<decision>\s*([^<]+?)\s*</decision>",
+        text or "",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    decision = decision_match.group(1).strip().upper() if decision_match else ""
+    if missing or decision not in {"KEEP", "REJECT"}:
+        detail = f"missing tags: {','.join(missing)}" if missing else "invalid decision"
+        raise DiligenceResponseError(detail)
 
 async def classify(
     client: AsyncAnthropic,
@@ -251,6 +255,7 @@ async def classify(
         )
 
     text, urls = response_text_and_urls(response)
+    validate_response_text(text)
     assessment = parse_assessment(
         text,
         urls,
@@ -524,11 +529,45 @@ def reconcile_masters(approved: pd.DataFrame, denied: pd.DataFrame) -> tuple[pd.
     return approved_master, denied_master
 
 
+def append_claude_buckets(approved: pd.DataFrame, denied: pd.DataFrame) -> tuple[int, int]:
+    """Persist every decisive Claude result in its corresponding basket."""
+    protected_portfolio = set(GLASSWING_PORTFOLIO_DOMAINS)
+
+    def entries(frame: pd.DataFrame) -> list[tuple[str, int]]:
+        result = []
+        for _, row in frame.iterrows():
+            domain = stable_domain(row.get("domain", ""))
+            if domain and domain not in protected_portfolio:
+                result.append((domain, int(row["llm_fit_score"])))
+        return result
+
+    yes_count = save_automated_basket_entries(
+        entries(approved),
+        "yes",
+        source="claude",
+        reason="claude_keep",
+    )
+    no_count = save_automated_basket_entries(
+        entries(denied),
+        "no",
+        source="claude",
+        reason="claude_reject",
+    )
+    return yes_count, no_count
+
+
 async def run() -> None:
     options = parse_args()
     path = Path(options.csv_path).expanduser()
     if not path.exists():
         raise SystemExit(f"Input CSV not found: {path}")
+
+    # Older versions persisted API failures and empty responses as REJECT.
+    # Remove only those invalid automated rows before queue selection so the
+    # affected domains (for example ability.ai) become eligible for retry.
+    repaired = purge_invalid_claude_diligence()
+    if repaired:
+        print(f"Queued {repaired} invalid historical Claude result(s) for retry.")
 
     frame, queue_stats = prepare_input(
         path,
@@ -540,6 +579,7 @@ async def run() -> None:
         options.exceptional_score,
     )
     rows = frame.to_dict("records")
+    attempted_domains: list[str] = []
 
     print(
         "Diligence queue | "
@@ -563,17 +603,44 @@ async def run() -> None:
 
         client = AsyncAnthropic()
         sem = asyncio.Semaphore(options.workers)
+        attempted_domains = [
+            stable_domain(row.get("domain", "")) for row in rows
+        ]
         raw_results = await asyncio.gather(*[
             classify(client, sem, row, options.model)
             for row in rows
         ], return_exceptions=True)
 
+        successful_rows = []
         assessments = []
+        failures: list[tuple[str, Exception]] = []
         for row, result in zip(rows, raw_results):
             if isinstance(result, Exception):
-                assessments.append(failed_assessment(row, result))
+                failures.append((stable_domain(row.get("domain", "")), result))
             else:
+                successful_rows.append(row)
                 assessments.append(result)
+
+        for domain, exc in failures:
+            print(
+                "Diligence retry queued | "
+                f"domain={domain or 'unknown'} | "
+                f"error={type(exc).__name__}: {str(exc)[:180]}",
+            )
+        rows = successful_rows
+
+        if options.attempt_report:
+            atomic_write_json(Path(options.attempt_report), {
+                "attempted_domains": [d for d in attempted_domains if d],
+                "successful_domains": [
+                    stable_domain(row.get("domain", "")) for row in rows
+                ],
+                "failed_domains": [domain for domain, _ in failures if domain],
+            })
+
+    if not rows:
+        print("No valid Claude decisions persisted; failed calls remain retryable.")
+        return
 
     merged: list[dict] = []
     for row, assessment in zip(rows, assessments):
@@ -614,27 +681,14 @@ async def run() -> None:
         [approved, denied], ignore_index=True, sort=False
     )
     upsert_claude_diligence(final_results.to_dict(orient="records"))
+    # Also repairs labels from calls completed before cross-service baskets
+    # became database-backed (including the existing weekend backlog).
+    backfill_claude_training_labels()
     approved_master, denied_master = reconcile_masters(approved, denied)
 
-    # Every approved row is a KEEP and every denied row is a REJECT by
-    # construction above -- these become training labels directly.
-    keeps = approved
-    rejects = denied
-    protected_portfolio = set(GLASSWING_PORTFOLIO_DOMAINS)
-    for _, row in keeps.iterrows():
-        domain = stable_domain(row.get("domain", ""))
-        if domain and domain not in protected_portfolio:
-            save_basket_entry(
-                domain, "yes", int(row["llm_fit_score"]),
-                source="claude", reason=clean(row.get("llm_reasoning", "")),
-            )
-    for _, row in rejects.iterrows():
-        domain = stable_domain(row.get("domain", ""))
-        if domain and domain not in protected_portfolio:
-            save_basket_entry(
-                domain, "no", int(row["llm_fit_score"]),
-                source="claude", reason=clean(row.get("llm_reasoning", "")),
-            )
+    # Every result is decisive and is appended to the matching silver-label
+    # basket. Protected human/portfolio truth is never overwritten.
+    append_claude_buckets(approved, denied)
 
     print(
         f"Web diligence searches: {len(rows)} | "

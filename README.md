@@ -114,10 +114,10 @@ Predominantly non-English sites are capped at 5; confirmed non-US companies at
 placeholder pages are capped at 1 and 3. The dashboard exposes the same capped
 score used by routing and basket transfers.
 
-Optional Claude diligence remains a secondary product signal. KEEP, REJECT,
-and MAYBE can help prioritize review, but none enter Yes/No training data
-without an explicit human action. Confirmed Glasswing portfolio ground truth
-and manual labels are protected from automatic movement and payload cleanup.
+Optional Claude diligence remains a secondary product signal with exactly two
+outcomes. KEEP is appended to the Yes basket and REJECT to the No basket as a
+silver label. Confirmed Glasswing portfolio ground truth and manual labels are
+protected from automatic movement and payload cleanup.
 
 Yes Basket membership is an explicit Investable decision. No Basket membership
 is an explicit Hard Denied decision. Human/portfolio provenance is tracked in
