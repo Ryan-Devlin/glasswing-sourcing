@@ -452,6 +452,15 @@ def diagnostics(conn: sqlite3.Connection) -> dict[str, int | str]:
         "crawled": conn.execute(
             "SELECT count(*) AS count FROM domains WHERE last_crawled_at IS NOT NULL"
         ).fetchone()["count"],
+        "successful": conn.execute(
+            "SELECT count(*) AS count FROM domains "
+            "WHERE latest_crawl_status='success'"
+        ).fetchone()["count"],
+        "failed": conn.execute(
+            "SELECT count(*) AS count FROM domains "
+            "WHERE last_crawled_at IS NOT NULL "
+            "AND latest_crawl_status NOT IN ('success','pending','')"
+        ).fetchone()["count"],
         "pages": conn.execute("SELECT count(*) AS count FROM pages").fetchone()["count"],
         "indexed_pages": conn.execute(indexed_pages_sql).fetchone()["count"],
         "parked": conn.execute(

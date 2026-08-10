@@ -253,6 +253,57 @@ def test_ai_search_always_returns_a_rows_array(monkeypatch):
     assert response.json()["stats"]["domains"] == 12
 
 
+def test_ai_corpus_metrics_expose_real_outcomes_and_worker_heartbeat(monkeypatch):
+    class _Cursor:
+        def fetchone(self):
+            return {"updated_at": "2026-08-10T20:00:00Z"}
+
+    class _Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def execute(self, *args):
+            return _Cursor()
+
+    monkeypatch.setattr(web_api, "ai_connect", lambda *args, **kwargs: _Connection())
+    monkeypatch.setattr(
+        web_api,
+        "ai_diagnostics",
+        lambda conn: {
+            "domains": 10,
+            "pending": 2,
+            "crawled": 8,
+            "successful": 6,
+            "failed": 2,
+        },
+    )
+    monkeypatch.setattr(
+        web_api,
+        "ai_worker_state",
+        lambda conn: {"crawler_status": "error_retrying", "last_crawl_error": "deadlock"},
+    )
+    monkeypatch.setattr(web_api, "search_stats", lambda *args: {"indexed_pages": 14})
+
+    response = client.get("/api/corpus/ai/stats")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "available": 10,
+        "pending": 2,
+        "processed": 8,
+        "crawled": 6,
+        "failed": 2,
+        "searchable": 14,
+        "crawler_status": "error_retrying",
+        "worker_status": "unknown",
+        "last_error": "deadlock",
+        "updated_at": "2026-08-10T20:00:00Z",
+    }
+
+
 def test_manual_claude_review_does_not_repeat_completed_domain(monkeypatch):
     monkeypatch.setattr(
         web_api,

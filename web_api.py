@@ -978,17 +978,22 @@ def corpus_stats(kind: Literal["ai", "zone"]):
     if kind == "ai":
         with ai_connect(AI_SEARCH_DB, read_only=True) as conn:
             details = ai_diagnostics(conn)
-            failed = int(conn.execute(
-                "SELECT count(*) AS count FROM domains "
-                "WHERE last_crawled_at IS NULL AND latest_crawl_status NOT IN ('pending','')"
-            ).fetchone()["count"])
+            worker = ai_worker_state(conn)
+            heartbeat = conn.execute(
+                "SELECT max(updated_at) AS updated_at FROM worker_state"
+            ).fetchone()["updated_at"]
         searchable = search_stats(AI_SEARCH_DB)
         return {
             "available": details.get("domains", 0),
             "pending": details.get("pending", 0),
-            "crawled": details.get("crawled", 0),
-            "failed": failed,
+            "processed": details.get("crawled", 0),
+            "crawled": details.get("successful", 0),
+            "failed": details.get("failed", 0),
             "searchable": searchable.get("indexed_pages", 0),
+            "crawler_status": worker.get("crawler_status", "unknown"),
+            "worker_status": worker.get("worker_status", "unknown"),
+            "last_error": worker.get("last_crawl_error", ""),
+            "updated_at": heartbeat or "",
         }
     with zone_connect(ZONE_UNIVERSE_DB, read_only=True) as conn:
         details = zone_diagnostics(conn)

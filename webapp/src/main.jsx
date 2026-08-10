@@ -1521,6 +1521,13 @@ function SearchCorpusPage({ kind }) {
   const [upload, setUpload] = useState(null);
   const [uploading, setUploading] = useState(false);
   const rows = Array.isArray(result.data?.rows) ? result.data.rows : [];
+  const crawlerUpdatedAt = Date.parse(metrics.data?.updated_at || "");
+  const crawlerStale = Boolean(
+    isAi &&
+    Number(metrics.data?.pending || 0) > 0 &&
+    Number.isFinite(crawlerUpdatedAt) &&
+    Date.now() - crawlerUpdatedAt > 120000,
+  );
   useEffect(() => {
     if (!isAi || !metrics.data?.pending) return;
     const timer = setInterval(
@@ -1579,13 +1586,35 @@ function SearchCorpusPage({ kind }) {
             value={fmt(metrics.data.available)}
           />
           <Metric label="Waiting to scrape" value={fmt(metrics.data.pending)} />
-          <Metric label="Crawled" value={fmt(metrics.data.crawled)} />
+          <Metric
+            label={isAi ? "Successfully scraped" : "Crawled"}
+            value={fmt(metrics.data.crawled)}
+          />
           <Metric
             label="Searchable pages"
             value={fmt(metrics.data.searchable)}
           />
           <Metric label="Failed" value={fmt(metrics.data.failed)} />
         </div>
+      )}
+      {isAi && metrics.data && (
+        <section className={`notice corpus-status ${crawlerStale ? "stale" : ""}`}>
+          <strong>
+            CSV crawler: {crawlerStale
+              ? "stalled"
+              : String(metrics.data.crawler_status || "unknown").replaceAll("_", " ")}
+          </strong>
+          <span>
+            {fmt(metrics.data.processed)} processed total
+            {metrics.data.updated_at
+              ? ` · last worker update ${new Date(metrics.data.updated_at).toLocaleString()}`
+              : ""}
+          </span>
+          {crawlerStale && <span>The worker heartbeat is stale and needs attention.</span>}
+          {metrics.data.last_error && (
+            <span className="error-text">Last error: {metrics.data.last_error}</span>
+          )}
+        </section>
       )}
       <div className="segmented">
         <button

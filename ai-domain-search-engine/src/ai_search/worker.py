@@ -89,6 +89,25 @@ def sync_crawled_domains_to_original_queue(database) -> dict[str, int]:
 AUTO_PAUSE_REASON = "auto_full_coverage"
 
 
+def recover_crawl_transaction(conn, exc: Exception) -> None:
+    """Make a failed Postgres batch usable again and persist its error.
+
+    Deadlocks abort the complete transaction. Writing worker state before a
+    rollback raises InFailedSqlTransaction and used to kill crawl_loop while
+    leaving the container—and its stale "running" heartbeat—alive.
+    """
+    try:
+        conn.rollback()
+    except Exception:
+        logging.exception("Could not roll back failed crawler transaction")
+        return
+    try:
+        set_worker_state(conn, "crawler_status", "error_retrying")
+        set_worker_state(conn, "last_crawl_error", str(exc)[:300])
+    except Exception:
+        logging.exception("Could not persist crawler error state")
+
+
 async def crawl_loop(database, settings, stop: asyncio.Event) -> None:
     while not stop.is_set():
         if RUNTIME_MODE != "local" and not read_control()["desired"].get(
@@ -141,10 +160,7 @@ async def crawl_loop(database, settings, stop: asyncio.Event) -> None:
                 )
         except Exception as exc:
             logging.exception("Crawler batch failed")
-            set_worker_state(
-                conn, "crawler_status", f"error: {type(exc).__name__}"
-            )
-            set_worker_state(conn, "last_crawl_error", str(exc)[:300])
+            recover_crawl_transaction(conn, exc)
         finally:
             conn.close()
         try:

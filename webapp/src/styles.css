@@ -732,6 +732,16 @@ tbody tr:hover {
 .notice {
   background: #e5f5f0;
 }
+.corpus-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+}
+.corpus-status.stale {
+  background: #fee5e1;
+  color: #982f24;
+}
 .upload {
   display: flex;
   gap: 16px;
