@@ -525,7 +525,7 @@ def global_search(q: str = Query(min_length=1, max_length=200)):
                     if str(row["latest_crawl_status"] or "pending") != "success"
                     else "Website is registered in Domain Intake."
                 ),
-                "score": "",
+                "score": "Scoring",
                 "source": f"Domain Intake · {str(row['latest_crawl_status'] or 'pending').replace('_', ' ')}",
                 "updated": str(row["last_crawled_at"] or row["last_seen_at"] or ""),
             }

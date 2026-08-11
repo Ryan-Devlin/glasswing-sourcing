@@ -23,6 +23,7 @@ from runtime_control import (
     request_services,
     service_requested_by,
 )
+from db_backend import using_postgres
 
 from .config import PROJECT_ROOT, load_settings
 from .crawler import crawl_pending
@@ -69,7 +70,10 @@ def release_worker_pid() -> None:
 
 def sync_crawled_domains_to_original_queue(database) -> dict[str, int]:
     queue_db = PROJECT_ROOT.parent / "data" / "pipeline_queue.sqlite3"
-    if not queue_db.exists():
+    if (
+        not using_postgres("PIPELINE_DATABASE_URL")
+        and not queue_db.exists()
+    ):
         return {"requested": 0, "queued": 0, "already_known": 0}
     domains = screenable_domains(
         database,

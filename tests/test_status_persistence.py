@@ -359,6 +359,11 @@ class StatusPersistenceTests(unittest.TestCase):
                     "VALUES ('unselected.app', '2026-08-07T00:00:00Z', "
                     "'2026-08-07T00:00:00Z')"
                 )
+                conn.execute(
+                    "INSERT INTO domains(domain, first_seen, last_seen, last_seen_run_id) "
+                    "VALUES ('manual-intake.com', '2026-08-08T00:00:00Z', "
+                    "'2026-08-08T00:00:00Z', 'ai_search_cache_reuse_v1')"
+                )
                 conn.commit()
 
                 claimed = continuous_pipeline.claim_batch(
@@ -369,8 +374,9 @@ class StatusPersistenceTests(unittest.TestCase):
                 ).fetchone()["status"]
                 conn.close()
 
-        self.assertEqual(claimed[0], "just-discovered.ai")
-        self.assertEqual(claimed[1], "stale-backlog-item.ai")
+        self.assertEqual(claimed[0], "manual-intake.com")
+        self.assertEqual(claimed[1], "just-discovered.ai")
+        self.assertEqual(claimed[2], "stale-backlog-item.ai")
         self.assertEqual(unselected_status, "pending")
 
     def test_duplicate_domain_registration_is_idempotent(self):

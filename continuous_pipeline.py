@@ -624,7 +624,7 @@ def claim_batch(
         candidate_limit = min(max(size * 10, size), 2000)
         rows = conn.execute(
             """
-            SELECT domain, first_seen FROM domains
+            SELECT domain, first_seen, last_seen_run_id FROM domains
             WHERE status='pending'
               AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
             ORDER BY first_seen DESC
@@ -635,7 +635,11 @@ def claim_batch(
         if allowed_extensions:
             rows = [
                 row for row in rows
-                if domain_extension(str(row["domain"])) in allowed_extensions
+                if (
+                    domain_extension(str(row["domain"])) in allowed_extensions
+                    or str(row["last_seen_run_id"] or "")
+                    == "ai_search_cache_reuse_v1"
+                )
             ]
         priority = _corpus_priority_for_domains([row["domain"] for row in rows])
         # Newest first within each priority tier -- confirmed live: a
@@ -742,10 +746,23 @@ def claim_batch(
             (now, size),
         ).fetchall()
 
+    row_domains = [str(row["domain"]) for row in rows]
+    manual_domains: set[str] = set()
+    if allowed_extensions and row_domains:
+        placeholders = ",".join("?" for _ in row_domains)
+        manual_domains = {
+            str(row["domain"])
+            for row in conn.execute(
+                f"SELECT domain FROM domains WHERE domain IN ({placeholders}) "
+                "AND last_seen_run_id='ai_search_cache_reuse_v1'",
+                row_domains,
+            ).fetchall()
+        }
     domains = [
-        row["domain"] for row in rows
+        domain for domain in row_domains
         if not allowed_extensions
-        or domain_extension(str(row["domain"])) in allowed_extensions
+        or domain_extension(domain) in allowed_extensions
+        or domain in manual_domains
     ]
     if not domains:
         return []
