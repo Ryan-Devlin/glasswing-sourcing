@@ -9,6 +9,7 @@ import { createRoot } from "react-dom/client";
 import {
   Activity,
   Bot,
+  Building2,
   CheckCircle2,
   Database,
   Download,
@@ -39,6 +40,7 @@ const NAV = [
   ["home", "Home", Home],
   ["certstream", "CertStream Scraper", Activity],
   ["formd", "Form D Deal Flow", FileText],
+  ["incorporations", "New Incorporations", Building2],
   ["csv", "CSV Scraper", Database],
   ["domains", "Domain Crawler (.com, .app)", Globe2],
   ["health", "System Health", HeartPulse],
@@ -1914,6 +1916,40 @@ function FormDPage() {
   );
 }
 
+function IncorporationsPage() {
+  const { admin, requestLogin } = useAdmin();
+  const [bucket, setBucket] = useState("review");
+  const [tick, setTick] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const result = useApi(`/api/incorporations?bucket=${bucket}&limit=100`, [bucket, tick]);
+  const data = result.data;
+  const action = async (path, body) => {
+    if (!admin) return requestLogin();
+    setBusy(true);
+    try { await api(path, { method: "POST", ...(body ? { body: JSON.stringify(body) } : {}) }); setTick((value) => value + 1); }
+    finally { setBusy(false); }
+  };
+  return <>
+    <header><p className="eyebrow">Pre-fundraising signals</p><h1>New Incorporations</h1><p>New Delaware corporations that resolve to real operating-company websites and enter the shared Glasswing screen.</p></header>
+    <section className="crawler-command-bar">
+      <div><span className={`dot ${data?.desired ? "" : "paused"}`} /><div><strong>{!data?.configured ? "Data connection required" : data?.desired ? "Daily monitoring enabled" : "Monitoring paused"}</strong><span>{data?.configured ? "Licensed OpenCorporates feed · checked every 6 hours" : "Add OPENCORPORATES_API_TOKEN in Railway to activate"}</span></div></div>
+      <div className="crawler-command-actions"><button className="primary" disabled={busy || data?.desired || !data?.configured} onClick={() => action("/api/incorporations/control", { desired: true })}><Play size={15}/> Start</button><button disabled={busy || !data?.desired} onClick={() => action("/api/incorporations/control", { desired: false })}><Pause size={15}/> Pause</button><button className="icon" disabled={busy || !data?.configured} onClick={() => action("/api/incorporations/refresh")}><RefreshCw size={15}/></button></div>
+    </section>
+    {result.loading && !data ? <Loading/> : result.error && !data ? <ErrorBox>{result.error}</ErrorBox> : data && <>
+      <div className="metrics"><Metric label="Candidates" value={fmt(data.counts?.review || 0)}/><Metric label="Domains found" value={fmt(data.counts?.domains || 0)}/><Metric label="Noise removed" value={fmt(data.counts?.denied || 0)}/></div>
+      <BucketTabs value={bucket} onChange={setBucket} tabs={[["review", "Candidates"], ["denied", "Filtered out"]]}/>
+      <Table rows={data.rows || []} columns={[
+        { key: "company_name", label: "Company", sortable: false },
+        { key: "incorporation_date", label: "Incorporated" },
+        { key: "company_type", label: "Entity type" },
+        { key: "domain", label: "Website", sortable: false, render: (row) => row.domain ? <a href={`https://${row.domain}`} target="_blank" rel="noreferrer">{row.domain}</a> : <span className="muted">{row.domain_status === "unresolved" ? "Not verified" : "Resolving…"}</span> },
+        { key: "reason", label: "Signal", sortable: false, render: (row) => row.bucket === "review" ? "New Delaware corporation" : "Non-target entity or vehicle" },
+        { key: "registry_url", label: "Registry", sortable: false, render: (row) => <a href={row.registry_url} target="_blank" rel="noreferrer">View record</a> },
+      ]}/>
+    </>}
+  </>;
+}
+
 function SearchCorpusPage({ kind }) {
   const { admin, requestLogin } = useAdmin();
   const isAi = kind === "ai";
@@ -2701,6 +2737,7 @@ function App() {
     home: <HomePage />,
     certstream: <CertStreamPage />,
     formd: <FormDPage />,
+    incorporations: <IncorporationsPage />,
     csv: <SearchCorpusPage kind="ai" />,
     domains: <SearchCorpusPage kind="zone" />,
     health: <HealthPage />,

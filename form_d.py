@@ -176,7 +176,7 @@ def _json_object(text: str) -> dict[str, Any]:
     return json.loads(text[start:end + 1])
 
 
-def resolve_official_domains(rows: list[dict[str, Any]]) -> dict[str, str]:
+def resolve_official_domains(rows: list[dict[str, Any]], context: str = "SEC Form D issuer") -> dict[str, str]:
     """Resolve only verified official sites; an uncertain result stays blank."""
     if not rows or not os.getenv("ANTHROPIC_API_KEY", "").strip():
         return {}
@@ -186,7 +186,7 @@ def resolve_official_domains(rows: list[dict[str, Any]]) -> dict[str, str]:
         {"accession": str(row["accession"]), "legal_name": str(row["company_name"])}
         for row in rows[:_DOMAIN_RESOLUTION_LIMIT]
     ]
-    prompt = f"""Find the official company website for each SEC Form D issuer below.
+    prompt = f"""Find the official company website for each {context} below.
 Use web search and verify that the website itself identifies the same operating company. Do not use SEC, LinkedIn, Crunchbase, PitchBook, news, directories, social profiles, investor pages, or guessed domains. If the exact official website cannot be verified, return an empty domain. Return only JSON shaped as {{"matches":[{{"accession":"...","domain":"example.com","verified":true}}]}}.
 
 Issuers:

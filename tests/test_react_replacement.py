@@ -38,6 +38,8 @@ def test_react_app_has_every_primary_page_and_no_streamlit_dependency():
     assert "<GlobalWorkerControls />" in source
     assert "function FormDPage" in source
     assert "/api/form-d/control" in source
+    assert "/api/incorporations/control" in source
+    assert '"New Incorporations"' in source
     assert "Resume all" in source
     assert "Pause all" in source
     assert "Send to Claude" in source

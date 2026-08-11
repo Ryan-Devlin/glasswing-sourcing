@@ -136,6 +136,7 @@ async def lifespan(_app: FastAPI):
         asyncio.create_task(_claude_queue_worker()),
         asyncio.create_task(_landscape_worker()),
         asyncio.create_task(_form_d_worker()),
+        asyncio.create_task(_incorporation_worker()),
     ]
     try:
         yield
@@ -936,6 +937,20 @@ async def _form_d_worker() -> None:
             await asyncio.sleep(60)
 
 
+async def _incorporation_worker() -> None:
+    from incorporations import desired, ingest_once
+    while True:
+        try:
+            if await asyncio.to_thread(desired):
+                await asyncio.to_thread(ingest_once)
+                await asyncio.sleep(21600)
+            else:
+                await asyncio.sleep(10)
+        except Exception as exc:
+            print(f"Incorporation worker retrying: {exc}", file=sys.stderr)
+            await asyncio.sleep(300)
+
+
 @app.get("/api/form-d")
 def form_d_filings(bucket: str = "all", limit: int = Query(100, ge=1, le=250)):
     from form_d import dashboard, desired
@@ -955,6 +970,31 @@ def form_d_control(update: WorkerUpdate):
         "form_d",
     )
     return {"ok": True, "desired": update.desired}
+
+
+@app.get("/api/incorporations")
+def incorporation_signals(bucket: str = "review", limit: int = Query(100, ge=1, le=250)):
+    from incorporations import dashboard, desired
+    result = dashboard(bucket=bucket, limit=limit)
+    result["desired"] = desired()
+    return result
+
+
+@app.post("/api/incorporations/control", dependencies=[Depends(_require_admin)])
+def incorporation_control(update: WorkerUpdate):
+    from incorporations import set_desired
+    set_desired(update.desired)
+    record_admin_audit("incorporations_resumed" if update.desired else "incorporations_paused", "delaware")
+    return {"ok": True, "desired": update.desired}
+
+
+@app.post("/api/incorporations/refresh", dependencies=[Depends(_require_admin)])
+async def incorporation_refresh():
+    from incorporations import ingest_once
+    try:
+        return await asyncio.to_thread(ingest_once)
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
 
 
 @app.post("/api/form-d/refresh", dependencies=[Depends(_require_admin)])
