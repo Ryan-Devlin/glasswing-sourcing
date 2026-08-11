@@ -590,8 +590,8 @@ function HomePage() {
           page.
         </p>
       </header>
-      <GoodDeals />
       <TrackingDeals />
+      <GoodDeals />
       <ClaudeTopPicks />
       <form
         className="searchbar"
