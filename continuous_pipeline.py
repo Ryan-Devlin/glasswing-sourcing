@@ -1249,6 +1249,49 @@ async def listener(
         extension: 0
         for extension in sorted(allowed_extensions)
     }
+    certificate_events = int(
+        listener_status.get("certificate_events_received", 0) or 0
+    )
+    new_domains = int(
+        listener_status.get(
+            "new_domains_received",
+            listener_status.get("domains_received", 0),
+        )
+        or 0
+    )
+    repeat_events = int(
+        listener_status.get("repeat_events_ignored", 0) or 0
+    )
+    last_repeat_domain = ""
+    repeat_status_dirty = False
+    repeat_status_flush_seconds = max(
+        0.5,
+        float(os.getenv("REPEAT_STATUS_FLUSH_SECONDS", "2")),
+    )
+    repeat_status_flushed_at = time.monotonic()
+
+    def flush_repeat_status(*, force: bool = False) -> None:
+        """Coalesce noisy repeat telemetry without losing its counters."""
+        nonlocal repeat_status_dirty, repeat_status_flushed_at
+        if not repeat_status_dirty:
+            return
+        now_monotonic = time.monotonic()
+        if (
+            not force
+            and now_monotonic - repeat_status_flushed_at
+            < repeat_status_flush_seconds
+        ):
+            return
+        write_status(
+            certificate_events_received=certificate_events,
+            repeat_events_ignored=repeat_events,
+            repeats_by_extension=repeats_by_extension,
+            last_repeat_domain=last_repeat_domain,
+            updated_at=utc_now(),
+        )
+        repeat_status_dirty = False
+        repeat_status_flushed_at = now_monotonic
+
     write_status(
         selected_extensions=sorted(allowed_extensions),
         received_by_extension=received_by_extension,
@@ -1360,6 +1403,7 @@ async def listener(
                             timeout=1.0,
                         )
                     except asyncio.TimeoutError:
+                        flush_repeat_status()
                         continue
 
                     # SAN certificates often contain many subdomains for the
@@ -1408,36 +1452,17 @@ async def listener(
                         extension = str(
                             event.get("extension", "")
                         )
-                        status = read_status()
-                        certificate_events = (
-                            int(
-                                status.get(
-                                    "certificate_events_received",
-                                    0,
-                                )
-                                or 0
-                            )
-                            + 1
-                        )
+                        certificate_events += 1
 
                         if event.get("is_new_domain"):
+                            # Flush repeat telemetry first so this immediate
+                            # new-domain update cannot publish stale totals.
+                            flush_repeat_status(force=True)
                             received_by_extension[extension] = (
                                 received_by_extension.get(extension, 0)
                                 + 1
                             )
-                            new_domains = (
-                                int(
-                                    status.get(
-                                        "new_domains_received",
-                                        status.get(
-                                            "domains_received",
-                                            0,
-                                        ),
-                                    )
-                                    or 0
-                                )
-                                + 1
-                            )
+                            new_domains += 1
                             write_status(
                                 certificate_events_received=(
                                     certificate_events
@@ -1459,27 +1484,10 @@ async def listener(
                                 repeats_by_extension.get(extension, 0)
                                 + 1
                             )
-                            repeat_events = (
-                                int(
-                                    status.get(
-                                        "repeat_events_ignored",
-                                        0,
-                                    )
-                                    or 0
-                                )
-                                + 1
-                            )
-                            write_status(
-                                certificate_events_received=(
-                                    certificate_events
-                                ),
-                                repeat_events_ignored=repeat_events,
-                                repeats_by_extension=(
-                                    repeats_by_extension
-                                ),
-                                last_repeat_domain=domain,
-                                updated_at=utc_now(),
-                            )
+                            repeat_events += 1
+                            last_repeat_domain = domain
+                            repeat_status_dirty = True
+                            flush_repeat_status()
 
         except asyncio.CancelledError:
             raise
