@@ -822,7 +822,7 @@ function GoodDeals() {
                 Form D · {moneyCompact(row.form_d_offering_amount)}
               </a>
             )}
-            <p className="clamp-text" title={row.description}>{row.description || row.routing_reason}</p>
+            <p className="clamp-text" title={row.description || row.claude_summary || row.claude_reasoning || "Company description is being enriched."}>{row.description || row.claude_summary || shortClaudeReason(row.claude_reasoning) || "Company description is being enriched."}</p>
             <span className="top-pick-category">{String(row.thesis_pillar || "enterprise technology").replaceAll("_", " ")}</span>
           </article>
         ))}
@@ -940,7 +940,7 @@ function TrackingDeals() {
               {row.claude_decision && (
                 <div className="deal-claude-review"><ClaudeReviewBadge row={row} prefix="Claude " /></div>
               )}
-              <p className="clamp-text" title={row.description}>{row.description || row.routing_reason}</p>
+              <p className="clamp-text" title={row.description || row.claude_summary || row.claude_reasoning || "Company description is being enriched."}>{row.description || row.claude_summary || shortClaudeReason(row.claude_reasoning) || "Company description is being enriched."}</p>
               <span className="top-pick-category">{String(row.thesis_pillar || "enterprise technology").replaceAll("_", " ")}</span>
             </article>
           ))}
@@ -1835,7 +1835,7 @@ function CrawlerDiscoveries() {
                   </button>
                 </div>
               )}
-              <p className="clamp-text" title={row.description}>{row.description || row.routing_reason}</p>
+              <p className="clamp-text" title={row.description || row.claude_summary || row.claude_reasoning || "Company description is being enriched."}>{row.description || row.claude_summary || shortClaudeReason(row.claude_reasoning) || "Company description is being enriched."}</p>
               <span className="top-pick-category">{String(row.thesis_pillar || "enterprise technology").replaceAll("_", " ")}</span>
             </article>
           ))}

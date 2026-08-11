@@ -360,6 +360,7 @@ def _with_claude(rows: list[dict]) -> list[dict]:
             "claude_decision": decisions.get(row.get("domain", ""), {}).get("decision", ""),
             "claude_score": decisions.get(row.get("domain", ""), {}).get("fit_score", ""),
             "claude_reasoning": decisions.get(row.get("domain", ""), {}).get("reasoning", ""),
+            "claude_summary": decisions.get(row.get("domain", ""), {}).get("product_summary", ""),
             "claude_concerns": decisions.get(row.get("domain", ""), {}).get("concerns", ""),
             "claude_unknowns": decisions.get(row.get("domain", ""), {}).get("unknowns", ""),
             "claude_dimensions": {
