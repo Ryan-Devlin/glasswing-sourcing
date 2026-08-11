@@ -94,6 +94,8 @@ def score_filing(row: dict[str, Any]) -> tuple[int, str, str]:
     industry = str(row.get("industry", "")).lower()
     entity = str(row.get("entity_type", "")).lower()
     name = str(row.get("company_name", "")).lower()
+    if not name.strip():
+        return 0, "denied", "missing_issuer_identity"
     pooled = str(row.get("pooled_fund", "")).lower() in {"true", "1", "yes"}
     fund_named = bool(re.search(r"\bfunds?\b", name))
     if pooled or "investment fund" in industry or fund_named or any(
@@ -103,6 +105,10 @@ def score_filing(row: dict[str, Any]) -> tuple[int, str, str]:
         )
     ):
         return 0, "denied", "pooled_or_investment_fund"
+    if any(term in industry for term in (
+        "real estate", "residential", "commercial", "investing",
+    )):
+        return 0, "denied", "real_estate_or_investment_vehicle"
     # A genuine new issuer filing is reviewable by default. Form D omits the
     # product/website evidence needed for a factual hard denial.
     score = 42
@@ -205,6 +211,21 @@ def ingest_once() -> dict[str, int]:
             except Exception:
                 failed += 1
             time.sleep(0.11)
+        # Rules improve as production edge cases surface. Re-score the small,
+        # structured corpus on every pass so old decisions never go stale.
+        for existing in conn.execute(
+            "SELECT accession,raw_json FROM form_d_filings"
+        ).fetchall():
+            try:
+                facts = json.loads(str(existing["raw_json"] or "{}"))
+                score, bucket, reason = score_filing(facts)
+                conn.execute(
+                    "UPDATE form_d_filings SET score=?,bucket=?,reason=?,updated_at=? WHERE accession=?",
+                    (score, bucket, reason, _now(), existing["accession"]),
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+        conn.commit()
         result = {"received": len(entries), "added": added, "screened": screened, "failed": failed}
         _state(conn, "last_run", result)
         _state(conn, "status", "running")

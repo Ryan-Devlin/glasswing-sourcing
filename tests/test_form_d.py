@@ -35,3 +35,15 @@ def test_form_d_missing_evidence_routes_to_review_not_fake_reject():
     })
     assert score >= 0
     assert bucket == "review"
+
+
+def test_form_d_real_estate_vehicle_is_hard_denied():
+    score, bucket, reason = score_filing({
+        "company_name": "Example Property DST",
+        "industry": "Other Real Estate",
+        "entity_type": "Other",
+        "offering_amount": 20_000_000,
+    })
+    assert score == 0
+    assert bucket == "denied"
+    assert reason == "real_estate_or_investment_vehicle"
