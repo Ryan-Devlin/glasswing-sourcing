@@ -516,7 +516,10 @@ def labels(
 ):
     rows, total = query_training_labels(
         label, search=q,
-        run_id=_current_run_id() if scope == "current" else "",
+        # YES/NO are durable human training baskets, not pipeline-run output.
+        # Keep accepting the legacy scope parameter for old clients, but it
+        # must never change which basket entries are returned.
+        run_id="",
         limit=page_size, offset=(page - 1) * page_size
     )
     hidden = hidden_domain_set([row["domain"] for row in rows])

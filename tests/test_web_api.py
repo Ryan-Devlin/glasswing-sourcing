@@ -151,6 +151,22 @@ def test_current_run_scope_reaches_counts_and_rows(monkeypatch):
     assert captured == {"count_run_id": "run-123", "row_run_id": "run-123"}
 
 
+def test_yes_no_baskets_ignore_pipeline_run_scope(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        web_api,
+        "query_training_labels",
+        lambda label, **kwargs: captured.update(label=label, **kwargs) or ([], 0),
+    )
+    monkeypatch.setattr(web_api, "hidden_domain_set", lambda domains: set())
+
+    response = client.get("/api/labels?label=yes&scope=current&page_size=25")
+
+    assert response.status_code == 200
+    assert captured["label"] == "yes"
+    assert captured["run_id"] == ""
+
+
 def test_human_label_endpoint_uses_protected_human_source(monkeypatch):
     captured = {}
     movement = {}
