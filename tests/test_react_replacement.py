@@ -29,6 +29,7 @@ def test_react_app_has_every_primary_page_and_no_streamlit_dependency():
     assert "Search basket domains" not in source
     assert "Search indexed website content" not in source
     assert source.count("global-searchbar") == 1
+    assert ".searchbar input:focus-visible" in Path("webapp/src/polish.css").read_text(encoding="utf-8")
     for metric in ("Domains available", "Waiting to scrape", "Searchable pages"):
         assert metric in source
     for zone_metric in ("Investable retained", "Discarded", "Fetch failures"):
