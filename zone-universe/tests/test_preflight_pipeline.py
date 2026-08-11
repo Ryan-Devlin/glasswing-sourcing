@@ -101,6 +101,38 @@ def test_tombstoned_domain_skips_even_the_homepage_preflight(
     conn.close()
 
 
+def test_new_domain_must_clear_quality_gate_before_network(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    conn, settings, shard_path = prepared_database(tmp_path)
+    cold_domain = "localareashoppingnetworks.com"
+    shard_path.write_text(cold_domain + "\n", encoding="ascii")
+    conn.execute(
+        "UPDATE shards SET total_bytes=?,queued_domains=1",
+        (shard_path.stat().st_size,),
+    )
+    conn.commit()
+    monkeypatch.setattr(
+        classification_store,
+        "excluded_domain_set",
+        lambda _domains: set(),
+    )
+
+    async def should_not_fetch(*_args, **_kwargs):
+        raise AssertionError("cold new domain reached the network")
+
+    monkeypatch.setattr(crawler, "preflight_domain", should_not_fetch)
+    counts = asyncio.run(crawler.crawl_once(conn, settings, tld="com"))
+
+    assert counts["skipped_low_priority"] == 1
+    assert conn.execute("SELECT attempted FROM shards").fetchone()[0] == 0
+    assert conn.execute("SELECT byte_offset FROM shards").fetchone()[0] == (
+        shard_path.stat().st_size
+    )
+    conn.close()
+
+
 def test_successful_fetch_without_investable_classification_is_discarded(
     tmp_path: Path,
     monkeypatch,

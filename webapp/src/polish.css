@@ -66,6 +66,24 @@ main {
   content-visibility: auto;
   contain-intrinsic-size: auto 420px;
 }
+.crawler-discoveries {
+  margin-top: 22px;
+}
+.crawler-empty-state {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 22px 24px;
+  border: 1px dashed var(--gw-border-strong);
+  border-radius: 14px;
+  background: linear-gradient(135deg, #fff, var(--gw-red-mist));
+  color: var(--gw-muted);
+}
+.crawler-empty-state strong {
+  color: var(--gw-ink);
+  font-family: "Play", Georgia, serif;
+  font-size: 18px;
+}
 .metric:hover {
   transform: translateY(-2px);
   box-shadow: 0 8px 22px #173d3515;

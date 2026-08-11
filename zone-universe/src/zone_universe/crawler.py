@@ -119,11 +119,8 @@ def quarantine_low_priority_domains(
     domains: list[str],
     *,
     maximum_priority: int,
-    bypass: bool = False,
 ) -> tuple[list[str], list[str]]:
     """Keep the active crawl lean while preserving cold names in zone queues."""
-    if bypass:
-        return list(domains), []
     kept: list[str] = []
     quarantined: list[str] = []
     for domain in domains:
@@ -1041,9 +1038,10 @@ async def crawl_once(
     new_domains, quarantined_domains = quarantine_low_priority_domains(
         new_domains,
         maximum_priority=settings.max_crawl_priority,
-        # Newly delegated names are scarce and time-sensitive. They remain
-        # first-pass candidates even when their brand is unconventional.
-        bypass=bool(shard is not None and int(shard["priority"]) == 0),
+        # Newness determines queue order, not whether a name deserves network
+        # spend. The old bypass sent every newly delegated name to DNS/HTTP,
+        # including obvious cold inventory, and produced enormous failure
+        # volume with almost no venture yield.
     )
     skipped_low_priority = len(quarantined_domains)
     from classification_store import excluded_domain_set

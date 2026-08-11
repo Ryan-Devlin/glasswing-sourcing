@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import csv
 import io
 import json
@@ -1117,6 +1118,18 @@ def corpus_stats(kind: Literal["ai", "zone"]):
     with zone_connect(ZONE_UNIVERSE_DB, read_only=True) as conn:
         details = zone_diagnostics(conn)
         worker = zone_worker_state(conn)
+        try:
+            heartbeat_row = conn.execute(
+                "SELECT max(updated_at) AS updated_at FROM worker_state"
+            ).fetchone()
+            heartbeat = str(heartbeat_row["updated_at"] or "")
+            latest_deal_row = conn.execute(
+                "SELECT max(crawled_at) AS crawled_at FROM pages"
+            ).fetchone()
+            latest_deal_at = str(latest_deal_row["crawled_at"] or "")
+        except (AttributeError, KeyError, TypeError):
+            heartbeat = ""
+            latest_deal_at = ""
     retained = int(details.get("success", 0) or 0)
     discarded = max(
         0,
@@ -1126,6 +1139,29 @@ def corpus_stats(kind: Literal["ai", "zone"]):
         + int(details.get("network_success", 0) or 0)
         - retained,
     )
+    processed = (
+        int(details.get("attempted", 0) or 0)
+        + int(details.get("low_priority_quarantined", 0) or 0)
+    )
+    attempted = int(details.get("attempted", 0) or 0)
+    promising = int(details.get("preflight_promising", 0) or 0)
+    preflight_rejected = int(details.get("preflight_rejected", 0) or 0)
+    # A homepage that produced either a promising or explicit rejection
+    # decision was actually reached and parsed. Full-crawl success is later
+    # in the funnel and is not the right denominator for preflight relevance.
+    live = promising + preflight_rejected
+    try:
+        recent_batch = ast.literal_eval(worker.get("last_batch", "{}"))
+        if not isinstance(recent_batch, dict):
+            recent_batch = {}
+    except (SyntaxError, ValueError, TypeError):
+        recent_batch = {}
+    try:
+        batch_rate = round(
+            float(worker.get("last_batch_domains_per_second", 0) or 0), 2
+        )
+    except (TypeError, ValueError):
+        batch_rate = 0
     return {
         "available": details.get("queued_domains", 0),
         "pending": max(
@@ -1134,15 +1170,23 @@ def corpus_stats(kind: Literal["ai", "zone"]):
             - int(details.get("attempted", 0) or 0)
             - int(details.get("low_priority_quarantined", 0) or 0),
         ),
-        "processed": int(details.get("attempted", 0) or 0)
-        + int(details.get("low_priority_quarantined", 0) or 0),
+        "processed": processed,
+        "attempted": attempted,
+        "live": live,
         "crawled": retained,
         "retained": retained,
         "discarded": discarded,
         "failed": details.get("network_failed", 0),
         "preflight_rejected": details.get("preflight_rejected", 0),
-        "promising": details.get("preflight_promising", 0),
+        "promising": promising,
         "searchable": details.get("searchable_pages", 0),
+        "live_rate": round((live / attempted * 100) if attempted else 0, 2),
+        "relevance_rate": round((promising / live * 100) if live else 0, 2),
+        "investable_yield": round((retained / processed * 100) if processed else 0, 4),
+        "batch_rate": batch_rate,
+        "recent_batch": recent_batch,
+        "updated_at": heartbeat,
+        "last_deal_at": latest_deal_at,
         "crawler_status": worker.get("crawler_status", "unknown"),
         "crawler_phase": worker.get("crawler_phase", "unknown"),
     }

@@ -20,8 +20,18 @@ def test_react_app_has_every_primary_page_and_no_streamlit_dependency():
     for metric in ("Domains available", "Waiting to scrape", "Searchable pages"):
         assert metric in source
     for zone_metric in ("Investable retained", "Discarded", "Fetch failures"):
+        # Legacy corpus counters were replaced with deal-funnel metrics.
+        assert zone_metric not in source
+    for zone_metric in (
+        "Domains screened",
+        "Live websites",
+        "Relevant companies",
+        "Investable deals",
+        "Deal yield",
+        "Screening speed",
+    ):
         assert zone_metric in source
-    assert "Retention mode: investable only" in source
+    assert "Deal-first mode · investable storage only" in source
     assert "controlCrawler" in source
     assert "function GlobalWorkerControls" in source
     assert "<GlobalWorkerControls />" in source
@@ -47,6 +57,8 @@ def test_react_app_has_every_primary_page_and_no_streamlit_dependency():
     assert "set((current) => ({" in source
     assert "responseCache" in source
     assert "<DeferredContent minHeight={420}>" in source
+    assert "New investable discoveries" in source
+    assert 'kind === "zone" ? [' in source
 
     styles = Path("webapp/src/polish.css").read_text(encoding="utf-8")
     assert "fonts.googleapis.com" not in styles

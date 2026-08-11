@@ -358,7 +358,11 @@ def test_zone_stats_report_retained_and_discarded_separately(monkeypatch):
     monkeypatch.setattr(
         web_api,
         "zone_worker_state",
-        lambda conn: {"crawler_status": "crawling_com", "crawler_phase": "preflight"},
+        lambda conn: {
+            "crawler_status": "crawling_com",
+            "crawler_phase": "preflight",
+            "last_batch_domains_per_second": "42.5",
+        },
     )
 
     result = client.get("/api/corpus/zone/stats").json()
@@ -368,6 +372,10 @@ def test_zone_stats_report_retained_and_discarded_separately(monkeypatch):
     assert result["retained"] == 5
     assert result["discarded"] == 695
     assert result["failed"] == 20
+    assert result["live"] == 300
+    assert result["live_rate"] == 100.0
+    assert result["relevance_rate"] == 20.0
+    assert result["batch_rate"] == 42.5
 
 
 def test_crawler_company_tables_are_source_scoped_and_paged(monkeypatch):

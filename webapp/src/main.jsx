@@ -1603,10 +1603,11 @@ function CorpusCompanies({ kind }) {
     setRefresh((value) => value + 1);
   };
   const basket = bucket === "yes" || bucket === "no";
+  const pageSize = 25;
   const result = useApi(
     basket
-      ? `/api/labels?label=${bucket}&page=${page}&page_size=100`
-      : `/api/corpus/${kind}?bucket=${bucket}&page=${page}&page_size=100&sort=${encodeURIComponent(apiSort(sort))}`,
+      ? `/api/labels?label=${bucket}&page=${page}&page_size=${pageSize}`
+      : `/api/corpus/${kind}?bucket=${bucket}&page=${page}&page_size=${pageSize}&sort=${encodeURIComponent(apiSort(sort))}`,
     [bucket, page, refresh, sort.key, sort.direction],
   );
   return (
@@ -1614,12 +1615,17 @@ function CorpusCompanies({ kind }) {
       <Toast>{toast}</Toast>
       <div className="table-toolbar table-heading">
         <div>
-          <h2>Crawled company buckets</h2>
-          <p>Only records sourced from this crawler are included.</p>
+          <h2>{kind === "zone" ? "Retained companies" : "Crawled company buckets"}</h2>
+          <p>{kind === "zone" ? "Only investable crawler discoveries are retained; rejected site content is discarded." : "Only records sourced from this crawler are included."}</p>
         </div>
       </div>
       <BucketTabs
         value={bucket}
+        tabs={kind === "zone" ? [
+          ["investable", "Investable"],
+          ["yes", "YES"],
+          ["no", "NO"],
+        ] : BUCKET_TABS}
         onChange={(value) => {
           setBucket(value);
           setPage(1);
@@ -1697,7 +1703,7 @@ function CorpusCompanies({ kind }) {
               setPage(1);
             }}
           />
-          <Pager page={page} setPage={setPage} total={result.data.total} />
+          <Pager page={page} setPage={setPage} total={result.data.total} pageSize={pageSize} />
         </>
       )}
       {label && (
@@ -1728,6 +1734,70 @@ function CorpusCompanies({ kind }) {
             }
           }}
         />
+      )}
+    </section>
+  );
+}
+
+function CrawlerDiscoveries() {
+  const { admin, requestLogin } = useAdmin();
+  const [refresh, setRefresh] = useState(0);
+  const result = useApi(
+    "/api/corpus/zone?bucket=investable&page=1&page_size=25&sort=Recently%20classified",
+    [refresh],
+  );
+  if (result.loading && !result.data) return <Loading />;
+  if (result.error && !result.data) return <ErrorBox>{result.error}</ErrorBox>;
+  const rows = (result.data?.rows || [])
+    .filter((row) => !row.hidden && !row.tracked)
+    .slice(0, 8);
+  const reject = async (row) => {
+    if (!admin) return requestLogin();
+    await api("/api/labels", {
+      method: "POST",
+      body: JSON.stringify({
+        domain: row.domain,
+        label: "no",
+        rating: Number(row.fit_score || 0),
+        reason: "manual_reject",
+      }),
+    });
+    setRefresh((value) => value + 1);
+  };
+  return (
+    <section className="top-picks crawler-discoveries">
+      <div className="section-title">
+        <div>
+          <p className="eyebrow">Deal output</p>
+          <h2>New investable discoveries</h2>
+          <p>The newest companies this crawler believes deserve partner attention.</p>
+        </div>
+        <span className="pill">{fmt(result.data?.total || 0)} retained</span>
+      </div>
+      {!rows.length ? (
+        <div className="crawler-empty-state">
+          <strong>No unreviewed investable discovery is waiting.</strong>
+          <span>The crawler is screening the ranked frontier; the next qualified company will appear here automatically.</span>
+        </div>
+      ) : (
+        <div className="top-pick-grid">
+          {rows.map((row) => (
+            <article className="top-pick" key={row.domain}>
+              <button className="card-dismiss" onClick={() => reject(row)}>Reject</button>
+              <TrackButton row={row} onChanged={() => setRefresh((value) => value + 1)} />
+              <span className="deal-age">{dealAgeLabel(row.classified_at || row.updated_at)}</span>
+              <div className="top-pick-head">
+                <span className="score-ring">{row.fit_score}<small>/100</small></span>
+                <span className="pill">Investable</span>
+              </div>
+              <h3>{row.company_name || row.domain}</h3>
+              <a href={row.final_url || `https://${row.domain}`} target="_blank">{row.domain}</a>
+              {row.claude_decision && <div className="deal-claude-review"><ClaudeReviewBadge row={row} prefix="Claude " /></div>}
+              <p className="clamp-text" title={row.description}>{row.description || row.routing_reason}</p>
+              <span className="top-pick-category">{String(row.thesis_pillar || "enterprise technology").replaceAll("_", " ")}</span>
+            </article>
+          ))}
+        </div>
       )}
     </section>
   );
@@ -1820,7 +1890,7 @@ function SearchCorpusPage({ kind }) {
         <p>
           {isAi
             ? "Upload or search crawled domains from any source."
-            : "Search retained website content without loading the zone corpus into the browser."}
+            : "Rank newly observed domains, discard low-value sites, and surface only investable deal flow."}
         </p>
       </header>
       <section className="crawler-command-bar">
@@ -1852,6 +1922,7 @@ function SearchCorpusPage({ kind }) {
           </button>
         </div>
       </section>
+      {!isAi && <CrawlerDiscoveries />}
       {metrics.loading && !metrics.data ? (
         <Loading />
       ) : metrics.error && !metrics.data ? (
@@ -1868,21 +1939,22 @@ function SearchCorpusPage({ kind }) {
             </>
           ) : (
             <>
-              <Metric label="Zone candidates" value={fmt(metrics.data.available)} />
-              <Metric label="Waiting to screen" value={fmt(metrics.data.pending)} />
-              <Metric label="Processed" value={fmt(metrics.data.processed)} />
-              <Metric label="Investable retained" value={fmt(metrics.data.retained)} />
-              <Metric label="Discarded" value={fmt(metrics.data.discarded)} />
-              <Metric label="Fetch failures" value={fmt(metrics.data.failed)} />
+              <Metric label="Domains screened" value={fmt(metrics.data.processed)} />
+              <Metric label="Live websites" value={fmt(metrics.data.live)} />
+              <Metric label="Relevant companies" value={fmt(metrics.data.promising)} />
+              <Metric label="Investable deals" value={fmt(metrics.data.retained)} />
+              <Metric label="Deal yield" value={`${Number(metrics.data.investable_yield || 0).toFixed(3)}%`} />
+              <Metric label="Screening speed" value={`${fmt(metrics.data.batch_rate || 0)}/sec`} />
             </>
           )}
         </div>
       )}
       {!isAi && metrics.data && (
         <section className="notice corpus-status retention-status">
-          <strong>Retention mode: investable only</strong>
-          <span>Pages are held temporarily for scoring, then discarded unless they enter Investable.</span>
-          <span>{fmt(metrics.data.promising)} passed the cheap homepage gate · {fmt(metrics.data.preflight_rejected)} rejected before full crawl</span>
+          <strong>Deal-first mode · investable storage only</strong>
+          <span>{fmt(metrics.data.available)} source domains are ranked offline; only high-signal names receive network screening.</span>
+          <span>{Number(metrics.data.live_rate || 0).toFixed(1)}% reached a live site · {Number(metrics.data.relevance_rate || 0).toFixed(1)}% of live sites passed relevance · {fmt(metrics.data.discarded)} discarded without retained content</span>
+          {metrics.data.last_deal_at && <span>Latest retained deal: {new Date(metrics.data.last_deal_at).toLocaleString()}</span>}
         </section>
       )}
       {isAi && metrics.data && (

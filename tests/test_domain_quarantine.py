@@ -47,16 +47,6 @@ class EarlyDomainQuarantineTests(unittest.TestCase):
             domains[1:],
         )
 
-    def test_newly_delegated_names_bypass_cold_quarantine(self):
-        domains = ["v1x2sdb9ieyecxwd.app"]
-        kept, quarantined = quarantine_low_priority_domains(
-            domains,
-            maximum_priority=2,
-            bypass=True,
-        )
-        self.assertEqual(kept, domains)
-        self.assertEqual(quarantined, [])
-
     def test_high_confidence_dga_and_hyphen_noise_are_rejected(self):
         for domain in (
             "pqlkjnmrtvwxz.com",
