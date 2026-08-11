@@ -1207,8 +1207,14 @@ def recover_claude_review_queue(*, path: Path | str = CLASSIFICATION_DB) -> int:
         cursor = conn.execute(
             "UPDATE claude_review_queue SET status='queued',started_at='',error='' WHERE status='reviewing'"
         )
+        recovered = max(0, int(cursor.rowcount or 0))
+        false_failures = conn.execute(
+            "UPDATE claude_review_queue SET status='queued',started_at='',completed_at='',error='' "
+            "WHERE status='failed' AND error LIKE '%No companies selected for paid external diligence%'"
+        )
+        recovered += max(0, int(false_failures.rowcount or 0))
         conn.commit()
-        return max(0, int(cursor.rowcount or 0))
+        return recovered
 
 
 def claim_claude_review(*, path: Path | str = CLASSIFICATION_DB) -> dict[str, object] | None:

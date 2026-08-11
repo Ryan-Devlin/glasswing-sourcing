@@ -278,7 +278,7 @@ class ClaudeThresholdTests(unittest.TestCase):
         ])
         self.assertEqual(selected.domain.tolist(), ["eligible.ai"])
 
-    def test_zone_universe_cache_content_never_reaches_claude(self):
+    def test_zone_universe_cache_content_is_excluded_automatically(self):
         # ~170M .com/.app candidate domains from the zone crawl -- user
         # direction was explicit: that dataset never needs Claude, Python
         # scoring alone is enough given the volume. content_source is set
@@ -301,6 +301,18 @@ class ClaudeThresholdTests(unittest.TestCase):
             },
         ])
         self.assertEqual(selected.domain.tolist(), ["certstream-find.ai"])
+        self.assertEqual(stats["eligible_above_score"], 1)
+
+    def test_manual_send_overrides_zone_source_and_score_gates(self):
+        selected, stats = self.prepare([{
+            "domain": "praxl.app",
+            "diligence_rank_score": 0,
+            "rule_score": 0,
+            "location_status": "UNKNOWN",
+            "content_source": "zone_universe_cache",
+            "qualified_for_llm": "true",
+        }])
+        self.assertEqual(selected.domain.tolist(), ["praxl.app"])
         self.assertEqual(stats["eligible_above_score"], 1)
 
 

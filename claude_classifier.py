@@ -392,6 +392,14 @@ def prepare_input(
 
     total_rows_in_input = len(frame)
 
+    # An explicit dashboard "Send to Claude" is a human override of the
+    # automatic candidate-selection gates. Claude still applies the full
+    # diligence rubric and all factual hard denials; only pre-call source,
+    # score, and heuristic exclusions are bypassed.
+    forced = frame.get(
+        "qualified_for_llm", pd.Series("", index=frame.index)
+    ).astype(str).str.lower().isin({"true", "1", "yes"})
+
     if "domain" not in frame.columns:
         source = (
             frame["registrable"]
@@ -404,8 +412,9 @@ def prepare_input(
 
     if "location_status" in frame.columns:
         frame = frame[
-            frame["location_status"].isin(["US", "UNKNOWN"])
+            frame["location_status"].isin(["US", "UNKNOWN"]) | forced
         ].copy()
+        forced = forced.reindex(frame.index, fill_value=False)
 
     # Score is the sole positive selection threshold. Eligibility caps are
     # enforced again here so legacy uncapped rows do not consume paid calls.
@@ -419,14 +428,16 @@ def prepare_input(
             disqualified = frame[boolean_column].astype(str).str.lower().isin(
                 {"true", "1", "yes"}
             )
-            frame = frame[~disqualified].copy()
+            frame = frame[~disqualified | forced].copy()
+            forced = forced.reindex(frame.index, fill_value=False)
     if "routing_reason" in frame.columns:
         capped_reason = frame["routing_reason"].astype(str).str.contains(
             "agency_or_consultancy|consumer_b2c_product|mature_or_funded",
             case=False,
             regex=True,
         )
-        frame = frame[~capped_reason].copy()
+        frame = frame[~capped_reason | forced].copy()
+        forced = forced.reindex(frame.index, fill_value=False)
     if "content_source" in frame.columns:
         # Zone Universe's .com/.app zone crawl is orders of magnitude
         # larger than every other source combined (~170M candidate
@@ -437,8 +448,9 @@ def prepare_input(
         # matches for .com/.app domains zone_universe has crawled -- a
         # CertStream .ai domain can never collide with that cache.
         frame = frame[
-            frame["content_source"] != "zone_universe_cache"
+            frame["content_source"].ne("zone_universe_cache") | forced
         ].copy()
+        forced = forced.reindex(frame.index, fill_value=False)
 
     score_column = (
         "diligence_rank_score"
@@ -476,7 +488,7 @@ def prepare_input(
         [stored_score, live_rescore], axis=1
     ).max(axis=1)
 
-    frame = frame[frame["_queue_score"] >= minimum_score].copy()
+    frame = frame[(frame["_queue_score"] >= minimum_score) | forced].copy()
 
     if not reclassify:
         completed = load_currently_diligenced_domains()

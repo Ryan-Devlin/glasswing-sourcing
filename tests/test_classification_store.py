@@ -955,6 +955,19 @@ def test_claude_queue_recovers_and_audit_is_append_only(tmp_path):
     assert rows[0]["target"] == "example.ai"
 
 
+def test_claude_queue_recovers_false_selection_failure(tmp_path):
+    database = tmp_path / "classifications.sqlite3"
+    classification_store.enqueue_claude_review("praxl.app", path=database)
+    classification_store.claim_claude_review(path=database)
+    classification_store.finish_claude_review(
+        "praxl.app",
+        error="Diligence queue | screened=1 | No companies selected for paid external diligence.",
+        path=database,
+    )
+    assert classification_store.recover_claude_review_queue(path=database) == 1
+    assert classification_store.claude_review_status("praxl.app", path=database)["status"] == "queued"
+
+
 def test_top_claude_keeps_returns_only_highest_decisive_approvals(tmp_path):
     database = tmp_path / "classifications.sqlite3"
     upsert_classifications(pd.DataFrame([
