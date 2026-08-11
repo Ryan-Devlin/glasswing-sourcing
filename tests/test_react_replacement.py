@@ -70,7 +70,8 @@ def test_react_app_has_every_primary_page_and_no_streamlit_dependency():
     assert "claude-tooltip" in source
     assert "Pause CertStream to unlock" in source
     assert "<RunFilters running={Boolean(desiredRunning)} />" in source
-    assert source.count("<CompaniesTable />") >= 2
+    assert "<CompaniesTable showRunScope={false} />" in source
+    assert "<CompaniesTable showRunScope />" in source
     assert "clamp-text" in source
     assert "Claude’s strongest investment recommendations" in source
     # Fetch enough candidates to backfill the eight-card view after tracked

@@ -727,7 +727,7 @@ function HomePage() {
         )}
       </section>
       <DeferredContent minHeight={420}>
-        <CompaniesTable />
+        <CompaniesTable showRunScope={false} />
       </DeferredContent>
     </>
   );
@@ -1215,10 +1215,10 @@ function LabelsPanel() {
   );
 }
 
-function CompaniesTable() {
+function CompaniesTable({ showRunScope = false }) {
   const { admin, requestLogin } = useAdmin();
   const [bucket, setBucket] = useState("investable");
-  const [scope, setScope] = useState("current");
+  const [scope, setScope] = useState(showRunScope ? "current" : "history");
   const [page, setPage] = useState(1);
   const [refresh, setRefresh] = useState(0);
   const [label, setLabel] = useState(null);
@@ -1294,7 +1294,7 @@ function CompaniesTable() {
           </p>
         </div>
       </div>
-      {!basket && (
+      {showRunScope && !basket && (
         <div className="segmented scope-tabs" aria-label="Classification history scope">
           <button
             className={scope === "current" ? "active" : ""}
@@ -1663,7 +1663,7 @@ function CertStreamPage() {
         <p className="notice">Claude: {claude.data.warning}</p>
       )}
       <RunFilters running={Boolean(desiredRunning)} />
-      <CompaniesTable />
+      <CompaniesTable showRunScope />
     </>
   );
 }
