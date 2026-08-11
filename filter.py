@@ -4482,7 +4482,7 @@ def automated_discard_mask(output: pd.DataFrame) -> pd.Series:
         {"priority", "coming_soon", "review", "comp", "insufficient", "reject"}
     )
     return (
-        buckets.isin({"ghost"})
+        buckets.isin({"ghost", "screened_out"})
         | slop
         | ((ratings < retention_minimum_rating()) & ~protected_buckets)
     )
