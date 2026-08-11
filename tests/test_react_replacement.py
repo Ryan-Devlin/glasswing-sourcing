@@ -45,6 +45,13 @@ def test_react_app_has_every_primary_page_and_no_streamlit_dependency():
     assert "deals.loading && !deals.data" in source
     assert "result.loading && !result.data" in source
     assert "set((current) => ({" in source
+    assert "responseCache" in source
+    assert "<DeferredContent minHeight={420}>" in source
+
+    styles = Path("webapp/src/polish.css").read_text(encoding="utf-8")
+    assert "fonts.googleapis.com" not in styles
+    assert "@font-face" in styles
+    assert len(list(Path("webapp/src/fonts").glob("*.woff2"))) == 3
 
 
 def test_production_entrypoint_is_fastapi():

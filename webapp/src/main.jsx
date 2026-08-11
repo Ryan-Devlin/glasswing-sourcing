@@ -53,6 +53,8 @@ const BUCKET_TABS = [
 const AdminContext = createContext({ admin: false, requestLogin: () => {} });
 const useAdmin = () => useContext(AdminContext);
 const inflightGets = new Map();
+const responseCache = new Map();
+const RESPONSE_CACHE_MS = 60_000;
 function apiSort(sort) {
   const names = {
     company_name:
@@ -118,9 +120,19 @@ async function api(path, options = {}) {
     }
     return r.json();
   };
-  if (method !== "GET") return request();
+  if (method !== "GET") {
+    // A mutation can affect several homepage views. Never hydrate a later
+    // navigation from pre-mutation data.
+    responseCache.clear();
+    return request();
+  }
   if (inflightGets.has(path)) return inflightGets.get(path);
-  const pending = request().finally(() => inflightGets.delete(path));
+  const pending = request()
+    .then((data) => {
+      responseCache.set(path, { data, savedAt: Date.now() });
+      return data;
+    })
+    .finally(() => inflightGets.delete(path));
   inflightGets.set(path, pending);
   return pending;
 }
@@ -144,7 +156,15 @@ async function waitForClaude(domain, onStatus) {
   );
 }
 function useApi(path, deps = []) {
-  const [state, set] = useState({ data: null, error: "", loading: true });
+  const cached = responseCache.get(path);
+  const [state, set] = useState(() => ({
+    data:
+      cached && Date.now() - cached.savedAt < RESPONSE_CACHE_MS
+        ? cached.data
+        : null,
+    error: "",
+    loading: true,
+  }));
   useEffect(() => {
     let live = true;
     // Refresh in place. Clearing or hiding previously rendered data here makes
@@ -181,6 +201,33 @@ function Loading() {
     <div className="loading">
       <RefreshCw size={18} />
       Loading…
+    </div>
+  );
+}
+
+function DeferredContent({ children, minHeight = 260 }) {
+  const [ready, setReady] = useState(false);
+  const anchor = useRef(null);
+  useEffect(() => {
+    if (ready) return undefined;
+    if (!("IntersectionObserver" in window)) {
+      setReady(true);
+      return undefined;
+    }
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (!entry.isIntersecting) return;
+        setReady(true);
+        observer.disconnect();
+      },
+      { rootMargin: "700px 0px" },
+    );
+    if (anchor.current) observer.observe(anchor.current);
+    return () => observer.disconnect();
+  }, [ready]);
+  return (
+    <div ref={anchor} className="deferred-content" style={{ minHeight }}>
+      {ready ? children : null}
     </div>
   );
 }
@@ -672,7 +719,9 @@ function HomePage() {
           </div>
         )}
       </section>
-      <CompaniesTable />
+      <DeferredContent minHeight={420}>
+        <CompaniesTable />
+      </DeferredContent>
     </>
   );
 }
@@ -2506,7 +2555,14 @@ function App() {
           <ApiStatus />
         </aside>
         <main>
-          <img className="glasswing-watermark" src={glasswingMark} alt="" aria-hidden="true" />
+          <img
+            className="glasswing-watermark"
+            src={glasswingMark}
+            alt=""
+            aria-hidden="true"
+            loading="lazy"
+            decoding="async"
+          />
           <GlobalWorkerControls />
           <ErrorBoundary>{body}</ErrorBoundary>
         </main>
