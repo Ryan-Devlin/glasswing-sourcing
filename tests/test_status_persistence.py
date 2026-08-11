@@ -354,13 +354,24 @@ class StatusPersistenceTests(unittest.TestCase):
                     "VALUES ('just-discovered.ai', '2026-08-06T00:00:00Z', "
                     "'2026-08-06T00:00:00Z')"
                 )
+                conn.execute(
+                    "INSERT INTO domains(domain, first_seen, last_seen) "
+                    "VALUES ('unselected.app', '2026-08-07T00:00:00Z', "
+                    "'2026-08-07T00:00:00Z')"
+                )
                 conn.commit()
 
-                claimed = continuous_pipeline.claim_batch(conn, size=10)
+                claimed = continuous_pipeline.claim_batch(
+                    conn, size=10, allowed_extensions={".ai"}
+                )
+                unselected_status = conn.execute(
+                    "SELECT status FROM domains WHERE domain='unselected.app'"
+                ).fetchone()["status"]
                 conn.close()
 
         self.assertEqual(claimed[0], "just-discovered.ai")
         self.assertEqual(claimed[1], "stale-backlog-item.ai")
+        self.assertEqual(unselected_status, "pending")
 
     def test_duplicate_domain_registration_is_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:

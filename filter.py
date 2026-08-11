@@ -60,7 +60,15 @@ USER_AGENT = "Mozilla/5.0 Glasswing-Sourcing/2.0"
 # in any per-operation timer, only in the batch's total wall-clock time --
 # a dedicated, generously-sized pool removes that as a variable.
 _SCORING_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
-    max_workers=128, thread_name_prefix="glasswing-scoring"
+    # A 128-thread pool plus 100 concurrent scrapers retained nearly 7 GB in
+    # the always-on Railway worker. Scoring is CPU-bound; far more threads
+    # than the container can execute only adds stacks, allocator arenas, and
+    # context switching. Keep this bounded and independently configurable.
+    max_workers=max(
+        4,
+        min(32, int(os.getenv("GLASSWING_SCORING_THREADS", "24"))),
+    ),
+    thread_name_prefix="glasswing-scoring",
 )
 
 
@@ -2996,7 +3004,13 @@ def parse_html(html: str, final_url: str) -> tuple[Fetch, list[str]]:
     )
 
 
-_FETCH_MAX_RESPONSE_BYTES = 2_000_000
+_FETCH_MAX_RESPONSE_BYTES = max(
+    100_000,
+    min(
+        2_000_000,
+        int(os.getenv("GLASSWING_MAX_HTML_BYTES", "500000")),
+    ),
+)
 
 
 async def _read_html_capped(

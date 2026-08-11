@@ -61,6 +61,27 @@ class ScraperResilienceTests(unittest.TestCase):
         self.assertEqual(profile["batch_size"], 4)
         self.assertGreaterEqual(profile["timeout"], 15)
 
+    def test_backlog_profiles_cap_memory_intensive_concurrency(self):
+        surge = adaptive_screening_profile(
+            10_000, base_batch=75, base_workers=28, base_timeout=12
+        )
+        catch_up = adaptive_screening_profile(
+            500, base_batch=75, base_workers=28, base_timeout=12
+        )
+
+        self.assertEqual(surge["batch_size"], 24)
+        self.assertEqual(surge["workers"], 24)
+        self.assertEqual(catch_up["batch_size"], 16)
+        self.assertEqual(catch_up["workers"], 16)
+
+    def test_html_payload_default_is_bounded_for_many_parallel_sites(self):
+        self.assertLessEqual(screening_filter._FETCH_MAX_RESPONSE_BYTES, 500_000)
+
+    def test_pipeline_recycles_above_memory_budget(self):
+        with patch.dict("os.environ", {"GLASSWING_PIPELINE_RECYCLE_RSS_MB": "1200"}):
+            self.assertFalse(continuous_pipeline.should_recycle_worker(1199))
+            self.assertTrue(continuous_pipeline.should_recycle_worker(1201))
+
     def test_timeout_rows_are_retried_before_persistence(self):
         calls = 0
 

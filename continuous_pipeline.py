@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import csv
 import fcntl
+import gc
 import json
 import os
 import signal
@@ -608,7 +609,11 @@ def _corpus_priority_for_domains(domains: list[str]) -> dict[str, int]:
     return priority
 
 
-def claim_batch(conn: sqlite3.Connection, size: int) -> list[str]:
+def claim_batch(
+    conn: sqlite3.Connection,
+    size: int,
+    allowed_extensions: set[str] | None = None,
+) -> list[str]:
     now = utc_now()
     if using_postgres(PIPELINE_DATABASE_ENV_VAR):
         # No ATTACH equivalent in Postgres, so pull a bounded candidate
@@ -627,6 +632,11 @@ def claim_batch(conn: sqlite3.Connection, size: int) -> list[str]:
             """,
             (now, candidate_limit),
         ).fetchall()
+        if allowed_extensions:
+            rows = [
+                row for row in rows
+                if domain_extension(str(row["domain"])) in allowed_extensions
+            ]
         priority = _corpus_priority_for_domains([row["domain"] for row in rows])
         # Newest first within each priority tier -- confirmed live: a
         # 121,000+ historical backlog (oldest-first) meant freshly arriving
@@ -732,7 +742,11 @@ def claim_batch(conn: sqlite3.Connection, size: int) -> list[str]:
             (now, size),
         ).fetchall()
 
-    domains = [row["domain"] for row in rows]
+    domains = [
+        row["domain"] for row in rows
+        if not allowed_extensions
+        or domain_extension(str(row["domain"])) in allowed_extensions
+    ]
     if not domains:
         return []
 
@@ -1527,7 +1541,11 @@ def adaptive_screening_profile(
         # worker count: every domain in a batch gets its own concurrent
         # scraper slot for the whole batch, so total time is bounded by one
         # round (the slowest single domain), not several queued rounds.
-        surge_workers = min(120, max(100, base_workers))
+        # 100 simultaneous sites plus a 128-thread scoring pool drove the
+        # production worker to 6.9 GB RSS and made 97% of requests time out.
+        # A smaller one-round batch keeps enough throughput for the live .ai
+        # arrival rate without paying for allocator/thread churn all month.
+        surge_workers = min(24, max(12, base_workers))
         return {
             "mode": "surge",
             "batch_size": surge_workers,
@@ -1536,7 +1554,7 @@ def adaptive_screening_profile(
             "homepage_only": True,
         }
     if pending >= 250:
-        catch_up_workers = min(80, max(64, base_workers))
+        catch_up_workers = min(16, max(8, base_workers))
         return {
             "mode": "catch_up",
             "batch_size": catch_up_workers,
@@ -1557,6 +1575,37 @@ def adaptive_screening_profile(
         "timeout": max(15.0, min(base_timeout, 25.0)),
         "homepage_only": True,
     }
+
+
+def release_batch_memory() -> float:
+    """Return unused Python/native arenas after a scrape batch.
+
+    CPython's allocator and glibc otherwise keep BeautifulSoup, pandas, and
+    thread-worker high-water memory mapped indefinitely in this always-on
+    process. Railway bills that retained RSS even when the next batch is idle.
+    """
+    gc.collect()
+    if sys.platform.startswith("linux"):
+        try:
+            import ctypes
+
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except (AttributeError, OSError):
+            pass
+        try:
+            resident_pages = int(Path("/proc/self/statm").read_text().split()[1])
+            return round(resident_pages * os.sysconf("SC_PAGE_SIZE") / 1024**2, 1)
+        except (OSError, ValueError, IndexError):
+            pass
+    return 0.0
+
+
+def should_recycle_worker(rss_mb: float) -> bool:
+    threshold_mb = max(
+        512.0,
+        float(os.getenv("GLASSWING_PIPELINE_RECYCLE_RSS_MB", "1200")),
+    )
+    return rss_mb > threshold_mb
 
 
 def live_rate_metrics(
@@ -1604,6 +1653,7 @@ async def worker_loop(
     stop: asyncio.Event,
 ) -> None:
     config = load_run_config()
+    active_extensions = selected_extensions()
     worker_status = read_status()
     active_run_id = str(worker_status.get("run_id", "")).strip()
     active_run_started_at = str(
@@ -1676,7 +1726,11 @@ async def worker_loop(
                 pass
             continue
         counts_before = queue_counts(conn)
-        pending = int(counts_before.get("pending", 0) or 0)
+        counts_by_extension = extension_counts(conn)
+        pending = sum(
+            int(counts_by_extension.get(extension, {}).get("pending", 0) or 0)
+            for extension in active_extensions
+        )
         profile = adaptive_screening_profile(
             pending,
             base_batch=base_batch_size,
@@ -1696,6 +1750,7 @@ async def worker_loop(
         domains = claim_batch(
             conn,
             int(profile["batch_size"]),
+            allowed_extensions=active_extensions,
         )
         if not domains:
             status = read_status()
@@ -1729,6 +1784,9 @@ async def worker_loop(
 
         batch_path = write_batch_csv(domains)
         batch_started = time.monotonic()
+        records = None
+        output = None
+        screening_stats = None
         try:
             write_status(
                 stage="screening",
@@ -1950,6 +2008,21 @@ async def worker_loop(
             )
         finally:
             batch_path.unlink(missing_ok=True)
+            records = None
+            output = None
+            screening_stats = None
+            worker_rss_mb = release_batch_memory()
+            write_status(
+                worker_rss_mb=worker_rss_mb,
+                updated_at=utc_now(),
+            )
+            if should_recycle_worker(worker_rss_mb):
+                write_status(
+                    stage="restarting_to_release_memory",
+                    memory_recycle_at_mb=worker_rss_mb,
+                    updated_at=utc_now(),
+                )
+                os.execv(sys.executable, [sys.executable, *sys.argv])
 
 
 async def async_main() -> None:
