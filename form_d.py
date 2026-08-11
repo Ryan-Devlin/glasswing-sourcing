@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from classification_store import connect_store
+from common import QUEUE_DB, get_model, stable_domain
 
 FEED_URL = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=D&company=&dateb=&owner=include&count=100&output=atom"
 USER_AGENT = os.getenv(
@@ -22,6 +23,7 @@ USER_AGENT = os.getenv(
 MAX_TARGET_RAISE = int(os.getenv("FORM_D_MAX_TARGET_RAISE", "15000000"))
 _SEC_LOCK = threading.Lock()
 _LAST_REQUEST = 0.0
+_DOMAIN_RESOLUTION_LIMIT = 10
 
 
 def _now() -> str:
@@ -39,10 +41,17 @@ def _schema(conn) -> None:
             investors INTEGER NOT NULL DEFAULT 0, first_sale_date TEXT NOT NULL DEFAULT '',
             exemption TEXT NOT NULL DEFAULT '', score INTEGER NOT NULL DEFAULT 0,
             bucket TEXT NOT NULL DEFAULT 'review', reason TEXT NOT NULL DEFAULT '',
+            domain TEXT NOT NULL DEFAULT '', domain_status TEXT NOT NULL DEFAULT '',
             raw_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
     """)
+    try:
+        conn.execute("SELECT domain,domain_status FROM form_d_filings LIMIT 0")
+    except Exception:
+        conn.rollback()
+        conn.execute("ALTER TABLE form_d_filings ADD COLUMN domain TEXT NOT NULL DEFAULT ''")
+        conn.execute("ALTER TABLE form_d_filings ADD COLUMN domain_status TEXT NOT NULL DEFAULT ''")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS form_d_state(
             key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL
@@ -159,6 +168,104 @@ def _filing_xml(index_url: str) -> tuple[str, bytes]:
     return url, _get(url)
 
 
+def _json_object(text: str) -> dict[str, Any]:
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip(), flags=re.I)
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("Domain resolution did not return JSON")
+    return json.loads(text[start:end + 1])
+
+
+def resolve_official_domains(rows: list[dict[str, Any]]) -> dict[str, str]:
+    """Resolve only verified official sites; an uncertain result stays blank."""
+    if not rows or not os.getenv("ANTHROPIC_API_KEY", "").strip():
+        return {}
+    from anthropic import Anthropic
+
+    issuers = [
+        {"accession": str(row["accession"]), "legal_name": str(row["company_name"])}
+        for row in rows[:_DOMAIN_RESOLUTION_LIMIT]
+    ]
+    prompt = f"""Find the official company website for each SEC Form D issuer below.
+Use web search and verify that the website itself identifies the same operating company. Do not use SEC, LinkedIn, Crunchbase, PitchBook, news, directories, social profiles, investor pages, or guessed domains. If the exact official website cannot be verified, return an empty domain. Return only JSON shaped as {{"matches":[{{"accession":"...","domain":"example.com","verified":true}}]}}.
+
+Issuers:
+{json.dumps(issuers)}"""
+    response = Anthropic().messages.create(
+        model=get_model(),
+        max_tokens=2500,
+        temperature=0,
+        tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 12}],
+        messages=[{"role": "user", "content": prompt}],
+    )
+    content = "\n".join(
+        block.text for block in response.content
+        if getattr(block, "type", "") == "text"
+    )
+    matches = _json_object(content).get("matches", [])
+    blocked = {"sec.gov", "linkedin.com", "crunchbase.com", "pitchbook.com", "facebook.com", "x.com"}
+    valid_accessions = {item["accession"] for item in issuers}
+    resolved: dict[str, str] = {}
+    for match in matches if isinstance(matches, list) else []:
+        accession = str(match.get("accession", ""))
+        domain = stable_domain(match.get("domain", ""))
+        if (
+            accession in valid_accessions
+            and match.get("verified") is True
+            and "." in domain
+            and domain not in blocked
+            and not any(domain.endswith(f".{host}") for host in blocked)
+        ):
+            resolved[accession] = domain
+    return resolved
+
+
+def _resolve_and_queue_domains(conn) -> int:
+    candidates = [dict(row) for row in conn.execute(
+        "SELECT accession,company_name FROM form_d_filings "
+        "WHERE bucket IN ('investable','review') AND domain='' AND domain_status='' "
+        "ORDER BY filing_date DESC,score DESC LIMIT ?",
+        (_DOMAIN_RESOLUTION_LIMIT,),
+    ).fetchall()]
+    if not candidates:
+        return 0
+    try:
+        resolved = resolve_official_domains(candidates)
+    except Exception:
+        return 0
+    if not resolved:
+        for candidate in candidates:
+            conn.execute(
+                "UPDATE form_d_filings SET domain_status='unresolved',updated_at=? WHERE accession=?",
+                (_now(), candidate["accession"]),
+            )
+        conn.commit()
+        return 0
+    resolved_accessions = set(resolved)
+    for candidate in candidates:
+        if candidate["accession"] not in resolved_accessions:
+            conn.execute(
+                "UPDATE form_d_filings SET domain_status='unresolved',updated_at=? WHERE accession=?",
+                (_now(), candidate["accession"]),
+            )
+    for accession, domain in resolved.items():
+        conn.execute(
+            "UPDATE form_d_filings SET domain=?,domain_status='queued',updated_at=? WHERE accession=?",
+            (domain, _now(), accession),
+        )
+    conn.commit()
+    try:
+        from ai_search.og_bridge import enqueue_for_screening
+        result = enqueue_for_screening(
+            QUEUE_DB,
+            list(resolved.values()),
+            source_run_id="form_d",
+        )
+        return int(result.get("queued", 0) or 0)
+    except Exception:
+        return 0
+
+
 def ingest_once() -> dict[str, int]:
     if "@" not in USER_AGENT:
         raise RuntimeError("SEC_EDGAR_USER_AGENT must include a contact email")
@@ -228,7 +335,9 @@ def ingest_once() -> dict[str, int]:
             except (TypeError, ValueError, json.JSONDecodeError):
                 continue
         conn.commit()
+        queued = _resolve_and_queue_domains(conn)
         result = {"received": len(entries), "added": added, "screened": screened, "failed": failed}
+        result["domains_queued"] = queued
         _state(conn, "last_run", result)
         _state(conn, "status", "running")
         return result
@@ -244,9 +353,10 @@ def dashboard(bucket: str = "all", limit: int = 100) -> dict[str, Any]:
             where = "WHERE bucket=?"
             params.append(bucket)
         params.append(limit)
-        rows = [dict(row) for row in conn.execute(f"SELECT accession,company_name,filing_date,filing_url,industry,entity_type,offering_amount,amount_sold,investors,score,bucket,reason FROM form_d_filings {where} ORDER BY filing_date DESC,score DESC LIMIT ?", params).fetchall()]
+        rows = [dict(row) for row in conn.execute(f"SELECT accession,company_name,filing_date,filing_url,industry,entity_type,offering_amount,amount_sold,investors,score,bucket,reason,domain,domain_status FROM form_d_filings {where} ORDER BY filing_date DESC,score DESC LIMIT ?", params).fetchall()]
+        domain_count = int(conn.execute("SELECT count(*) AS total FROM form_d_filings WHERE domain<>''").fetchone()["total"])
         state = {str(row["key"]): str(row["value"]) for row in conn.execute("SELECT key,value FROM form_d_state")}
-    return {"rows": rows, "counts": {"all": sum(counts.values()), **counts}, "state": state}
+    return {"rows": rows, "counts": {"all": sum(counts.values()), "domains": domain_count, **counts}, "state": state}
 
 
 def desired() -> bool:

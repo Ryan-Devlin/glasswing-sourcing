@@ -1894,11 +1894,13 @@ function FormDPage() {
         <div className="metrics form-d-metrics">
           <Metric label="New leads" value={fmt(data.counts?.investable || 0)} />
           <Metric label="Quick review" value={fmt(data.counts?.review || 0)} />
+          <Metric label="Domains found" value={fmt(data.counts?.domains || 0)} />
           <Metric label="Automatically filtered" value={fmt(data.counts?.denied || 0)} />
         </div>
         <BucketTabs value={bucket} onChange={setBucket} tabs={[["investable", "New leads"], ["review", "Quick review"], ["denied", "Filtered out"]]} />
         <Table rows={data.rows || []} columns={[
           { key: "company_name", label: "Issuer", sortable: false },
+          { key: "domain", label: "Website", sortable: false, render: (row) => row.domain ? <a href={`https://${row.domain}`} target="_blank" rel="noreferrer">{row.domain}</a> : <span className="muted">{row.domain_status === "unresolved" ? "Not verified" : "Resolving…"}</span> },
           { key: "filing_date", label: "Filed" },
           { key: "industry", label: "Industry" },
           { key: "offering_amount", label: "Target raise", render: (row) => money(row.offering_amount) },

@@ -1,4 +1,4 @@
-from form_d import score_filing
+from form_d import resolve_official_domains, score_filing
 
 
 def test_form_d_fund_is_hard_denied():
@@ -61,3 +61,11 @@ def test_form_d_later_stage_raise_is_filtered_out():
     assert score == 0
     assert bucket == "denied"
     assert reason == "raise_above_target_stage"
+
+
+def test_form_d_domain_resolution_stays_blank_without_api_key(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    assert resolve_official_domains([{
+        "accession": "0000000000-26-000001",
+        "company_name": "Example Robotics Inc",
+    }]) == {}
