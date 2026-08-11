@@ -10,8 +10,10 @@ from urllib.parse import urlsplit
 
 import aiohttp
 
+from db_backend import using_postgres
+
 from .config import Settings
-from .database import index_page, utc_now
+from .database import AI_SEARCH_DATABASE_ENV_VAR, connect, index_page, utc_now
 from .extract import (
     ExtractedPage,
     extract_page,
@@ -413,7 +415,20 @@ async def crawl_pending(conn: Any, settings: Settings, limit: int) -> dict[str, 
     ) as session:
         async def guarded(row: Any) -> str:
             async with semaphore:
-                return await crawl_domain(conn, session, row, settings)
+                # psycopg connections are transaction state machines and may
+                # not be shared by concurrent crawl coroutines. Doing so made
+                # one domain's commit/deadlock abort unrelated domains and
+                # could permanently stop the worker heartbeat while Railway
+                # still reported the container as online. Give each concurrent
+                # Postgres crawl its own pooled connection. SQLite remains on
+                # the single connection because it serializes writes itself.
+                if not using_postgres(AI_SEARCH_DATABASE_ENV_VAR):
+                    return await crawl_domain(conn, session, row, settings)
+                row_conn = connect(settings.database)
+                try:
+                    return await crawl_domain(row_conn, session, row, settings)
+                finally:
+                    row_conn.close()
         for status in await asyncio.gather(*(guarded(row) for row in rows)):
             counts[status] = counts.get(status, 0) + 1
     return counts

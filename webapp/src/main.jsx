@@ -2150,10 +2150,10 @@ function SearchCorpusPage({ kind }) {
         </div>
       )}
       {isAi && metrics.data && (
-        <section className={`notice corpus-status ${crawlerStale ? "stale" : ""}`}>
+        <section className={`corpus-status ${crawlerStale ? "stale" : ""}`}>
           <strong>
             Intake crawler: {crawlerStale
-              ? "stalled"
+              ? "needs restart"
               : String(metrics.data.crawler_status || "unknown").replaceAll("_", " ")}
           </strong>
           <span>
@@ -2162,7 +2162,7 @@ function SearchCorpusPage({ kind }) {
               ? ` · last worker update ${new Date(metrics.data.updated_at).toLocaleString()}`
               : ""}
           </span>
-          {crawlerStale && <span>The worker heartbeat is stale and needs attention.</span>}
+          {crawlerStale && <span>No heartbeat received for two minutes.</span>}
           {metrics.data.last_error && (
             <span className="error-text">Last error: {metrics.data.last_error}</span>
           )}

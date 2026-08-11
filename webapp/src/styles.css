@@ -789,10 +789,16 @@ tbody tr:hover {
   flex-wrap: wrap;
   align-items: center;
   gap: 8px 16px;
+  margin: 12px 0 18px;
+  padding: 10px 14px;
+  border-left: 3px solid #8ca09b;
+  color: #526360;
+  font-size: 13px;
 }
 .corpus-status.stale {
-  background: #fee5e1;
-  color: #982f24;
+  border-left-color: #b20d2e;
+  background: #fff5f6;
+  color: #8f1730;
 }
 .upload {
   display: flex;
