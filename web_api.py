@@ -806,11 +806,18 @@ def certstream_status():
         int(_bucket_counts_for_run(run_id).get("all", 0))
         if run_id else 0
     )
+    # A completed domain is not necessarily a retained company. Most certificate
+    # domains are screened out and intentionally discarded; expose that side of
+    # the funnel explicitly so the UI never implies that every completed screen
+    # should appear in a classification bucket.
+    screening_complete = int(current_run_queue.get("complete", 0) or 0)
+    discarded_after_screening = max(screening_complete - retained_in_buckets, 0)
     desired = bool(read_control()["desired"].get("pipeline", False))
     return {
         **status,
         "current_run_queue": current_run_queue,
         "retained_in_buckets": retained_in_buckets,
+        "discarded_after_screening": discarded_after_screening,
         "desired_running": desired,
         "pause_requested": not desired,
     }

@@ -332,6 +332,43 @@ def test_certstream_status_exposes_pause_request(monkeypatch):
     assert response.json()["pause_requested"] is True
 
 
+def test_certstream_status_reconciles_completed_domains_with_retained_candidates(monkeypatch):
+    class QueueConnection:
+        def execute(self, *_args, **_kwargs):
+            return self
+
+        def fetchone(self):
+            return {
+                "total": 190,
+                "awaiting_first_attempt": 10,
+                "processing": 4,
+                "retrying": 5,
+                "complete": 171,
+                "failed": 0,
+                "attempts": 210,
+            }
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(web_api, "shared_pipeline_backend_available", lambda: True)
+    monkeypatch.setattr(
+        web_api,
+        "read_pipeline_status",
+        lambda: {"running": True, "stage": "screening", "run_id": "run-1"},
+    )
+    monkeypatch.setattr(web_api, "connect_pipeline_db", QueueConnection)
+    monkeypatch.setattr(web_api, "_bucket_counts_for_run", lambda _run_id: {"all": 3})
+    monkeypatch.setattr(web_api, "read_control", lambda: {"desired": {"pipeline": True}})
+
+    response = client.get("/api/certstream/status")
+
+    assert response.status_code == 200
+    assert response.json()["current_run_queue"]["complete"] == 171
+    assert response.json()["retained_in_buckets"] == 3
+    assert response.json()["discarded_after_screening"] == 168
+
+
 def test_unknown_bucket_and_worker_are_rejected():
     assert client.get("/api/classifications?bucket=wat").status_code == 400
     assert client.post("/api/runtime/wat", json={"desired": True}).status_code == 404

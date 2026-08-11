@@ -1653,12 +1653,17 @@ function CertStreamPage() {
         />
         <Metric label="Ignored repeats" value={fmt(s.repeat_events_ignored)} />
         <Metric
-          label="Screening attempts"
+          label="Worker attempts"
           value={fmt(s.current_run_queue?.attempts ?? s.processed)}
         />
+        <Metric label="Screening complete" value={fmt(s.current_run_queue?.complete)} />
         <Metric
-          label="Retained in buckets"
+          label="Candidates retained"
           value={fmt(s.retained_in_buckets)}
+        />
+        <Metric
+          label="Discarded after screening"
+          value={fmt(s.discarded_after_screening)}
         />
         <Metric
           label="Awaiting first attempt"
@@ -1669,7 +1674,6 @@ function CertStreamPage() {
           value={fmt(s.current_run_queue?.retrying)}
         />
         <Metric label="Screening now" value={fmt(s.current_run_queue?.processing)} />
-        <Metric label="Screening complete" value={fmt(s.current_run_queue?.complete)} />
         <Metric label="Retries exhausted" value={fmt(s.current_run_queue?.failed)} />
         <Metric label="Claude calls" value={fmt(s.claude_calls)} />
         <Metric label="Reviewed by Claude" value={fmt(claude.data?.reviewed)} />
@@ -1677,10 +1681,14 @@ function CertStreamPage() {
         <Metric label="Claude REJECT" value={fmt(claude.data?.rejected)} />
         <Metric label="Awaiting new rubric" value={fmt(claude.data?.awaiting_rescore)} />
       </div>
-      <p className="notice">
-        Certificate discoveries are raw domains, not completed companies. Only successfully
-        scored websites enter Investable, Needs Review, or Hard Denied; unavailable sites stay
-        in the retry queue until they succeed or exhaust retries.
+      <p className="notice certstream-funnel">
+        <strong>{fmt(s.current_run_queue?.complete)} screening decisions</strong>
+        {" = "}
+        <strong>{fmt(s.retained_in_buckets)} candidates in the charts</strong>
+        {" + "}
+        <strong>{fmt(s.discarded_after_screening)} low-signal domains discarded</strong>.
+        Worker attempts can be higher because failed fetches are retried. Only retained
+        candidates appear below.
       </p>
       {claude.data?.warning && (
         <p className="notice">Claude: {claude.data.warning}</p>
