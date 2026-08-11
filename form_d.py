@@ -19,6 +19,7 @@ USER_AGENT = os.getenv(
     "SEC_EDGAR_USER_AGENT",
     "Glasswing Ventures sourcing@glasswing.vc",
 ).strip()
+MAX_TARGET_RAISE = int(os.getenv("FORM_D_MAX_TARGET_RAISE", "15000000"))
 _SEC_LOCK = threading.Lock()
 _LAST_REQUEST = 0.0
 
@@ -109,6 +110,10 @@ def score_filing(row: dict[str, Any]) -> tuple[int, str, str]:
         "real estate", "residential", "commercial", "investing",
     )):
         return 0, "denied", "real_estate_or_investment_vehicle"
+    amount = int(row.get("offering_amount", 0) or 0)
+    sold = int(row.get("amount_sold", 0) or 0)
+    if amount > MAX_TARGET_RAISE or sold > MAX_TARGET_RAISE:
+        return 0, "denied", "raise_above_target_stage"
     # A genuine new issuer filing is reviewable by default. Form D omits the
     # product/website evidence needed for a factual hard denial.
     score = 42
@@ -120,14 +125,11 @@ def score_filing(row: dict[str, Any]) -> tuple[int, str, str]:
     if any(term in industry for term in frontier):
         score += 28
         reasons.append("venture_relevant_industry")
-    amount = int(row.get("offering_amount", 0) or 0)
-    sold = int(row.get("amount_sold", 0) or 0)
-    if 250_000 <= amount <= 75_000_000:
+    if 250_000 <= amount <= 10_000_000:
         score += 18
         reasons.append("venture_scale_raise")
-    elif amount > 500_000_000:
-        score -= 28
-        reasons.append("institutional_scale_vehicle")
+    elif 10_000_000 < amount <= MAX_TARGET_RAISE:
+        reasons.append("upper_end_of_target_raise")
     if sold > 0:
         score += 8
         reasons.append("capital_already_sold")

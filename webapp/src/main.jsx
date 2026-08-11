@@ -1845,7 +1845,7 @@ function CrawlerDiscoveries() {
 
 function FormDPage() {
   const { admin, requestLogin } = useAdmin();
-  const [bucket, setBucket] = useState("all");
+  const [bucket, setBucket] = useState("investable");
   const [tick, setTick] = useState(0);
   const [busy, setBusy] = useState(false);
   const result = useApi(`/api/form-d?bucket=${bucket}&limit=100`, [bucket, tick]);
@@ -1867,12 +1867,20 @@ function FormDPage() {
     } finally { setBusy(false); }
   };
   const money = (value) => value ? `$${Number(value).toLocaleString()}` : "Not disclosed";
+  const signal = (row) => {
+    if (row.reason === "raise_above_target_stage") return "Raise is above our target stage";
+    if (row.reason === "pooled_or_investment_fund") return "Fund or investment vehicle";
+    if (row.reason === "real_estate_or_investment_vehicle") return "Real estate or investment vehicle";
+    if (row.reason === "missing_issuer_identity") return "Incomplete issuer information";
+    if (String(row.reason).includes("venture_relevant_industry")) return "Target-sector operating company";
+    return "Needs a quick partner review";
+  };
   return (
     <>
       <header>
         <p className="eyebrow">SEC fundraising signals</p>
         <h1>Form D Deal Flow</h1>
-        <p>New Regulation D offerings screened for venture relevance. Funds and amendments are removed before partner review.</p>
+        <p>Fresh startup fundraising signals from SEC filings, filtered to Glasswing's target stage.</p>
       </header>
       <section className="crawler-command-bar">
         <div><span className={`dot ${data?.desired ? "" : "paused"}`} /><div><strong>{data?.desired ? "EDGAR monitoring enabled" : "EDGAR monitoring paused"}</strong><span>Checks the SEC every 10 minutes · fair-access limited</span></div></div>
@@ -1884,23 +1892,20 @@ function FormDPage() {
       </section>
       {result.loading && !data ? <Loading /> : result.error && !data ? <ErrorBox>{result.error}</ErrorBox> : data && <>
         <div className="metrics form-d-metrics">
-          <Metric label="Filings processed" value={fmt(data.counts?.all || 0)} />
-          <Metric label="Investable leads" value={fmt(data.counts?.investable || 0)} />
-          <Metric label="Needs review" value={fmt(data.counts?.review || 0)} />
-          <Metric label="Funds / denied" value={fmt(data.counts?.denied || 0)} />
+          <Metric label="New leads" value={fmt(data.counts?.investable || 0)} />
+          <Metric label="Quick review" value={fmt(data.counts?.review || 0)} />
+          <Metric label="Automatically filtered" value={fmt(data.counts?.denied || 0)} />
         </div>
-        <section className="notice"><strong>Python screening is deterministic</strong><span>New Form D notices are scored using issuer type, industry, offering size, capital sold, and investor count. Missing facts do not become fabricated facts.</span></section>
-        <BucketTabs value={bucket} onChange={setBucket} tabs={[["all", "All filings"], ["investable", "Investable"], ["review", "Needs Review"], ["denied", "Hard Denied"]]} />
+        <BucketTabs value={bucket} onChange={setBucket} tabs={[["investable", "New leads"], ["review", "Quick review"], ["denied", "Filtered out"]]} />
         <Table rows={data.rows || []} columns={[
           { key: "company_name", label: "Issuer", sortable: false },
           { key: "filing_date", label: "Filed" },
           { key: "industry", label: "Industry" },
-          { key: "offering_amount", label: "Offering", render: (row) => money(row.offering_amount) },
-          { key: "amount_sold", label: "Sold", render: (row) => money(row.amount_sold) },
-          { key: "score", label: "Score" },
-          { key: "bucket", label: "Decision", render: (row) => <span className={`pill form-d-${row.bucket}`}>{String(row.bucket).replace("denied", "Hard Denied")}</span> },
-          { key: "reason", label: "Why" },
-          { key: "filing_url", label: "SEC", render: (row) => <a href={row.filing_url} target="_blank">View filing</a> },
+          { key: "offering_amount", label: "Target raise", render: (row) => money(row.offering_amount) },
+          { key: "amount_sold", label: "Raised", render: (row) => money(row.amount_sold) },
+          { key: "investors", label: "Investors" },
+          { key: "reason", label: "Signal", sortable: false, render: signal },
+          { key: "filing_url", label: "Filing", sortable: false, render: (row) => <a href={row.filing_url} target="_blank" rel="noreferrer">Open SEC filing</a> },
         ]} />
       </>}
     </>

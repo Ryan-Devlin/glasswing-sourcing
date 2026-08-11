@@ -47,3 +47,17 @@ def test_form_d_real_estate_vehicle_is_hard_denied():
     assert score == 0
     assert bucket == "denied"
     assert reason == "real_estate_or_investment_vehicle"
+
+
+def test_form_d_later_stage_raise_is_filtered_out():
+    score, bucket, reason = score_filing({
+        "company_name": "Mature Technology Inc",
+        "industry": "Other Technology",
+        "entity_type": "Corporation",
+        "offering_amount": 19_000_000,
+        "amount_sold": 19_000_000,
+        "investors": 40,
+    })
+    assert score == 0
+    assert bucket == "denied"
+    assert reason == "raise_above_target_stage"
