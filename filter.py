@@ -3083,7 +3083,15 @@ async def fetch_html(
                 ), []
 
             html = await _read_html_capped(response, _FETCH_MAX_RESPONSE_BYTES)
-            result, links = parse_html(html, str(response.url))
+            # BeautifulSoup parsing is synchronous CPU work. Keeping it on
+            # the event loop made one ugly/large page stall every concurrent
+            # network request in the batch, collapsing CertStream throughput.
+            result, links = await asyncio.get_running_loop().run_in_executor(
+                _SCORING_EXECUTOR,
+                parse_html,
+                html,
+                str(response.url),
+            )
             result.status = response.status
             return result, links
     except Exception as exc:
@@ -3095,25 +3103,34 @@ async def _fetch_candidate_group(
     urls: list[str],
     timeout: float,
 ) -> tuple[Fetch | None, list[str], Fetch | None, list[str]]:
-    """Try apex first; only spend another connection when it is unusable."""
-    best_result: Fetch | None = None
-    best_links: list[str] = []
-    for url in urls:
-        result, links = await fetch_html(session, url, timeout)
-        if not result.url:
-            result.url = url
-        if result.text:
-            return result, links, result, links
-        if (
-            best_result is None
-            or best_result.status is None
-            or (
-                result.status is not None
-                and int(result.status) < int(best_result.status or 999)
-            )
-        ):
-            best_result = result
-            best_links = links
+    """Race apex and www and stop as soon as either yields a real page."""
+    tasks = [asyncio.create_task(fetch_html(session, url, timeout)) for url in urls]
+    completed: list[tuple[Fetch, list[str]]] = []
+    try:
+        for future in asyncio.as_completed(tasks):
+            result, links = await future
+            completed.append((result, links))
+            if result.text:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                return result, links, result, links
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    if not completed:
+        return None, [], None, []
+    best_result, best_links = min(
+        completed,
+        key=lambda item: (
+            item[0].status is None,
+            int(item[0].status or 999),
+        ),
+    )
     return None, [], best_result, best_links
 
 

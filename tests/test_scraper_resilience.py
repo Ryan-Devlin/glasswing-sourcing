@@ -30,7 +30,7 @@ class ScraperResilienceTests(unittest.TestCase):
         self.assertTrue(callable(ai_database.connect))
         self.assertTrue(callable(zone_database.connect))
 
-    def test_apex_success_does_not_open_www_connection(self):
+    def test_apex_and_www_are_raced_for_low_latency(self):
         calls = []
 
         async def fake_fetch(session, url, timeout):
@@ -43,7 +43,10 @@ class ScraperResilienceTests(unittest.TestCase):
                 ["https://example.ai", "https://www.example.ai"],
                 15,
             ))
-        self.assertEqual(calls, ["https://example.ai"])
+        self.assertCountEqual(
+            calls,
+            ["https://example.ai", "https://www.example.ai"],
+        )
         self.assertEqual(result[0].status, 200)
 
     def test_profile_uses_bounded_workers_and_usable_timeout(self):
@@ -69,10 +72,12 @@ class ScraperResilienceTests(unittest.TestCase):
             500, base_batch=75, base_workers=28, base_timeout=12
         )
 
-        self.assertEqual(surge["batch_size"], 28)
-        self.assertEqual(surge["workers"], 28)
-        self.assertEqual(catch_up["batch_size"], 20)
-        self.assertEqual(catch_up["workers"], 20)
+        self.assertEqual(surge["batch_size"], 40)
+        self.assertEqual(surge["workers"], 40)
+        self.assertLessEqual(surge["timeout"], 8)
+        self.assertEqual(catch_up["batch_size"], 28)
+        self.assertEqual(catch_up["workers"], 28)
+        self.assertLessEqual(catch_up["timeout"], 10)
 
     def test_html_payload_default_is_bounded_for_many_parallel_sites(self):
         self.assertLessEqual(screening_filter._FETCH_MAX_RESPONSE_BYTES, 500_000)

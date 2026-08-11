@@ -1572,21 +1572,26 @@ def adaptive_screening_profile(
         # production worker to 6.9 GB RSS and made 97% of requests time out.
         # A smaller one-round batch keeps enough throughput for the live .ai
         # arrival rate without paying for allocator/thread churn all month.
-        surge_workers = min(32, max(16, base_workers))
+        # All-extension CertStream mode has to drain faster than certificates
+        # arrive. Use the configured production ceiling in one wave and keep
+        # the first-pass deadline deliberately short; inaccessible domains
+        # are durable and retried later, so they must not monopolize the hot
+        # acquisition path.
+        surge_workers = 40
         return {
             "mode": "surge",
             "batch_size": surge_workers,
             "workers": surge_workers,
-            "timeout": max(12.0, min(base_timeout, 18.0)),
+            "timeout": max(4.0, min(base_timeout, 8.0)),
             "homepage_only": True,
         }
     if pending >= 250:
-        catch_up_workers = min(20, max(10, base_workers))
+        catch_up_workers = min(32, max(16, base_workers))
         return {
             "mode": "catch_up",
             "batch_size": catch_up_workers,
             "workers": catch_up_workers,
-            "timeout": max(12.0, min(base_timeout, 18.0)),
+            "timeout": max(5.0, min(base_timeout, 10.0)),
             "homepage_only": True,
         }
     # batch_size used to be a fixed 10 against safe_workers's cap of 4 --
