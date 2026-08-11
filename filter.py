@@ -942,16 +942,28 @@ def load_crawler_fetches(domains: list[str]) -> dict[str, Fetch]:
         return {}
 
     results: dict[str, Fetch] = {}
+    conn = None
     try:
-        if not search_db.exists():
-            raise sqlite3.OperationalError("AI search database is absent")
-        conn = sqlite3.connect(
-            f"file:{search_db}?mode=ro",
-            uri=True,
-            timeout=30,
-        )
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA query_only=ON")
+        if using_postgres("AI_SEARCH_DATABASE_URL"):
+            # The intake crawler and screening worker are separate Railway
+            # services. In production the completed crawl lives in the
+            # shared ai_search Postgres schema, not in this worker's local
+            # SQLite path. Missing this branch made every manually submitted
+            # domain get fetched a second time; a transient timeout then left
+            # an otherwise-good intake permanently without a score.
+            from ai_search.database import connect as connect_ai_search
+
+            conn = connect_ai_search(search_db, read_only=True)
+        else:
+            if not search_db.exists():
+                raise sqlite3.OperationalError("AI search database is absent")
+            conn = sqlite3.connect(
+                f"file:{search_db}?mode=ro",
+                uri=True,
+                timeout=30,
+            )
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only=ON")
         for start in range(0, len(normalized), 800):
             batch = normalized[start : start + 800]
             marks = ",".join("?" for _ in batch)
@@ -1014,9 +1026,13 @@ def load_crawler_fetches(domains: list[str]) -> dict[str, Fetch]:
                         crawl_status=crawl_status,
                         crawled_at=crawled_at,
                     )
-        conn.close()
-    except sqlite3.Error:
+    except Exception:
+        # Cache reuse is an optimization for ordinary crawler traffic. A
+        # missing/unavailable cache still falls back to the network fetch.
         pass
+    finally:
+        if conn is not None:
+            conn.close()
 
     if zone_db.exists() or using_postgres("ZONE_UNIVERSE_DATABASE_URL"):
         conn = None
