@@ -612,3 +612,56 @@ class RuleCalibrationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InaccessiblePageRoutingTests(unittest.TestCase):
+    """Error pages must never reach Needs Review.
+
+    Confirmed live 2026-08-11: getapplica.io (a Cloudflare "525 SSL handshake
+    failed" interstitial) and wounder.tech (an "nginx 404 Not Found" page)
+    both sat in Needs Review scoring 5 and 1. Both render real text, so the
+    blank-page ghost check never caught them, and "review" is protected from
+    purging -- so they stayed there permanently.
+    """
+
+    def _route(self, *, page_error="", page_status=200, score=5):
+        return route_company(
+            is_parked=False,
+            is_coming=False,
+            is_agency=False,
+            is_consumer_junk=False,
+            is_placeholder=False,
+            page_error=page_error,
+            page_status=page_status,
+            location_status="UNKNOWN",
+            maturity_risk=0,
+            qualified_for_llm=False,
+            score=score,
+            potential_glasswing_fit=True,
+        )
+
+    def test_http_404_page_is_ghosted_not_sent_to_needs_review(self):
+        bucket, reason = self._route(page_status=404, score=1)
+        self.assertEqual(bucket, "ghost")
+        self.assertEqual(reason, "inaccessible_http_404")
+
+    def test_cloudflare_525_error_page_is_ghosted(self):
+        bucket, reason = self._route(page_status=525, score=5)
+        self.assertEqual(bucket, "ghost")
+        self.assertEqual(reason, "inaccessible_http_525")
+
+    def test_every_4xx_and_5xx_status_is_ghosted(self):
+        for status in (400, 403, 404, 410, 500, 502, 503, 525):
+            with self.subTest(status=status):
+                bucket, _ = self._route(page_status=status)
+                self.assertEqual(bucket, "ghost")
+
+    def test_fetch_error_is_ghosted(self):
+        bucket, reason = self._route(page_error="TimeoutError: fetch timed out")
+        self.assertEqual(bucket, "ghost")
+        self.assertEqual(reason, "inaccessible_site")
+
+    def test_a_reachable_page_is_still_eligible_for_needs_review(self):
+        # The fix must not sweep real, reachable companies into ghost.
+        bucket, _ = self._route(page_status=200, score=55)
+        self.assertNotEqual(bucket, "ghost")

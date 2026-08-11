@@ -3289,12 +3289,17 @@ def route_company(
     if is_placeholder:
         return "reject", "generic_hosting_or_registrar_placeholder"
 
-    # An inaccessible site is not investment evidence. Keep it hidden for
-    # retry/recheck rather than presenting it as a hard denial.
+    # An inaccessible site is not investment evidence. Route it to "ghost",
+    # which is hidden and purged -- NOT "review", which is literally the
+    # Needs Review bucket and is protected from purging. Confirmed live: an
+    # error page that renders text (a Cloudflare "525 SSL handshake failed"
+    # interstitial, an "nginx 404 Not Found") is not blank, so it never fell
+    # through to the blank-page ghost check either, and sat permanently in
+    # Needs Review scoring 1-5.
     if page_error:
-        return "review", "inaccessible_site"
+        return "ghost", "inaccessible_site"
     if page_status and int(page_status) >= 400:
-        return "review", f"inaccessible_http_{page_status}"
+        return "ghost", f"inaccessible_http_{page_status}"
 
     # Explicit scope exclusions.
     if is_non_english:
@@ -4317,12 +4322,18 @@ def apply_run_preferences(
                     or status_text.startswith(("4", "5"))
                     or word_count < 3
                 )
-                # Still Needs Review, not a separate "insufficient" limbo --
+                # A reachable-but-unconvincing page is still Needs Review --
                 # there is no bucket left that a real, factual disqualifier
-                # doesn't route to. This branch only changes the reason
-                # text attached, for context on why it's a weaker candidate.
-                result.at[index, "routing_bucket"] = "review"
-                result.at[index, "viability_label"] = "Needs Review"
+                # doesn't route to. But an unreachable one is not a weaker
+                # candidate, it is not a company page at all, so it must go
+                # to ghost (hidden and purged) rather than sit in Needs
+                # Review forever.
+                result.at[index, "routing_bucket"] = (
+                    "ghost" if inaccessible else "review"
+                )
+                result.at[index, "viability_label"] = (
+                    "Ghost / Inaccessible" if inaccessible else "Needs Review"
+                )
                 result.at[index, "routing_reason"] = (
                     "website_unavailable_or_no_usable_company_evidence"
                     if inaccessible
