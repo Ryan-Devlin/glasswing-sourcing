@@ -1421,20 +1421,25 @@ def _queue_ai_domains(values: list[str], source: str) -> dict[str, object]:
     searchable = 0
     states: dict[str, str] = {}
     with ai_connect(AI_SEARCH_DB) as conn:
-        before = int(conn.execute("SELECT count(*) AS count FROM domains").fetchone()["count"])
         for domain in domains:
             existing = conn.execute(
                 "SELECT latest_crawl_status,last_document_count FROM domains WHERE domain=?",
                 (domain,),
             ).fetchone()
             if existing is None:
-                add_domain(conn, domain, source=source)
+                if not add_domain(
+                    conn, domain, source=source, allow_any_tld=True
+                ):
+                    raise HTTPException(400, f"Invalid domain: {domain}")
+                added += 1
                 states[domain] = "queued"
             elif (
                 str(existing["latest_crawl_status"] or "") == "success"
                 and int(existing["last_document_count"] or 0) > 0
             ):
-                add_domain(conn, domain, source=source)
+                add_domain(
+                    conn, domain, source=source, allow_any_tld=True
+                )
                 searchable += 1
                 states[domain] = "searchable"
             else:
@@ -1447,8 +1452,6 @@ def _queue_ai_domains(values: list[str], source: str) -> dict[str, object]:
                 requeued += 1
                 states[domain] = "requeued"
         conn.commit()
-        after = int(conn.execute("SELECT count(*) AS count FROM domains").fetchone()["count"])
-        added = max(0, after - before)
     return {
         "received": len(domains),
         "added": added,

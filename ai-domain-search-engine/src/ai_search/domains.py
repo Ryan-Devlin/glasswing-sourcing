@@ -4,7 +4,7 @@ import ipaddress
 from urllib.parse import urlsplit
 
 
-def normalize_domain(value: object) -> str:
+def _normalize_domain(value: object, *, require_ai: bool) -> str:
     text = str(value or "").strip().lower()
     if not text:
         return ""
@@ -19,7 +19,7 @@ def normalize_domain(value: object) -> str:
     except ValueError:
         pass
     labels = host.split(".")
-    if len(labels) < 2 or labels[-1] != "ai":
+    if len(labels) < 2 or (require_ai and labels[-1] != "ai"):
         return ""
     if any(
         not label
@@ -32,3 +32,12 @@ def normalize_domain(value: object) -> str:
         return ""
     return host
 
+
+def normalize_domain(value: object) -> str:
+    """Normalize a domain discovered by the dedicated .ai source."""
+    return _normalize_domain(value, require_ai=True)
+
+
+def normalize_any_domain(value: object) -> str:
+    """Normalize a manually supplied domain from the source-agnostic intake."""
+    return _normalize_domain(value, require_ai=False)

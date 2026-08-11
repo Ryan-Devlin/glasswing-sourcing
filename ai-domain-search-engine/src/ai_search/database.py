@@ -11,7 +11,7 @@ from db_backend import (
     using_postgres,
 )
 
-from .domains import normalize_domain
+from .domains import normalize_any_domain, normalize_domain
 
 AI_SEARCH_DATABASE_ENV_VAR = "AI_SEARCH_DATABASE_URL"
 
@@ -391,9 +391,14 @@ def migrate(conn: sqlite3.Connection) -> None:
 
 
 def add_domain(
-    conn: sqlite3.Connection, value: object, source: str = "manual"
+    conn: sqlite3.Connection, value: object, source: str = "manual",
+    *, allow_any_tld: bool = False,
 ) -> bool:
-    domain = normalize_domain(value)
+    domain = (
+        normalize_any_domain(value)
+        if allow_any_tld
+        else normalize_domain(value)
+    )
     if not domain:
         return False
     now = utc_now()
