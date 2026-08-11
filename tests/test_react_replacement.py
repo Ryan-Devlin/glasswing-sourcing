@@ -7,7 +7,7 @@ def test_react_app_has_every_primary_page_and_no_streamlit_dependency():
         "Home",
         "CertStream Scraper",
         "Form D Deal Flow",
-        "CSV Scraper",
+        "Domain Intake",
         "Domain Crawler (.com, .app)",
         "System Health",
     ):
@@ -18,6 +18,8 @@ def test_react_app_has_every_primary_page_and_no_streamlit_dependency():
     assert 'aria-label="Classification bucket"' not in source
     assert 'aria-label="Crawler bucket"' not in source
     assert "Array.isArray(result.data?.rows)" in source
+    assert '"/api/ai/domain"' in source
+    assert "Run through platform" in source
     for metric in ("Domains available", "Waiting to scrape", "Searchable pages"):
         assert metric in source
     for zone_metric in ("Investable retained", "Discarded", "Fetch failures"):

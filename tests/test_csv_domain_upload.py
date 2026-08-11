@@ -1,12 +1,12 @@
 from pathlib import Path
 
 
-def test_page_is_retitled_csv_scraper():
+def test_page_is_retitled_domain_intake():
     main = Path("main.py").read_text(encoding="utf-8")
     ai_search = Path("pages/ai_search.py").read_text(encoding="utf-8")
-    assert 'title="CSV Scraper"' in main
+    assert 'title="Domain Intake"' in main
     assert 'title="Domain Crawler (.ai)"' not in main
-    assert 'st.title("CSV Scraper")' in ai_search
+    assert 'st.title("Domain Intake")' in ai_search
 
 
 def test_upload_adds_to_the_shared_queue_and_this_pages_own_discovered_count():

@@ -235,6 +235,10 @@ class PipelineFilters(BaseModel):
     claude_daily_limit: int = Field(400, ge=1, le=5000)
 
 
+class DomainIntakeRequest(BaseModel):
+    domain: str = Field(min_length=1, max_length=2048)
+
+
 def _admin_password() -> str:
     return os.getenv("GLASSWING_ADMIN_PASSWORD", "Glasswing")
 
@@ -1334,30 +1338,63 @@ def zone_candidates(limit: int = Query(25, ge=1, le=50)):
     }
 
 
-@app.post("/api/ai/upload", dependencies=[Depends(_require_admin)])
-async def upload_domains(file: UploadFile = File(...)):
+def _queue_ai_domains(values: list[str], source: str) -> dict[str, int]:
     from ai_search.database import add_domain
     from ai_search.database import connect as ai_connect
 
-    content = (await file.read()).decode("utf-8", errors="ignore")
-    lines = content.splitlines()
-    if file.filename and file.filename.lower().endswith(".csv") and lines:
-        lines = lines[1:]
-    domains = list(dict.fromkeys(stable_domain(line.split(",")[0]) for line in lines))
+    domains = list(dict.fromkeys(stable_domain(value) for value in values))
     domains = [domain for domain in domains if domain]
+    if not domains:
+        raise HTTPException(400, "Enter a valid domain or website URL")
     added = 0
     with ai_connect(AI_SEARCH_DB) as conn:
         before = int(conn.execute("SELECT count(*) AS count FROM domains").fetchone()["count"])
         for domain in domains:
-            add_domain(conn, domain)
+            add_domain(conn, domain, source=source)
         conn.commit()
         after = int(conn.execute("SELECT count(*) AS count FROM domains").fetchone()["count"])
         added = max(0, after - before)
-    record_admin_audit("domains_uploaded", file.filename or "upload", f"received={len(domains)} added={added}")
     return {
         "received": len(domains),
         "added": added,
         "duplicates": max(0, len(domains) - added),
+        "domain": domains[0] if len(domains) == 1 else "",
+    }
+
+
+@app.post("/api/ai/domain", dependencies=[Depends(_require_admin)])
+def intake_domain(payload: DomainIntakeRequest):
+    result = _queue_ai_domains([payload.domain], "manual_domain_intake")
+    domain = result["domain"]
+    record_admin_audit(
+        "domain_submitted", domain,
+        "queued" if result["added"] else "already_known",
+    )
+    return {
+        **result,
+        "message": (
+            "Domain queued for scraping and scoring."
+            if result["added"]
+            else "Domain is already in the platform."
+        ),
+    }
+
+
+@app.post("/api/ai/upload", dependencies=[Depends(_require_admin)])
+async def upload_domains(file: UploadFile = File(...)):
+    content = (await file.read()).decode("utf-8", errors="ignore")
+    lines = content.splitlines()
+    if file.filename and file.filename.lower().endswith(".csv") and lines:
+        lines = lines[1:]
+    result = _queue_ai_domains(
+        [line.split(",")[0] for line in lines], "csv_upload"
+    )
+    record_admin_audit(
+        "domains_uploaded", file.filename or "upload",
+        f"received={result['received']} added={result['added']}",
+    )
+    return {
+        **result,
         "message": "New domains are queued automatically and become searchable after the crawler finishes.",
     }
 

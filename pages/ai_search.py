@@ -122,7 +122,7 @@ def apply_actions(edited: pd.DataFrame) -> dict[str, int]:
     return counts
 
 
-st.title("CSV Scraper")
+st.title("Domain Intake")
 
 if not using_postgres(AI_SEARCH_DATABASE_ENV_VAR) and not SEARCH_DB.exists():
     st.error(f"Search database not found: {SEARCH_DB}")

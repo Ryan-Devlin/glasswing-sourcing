@@ -37,7 +37,7 @@ import { dealAgeLabel, formatCount as fmt, pageCount, plainSnippet } from "./dom
 const NAV = [
   ["home", "Home", Home],
   ["certstream", "CertStream Scraper", Activity],
-  ["csv", "CSV Scraper", Database],
+  ["csv", "Domain Intake", Database],
   ["domains", "Domain Crawler (.com, .app)", Globe2],
   ["health", "System Health", HeartPulse],
   ["claude", "Claude Queue", Bot],
@@ -1963,6 +1963,9 @@ function SearchCorpusPage({ kind }) {
   );
   const [upload, setUpload] = useState(null);
   const [uploading, setUploading] = useState(false);
+  const [quickDomain, setQuickDomain] = useState("");
+  const [quickResult, setQuickResult] = useState(null);
+  const [quickBusy, setQuickBusy] = useState(false);
   const rows = Array.isArray(result.data?.rows) ? result.data.rows : [];
   const crawlerUpdatedAt = Date.parse(metrics.data?.updated_at || "");
   const crawlerStale = Boolean(
@@ -2027,10 +2030,10 @@ function SearchCorpusPage({ kind }) {
     <>
       <header>
         <p className="eyebrow">Crawler corpus</p>
-        <h1>{isAi ? "CSV Scraper" : "Domain Crawler (.com, .app)"}</h1>
+        <h1>{isAi ? "Domain Intake" : "Domain Crawler (.com, .app)"}</h1>
         <p>
           {isAi
-            ? "Upload or search crawled domains from any source."
+            ? "Paste one website or upload a domain list. Every domain follows the same scraping, scoring, bucketing, and Claude-review workflow."
             : "Rank newly observed domains, discard low-value sites, and surface only investable deal flow."}
         </p>
       </header>
@@ -2093,7 +2096,7 @@ function SearchCorpusPage({ kind }) {
       {isAi && metrics.data && (
         <section className={`notice corpus-status ${crawlerStale ? "stale" : ""}`}>
           <strong>
-            CSV crawler: {crawlerStale
+            Intake crawler: {crawlerStale
               ? "stalled"
               : String(metrics.data.crawler_status || "unknown").replaceAll("_", " ")}
           </strong>
@@ -2128,9 +2131,58 @@ function SearchCorpusPage({ kind }) {
       ) : (
         <>
           {isAi && (
-            <section className="upload">
-              <Upload />
-              <div>
+            <section className="intake-panel">
+              <div className="quick-intake">
+                <Globe2 size={24} />
+                <div>
+                  <h3>Check a domain</h3>
+                  <p>Paste a domain or full website URL.</p>
+                  <form onSubmit={async (event) => {
+                    event.preventDefault();
+                    if (!admin) return requestLogin();
+                    setQuickBusy(true);
+                    setQuickResult(null);
+                    try {
+                      const response = await api("/api/ai/domain", {
+                        method: "POST",
+                        body: JSON.stringify({ domain: quickDomain }),
+                      });
+                      setQuickResult(response);
+                      setQuickDomain("");
+                      setMetricsTick((value) => value + 1);
+                    } catch (error) {
+                      setQuickResult({ error: error.payload?.detail || error.message });
+                    } finally {
+                      setQuickBusy(false);
+                    }
+                  }}>
+                    <input
+                      type="text"
+                      inputMode="url"
+                      value={quickDomain}
+                      onChange={(event) => setQuickDomain(event.target.value)}
+                      placeholder="company.com"
+                      aria-label="Domain or website URL"
+                      required
+                    />
+                    <button className="primary" type="submit" disabled={quickBusy || !quickDomain.trim()}>
+                      {quickBusy ? <RefreshCw className="spin" size={16} /> : <Play size={16} />}
+                      {quickBusy ? "Queuing…" : "Run through platform"}
+                    </button>
+                  </form>
+                  {!admin && <button onClick={requestLogin}>Admin login to submit</button>}
+                  {quickResult?.error && <p className="upload-error">{quickResult.error}</p>}
+                  {quickResult && !quickResult.error && (
+                    <div className="upload-result">
+                      <strong>{quickResult.message}</strong>
+                      <span>{quickResult.domain} will appear in its scored bucket when processing finishes.</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div className="upload bulk-intake">
+                <Upload />
+                <div>
                 <h3>Upload domains</h3>
                 <input
                   type="file"
@@ -2178,6 +2230,7 @@ function SearchCorpusPage({ kind }) {
                     </span>
                   </div>
                 )}
+              </div>
               </div>
             </section>
           )}
