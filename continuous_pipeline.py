@@ -1638,14 +1638,23 @@ def adaptive_screening_profile(
         # production worker to 6.9 GB RSS and made 97% of requests time out.
         # A smaller one-round batch keeps enough throughput for the live .ai
         # arrival rate without paying for allocator/thread churn all month.
-        # Production measurement (2026-08-11): 40 concurrent domains
-        # collapsed Railway's resolver/connection pool and made virtually
-        # every request time out. The exact same container completed a
-        # 10-domain wave in 5.3s (8 real pages, 2 immediate DNS failures),
-        # which is >100 attempts/minute and comfortably above the observed
-        # ~30/minute CertStream arrival rate. Max force means sustained
-        # throughput, not maximum simultaneous sockets.
-        surge_workers = 10
+        # An earlier measurement concluded 40 concurrent domains "collapsed
+        # Railway's resolver" because virtually every request timed out, and
+        # dropped this to 10. That reading was taken while every batch's
+        # persistence was blocked on Postgres lock convoys (a batch of 10
+        # rows took 18.7s), which stalls this event loop and makes every
+        # in-flight aiohttp timeout fire at once -- the timeouts were a
+        # symptom of the blocked loop, not of socket exhaustion. With the
+        # convoys fixed, 10 workers caps a wave at ~97 domains/minute, which
+        # sits exactly at the live arrival rate: no headroom to drain the
+        # standing backlog or to enable more extensions. Raise it enough to
+        # have real headroom while staying well under the untrusted 40, and
+        # keep it tunable without a redeploy so the ceiling can be found by
+        # measurement (watch fetch_failure_rate and worker_rss_mb) rather
+        # than by another round of guessing.
+        surge_workers = max(
+            1, min(40, int(os.getenv("STREAM_SURGE_WORKERS", "24")))
+        )
         return {
             "mode": "surge",
             "batch_size": surge_workers,

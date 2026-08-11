@@ -72,8 +72,13 @@ class ScraperResilienceTests(unittest.TestCase):
             500, base_batch=75, base_workers=28, base_timeout=12
         )
 
-        self.assertEqual(surge["batch_size"], 10)
-        self.assertEqual(surge["workers"], 10)
+        # Surge concurrency must stay one wave (batch_size == workers) and
+        # keep enough headroom over the live arrival rate to drain a backlog,
+        # while staying well under the 40 that was previously blamed for mass
+        # timeouts. Tunable via STREAM_SURGE_WORKERS without a redeploy.
+        self.assertEqual(surge["batch_size"], surge["workers"])
+        self.assertGreaterEqual(surge["workers"], 16)
+        self.assertLessEqual(surge["workers"], 32)
         self.assertLessEqual(surge["timeout"], 8)
         self.assertEqual(catch_up["batch_size"], 8)
         self.assertEqual(catch_up["workers"], 8)
@@ -448,3 +453,18 @@ class ClaudePipelineIsFixedNotEditableTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_surge_workers_are_tunable_without_a_redeploy(self):
+        with patch.dict("os.environ", {"STREAM_SURGE_WORKERS": "12"}):
+            profile = adaptive_screening_profile(
+                10_000, base_batch=75, base_workers=28, base_timeout=12
+            )
+        self.assertEqual(profile["workers"], 12)
+        self.assertEqual(profile["batch_size"], 12)
+
+        # An absurd value must still be clamped rather than trusted.
+        with patch.dict("os.environ", {"STREAM_SURGE_WORKERS": "500"}):
+            profile = adaptive_screening_profile(
+                10_000, base_batch=75, base_workers=28, base_timeout=12
+            )
+        self.assertEqual(profile["workers"], 40)
