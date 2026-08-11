@@ -69,10 +69,10 @@ class ScraperResilienceTests(unittest.TestCase):
             500, base_batch=75, base_workers=28, base_timeout=12
         )
 
-        self.assertEqual(surge["batch_size"], 24)
-        self.assertEqual(surge["workers"], 24)
-        self.assertEqual(catch_up["batch_size"], 16)
-        self.assertEqual(catch_up["workers"], 16)
+        self.assertEqual(surge["batch_size"], 28)
+        self.assertEqual(surge["workers"], 28)
+        self.assertEqual(catch_up["batch_size"], 20)
+        self.assertEqual(catch_up["workers"], 20)
 
     def test_html_payload_default_is_bounded_for_many_parallel_sites(self):
         self.assertLessEqual(screening_filter._FETCH_MAX_RESPONSE_BYTES, 500_000)
@@ -81,6 +81,13 @@ class ScraperResilienceTests(unittest.TestCase):
         with patch.dict("os.environ", {"GLASSWING_PIPELINE_RECYCLE_RSS_MB": "1200"}):
             self.assertFalse(continuous_pipeline.should_recycle_worker(1199))
             self.assertTrue(continuous_pipeline.should_recycle_worker(1201))
+
+    def test_backlog_call_skips_duplicate_immediate_timeout_retry(self):
+        source = Path("continuous_pipeline.py").read_text(encoding="utf-8")
+        call = source.split("screening_filter.screen_records(", 1)[1].split(
+            "timeout=outer_deadline_seconds", 1
+        )[0]
+        self.assertIn('retry_timeouts=profile["mode"] == "normal"', call)
 
     def test_timeout_rows_are_retried_before_persistence(self):
         calls = 0

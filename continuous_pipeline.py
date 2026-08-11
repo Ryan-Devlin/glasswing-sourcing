@@ -1545,7 +1545,7 @@ def adaptive_screening_profile(
         # production worker to 6.9 GB RSS and made 97% of requests time out.
         # A smaller one-round batch keeps enough throughput for the live .ai
         # arrival rate without paying for allocator/thread churn all month.
-        surge_workers = min(24, max(12, base_workers))
+        surge_workers = min(32, max(16, base_workers))
         return {
             "mode": "surge",
             "batch_size": surge_workers,
@@ -1554,7 +1554,7 @@ def adaptive_screening_profile(
             "homepage_only": True,
         }
     if pending >= 250:
-        catch_up_workers = min(16, max(8, base_workers))
+        catch_up_workers = min(20, max(10, base_workers))
         return {
             "mode": "catch_up",
             "batch_size": catch_up_workers,
@@ -1835,6 +1835,11 @@ async def worker_loop(
                         workers=int(profile["workers"]),
                         timeout=float(profile["timeout"]),
                         homepage_only=bool(profile["homepage_only"]),
+                        # Backlog timeouts already return to the durable
+                        # queue with exponential backoff. Retrying them again
+                        # inside the same hot batch duplicated network/CPU
+                        # work and cut throughput below the live arrival rate.
+                        retry_timeouts=profile["mode"] == "normal",
                         persist=True,
                     ),
                     timeout=outer_deadline_seconds,

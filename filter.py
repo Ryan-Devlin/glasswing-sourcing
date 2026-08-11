@@ -4636,6 +4636,7 @@ async def screen_records(
     workers: int,
     timeout: float,
     homepage_only: bool = False,
+    retry_timeouts: bool = True,
     persist: bool = True,
 ) -> tuple[pd.DataFrame, dict[str, int]]:
     """Screen records directly inside the caller's Python process."""
@@ -4752,7 +4753,7 @@ async def screen_records(
     mostly_timed_out = (
         len(records) >= 5 and len(retry_indexes) / len(records) >= 0.5
     )
-    if retry_indexes and not mostly_timed_out:
+    if retry_timeouts and retry_indexes and not mostly_timed_out:
         # A fixed cap of 8 was tuned for small (~75-domain) batches --
         # confirmed live: once batch sizes scaled up with the worker
         # count (batch_size == workers, so every domain gets its own
