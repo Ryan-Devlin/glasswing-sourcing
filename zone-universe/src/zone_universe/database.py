@@ -8,6 +8,7 @@ from db_backend import (
     PostgresConnection,
     acquire_advisory_lock_with_timeout,
     connect_postgres,
+    postgres_schema_is_current,
     using_postgres,
 )
 
@@ -256,8 +257,9 @@ def _already_bigint(conn: PostgresConnection, table: str, column: str) -> bool:
 
 
 def migrate_postgres(conn: PostgresConnection) -> None:
-    conn.executescript(_POSTGRES_SCHEMA)
-    conn.commit()
+    if not postgres_schema_is_current(conn, "zone_universe", _POSTGRES_SCHEMA):
+        conn.executescript(_POSTGRES_SCHEMA)
+        conn.commit()
     shard_columns = {
         str(row["column_name"])
         for row in conn.execute(

@@ -126,3 +126,95 @@ def test_acquire_advisory_lock_gives_up_after_timeout_instead_of_hanging():
     )
     assert result is False
     assert conn.calls >= 1
+
+
+class _FakeCatalogConnection:
+    """Answers the schema-object catalog query with a fixed object list."""
+
+    def __init__(self, present):
+        self.present = list(present)
+        self.scripts = []
+
+    def execute(self, sql, params=()):
+        self.scripts.append(sql)
+
+        class Cursor:
+            def __init__(self, rows):
+                self._rows = rows
+
+            def fetchall(self):
+                return self._rows
+
+        return Cursor([{"name": name} for name in self.present])
+
+
+def test_schema_objects_in_script_parses_tables_and_indexes():
+    script = """
+        CREATE TABLE IF NOT EXISTS pages (id SERIAL PRIMARY KEY);
+        CREATE TABLE domains (id SERIAL PRIMARY KEY);
+        CREATE INDEX IF NOT EXISTS idx_pages_domain ON pages(domain_id);
+        CREATE UNIQUE INDEX idx_domains_name ON domains(name);
+    """
+    assert db_backend.schema_objects_in_script(script) == {
+        "pages",
+        "domains",
+        "idx_pages_domain",
+        "idx_domains_name",
+    }
+
+
+def test_schema_gate_skips_ddl_when_every_object_exists():
+    script = (
+        "CREATE TABLE IF NOT EXISTS pages (id SERIAL);"
+        "CREATE INDEX IF NOT EXISTS idx_pages_domain ON pages(domain_id);"
+    )
+    conn = _FakeCatalogConnection(["pages", "idx_pages_domain", "extra_table"])
+    assert db_backend.postgres_schema_is_current(conn, "ai_search", script) is True
+
+
+def test_schema_gate_runs_ddl_when_an_object_is_missing():
+    script = (
+        "CREATE TABLE IF NOT EXISTS pages (id SERIAL);"
+        "CREATE INDEX IF NOT EXISTS idx_pages_domain ON pages(domain_id);"
+    )
+    conn = _FakeCatalogConnection(["pages"])
+    assert db_backend.postgres_schema_is_current(conn, "ai_search", script) is False
+
+
+def test_schema_gate_is_case_insensitive_about_catalog_names():
+    script = "CREATE TABLE IF NOT EXISTS Pages (id SERIAL);"
+    conn = _FakeCatalogConnection(["pages"])
+    assert db_backend.postgres_schema_is_current(conn, "ai_search", script) is True
+
+
+def test_schema_gate_runs_ddl_when_a_create_name_cannot_be_parsed():
+    # Fail safe: an unparseable CREATE must never let the gate claim the
+    # schema is complete, or a genuinely missing object would never be built.
+    script = (
+        "CREATE TABLE IF NOT EXISTS pages (id SERIAL);"
+        'CREATE TABLE "quoted name" (id SERIAL);'
+    )
+    conn = _FakeCatalogConnection(["pages"])
+    assert db_backend.postgres_schema_is_current(conn, "ai_search", script) is False
+
+
+def test_real_subsystem_schemas_are_fully_parseable():
+    """Every CREATE in the shipped schemas must be name-parseable.
+
+    If a future edit adds a form the parser misses, the gate degrades to
+    always running the DDL (safe but slow) -- catch that here instead.
+    """
+    import importlib
+
+    for module_name, schema in (
+        ("ai_search.database", "ai_search"),
+        ("zone_universe.database", "zone_universe"),
+    ):
+        module = importlib.import_module(module_name)
+        script = module._POSTGRES_SCHEMA
+        parsed = db_backend.schema_objects_in_script(script)
+        creates = db_backend._DDL_CREATE_COUNT_PATTERN.findall(script)
+        assert len(parsed) == len(creates), (
+            f"{module_name}: parsed {len(parsed)} names from "
+            f"{len(creates)} CREATE statements"
+        )

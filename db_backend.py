@@ -16,6 +16,7 @@ copies of every query.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import threading
 import time
@@ -245,3 +246,54 @@ def table_columns_postgres(conn: PostgresConnection, table: str) -> set[str]:
         (table,),
     )
     return {str(row["column_name"]) for row in cursor.fetchall()}
+
+
+_DDL_OBJECT_PATTERN = re.compile(
+    r"CREATE\s+(?:UNIQUE\s+)?(?:TABLE|INDEX)(?:\s+IF\s+NOT\s+EXISTS)?\s+"
+    r"([A-Za-z_][A-Za-z0-9_]*)",
+    re.IGNORECASE,
+)
+_DDL_CREATE_COUNT_PATTERN = re.compile(
+    r"CREATE\s+(?:UNIQUE\s+)?(?:TABLE|INDEX)\b", re.IGNORECASE
+)
+
+
+def schema_objects_in_script(script: str) -> set[str]:
+    """Names of the tables and indexes a CREATE-only DDL script would define."""
+    return {match.lower() for match in _DDL_OBJECT_PATTERN.findall(script)}
+
+
+def postgres_schema_is_current(
+    conn: PostgresConnection,
+    schema: str,
+    script: str,
+) -> bool:
+    """Whether every object a DDL script defines already exists in `schema`.
+
+    `CREATE TABLE IF NOT EXISTS` still takes a conflicting lock on an
+    already-existing table, so re-running a full schema script on every
+    connect serializes against live writers. Confirmed live: the ai_search
+    script ran on each of the ~5 connections the screening loop opened per
+    batch and deadlocked against the crawler's own `INSERT INTO pages`,
+    holding the migration advisory lock for 38 minutes and freezing screening
+    entirely. Reading the catalog first takes only ACCESS SHARE, so the
+    common case (schema already built) never reaches the DDL at all.
+    """
+    expected = schema_objects_in_script(script)
+    # Fail safe: if any CREATE statement's name could not be parsed, fall back
+    # to running the script rather than risk skipping an object that is
+    # genuinely missing.
+    if len(expected) != len(_DDL_CREATE_COUNT_PATTERN.findall(script)):
+        return False
+    if not expected:
+        return True
+    rows = conn.execute(
+        """
+        SELECT tablename AS name FROM pg_tables WHERE schemaname = ?
+        UNION ALL
+        SELECT indexname AS name FROM pg_indexes WHERE schemaname = ?
+        """,
+        (schema, schema),
+    ).fetchall()
+    present = {str(row["name"]).lower() for row in rows}
+    return expected.issubset(present)

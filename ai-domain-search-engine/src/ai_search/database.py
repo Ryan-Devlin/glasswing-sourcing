@@ -8,6 +8,7 @@ from db_backend import (
     PostgresConnection,
     acquire_advisory_lock_with_timeout,
     connect_postgres,
+    postgres_schema_is_current,
     using_postgres,
 )
 
@@ -198,8 +199,9 @@ def _already_bigint(conn: PostgresConnection, table: str, column: str) -> bool:
 
 
 def migrate_postgres(conn: PostgresConnection) -> None:
-    conn.executescript(_POSTGRES_SCHEMA)
-    conn.commit()
+    if not postgres_schema_is_current(conn, "ai_search", _POSTGRES_SCHEMA):
+        conn.executescript(_POSTGRES_SCHEMA)
+        conn.commit()
     # These columns were originally created as plain INTEGER. zone_universe's
     # real .com zone file overflowed the equivalent columns there (~4.8GB vs
     # Postgres's ~2.1GB 32-bit int max) -- something SQLite's flexible typing
