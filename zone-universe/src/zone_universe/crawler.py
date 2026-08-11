@@ -1344,10 +1344,18 @@ async def crawl_once(
             settings,
         )
         buckets = classification.get("buckets", {})
+        scores = classification.get("scores", {})
         retained_domains = [
             domain
             for domain in successful_domains
-            if buckets.get(domain) == "priority"
+            if (
+                buckets.get(domain) == "priority"
+                or (
+                    buckets.get(domain) == "review"
+                    and int(scores.get(domain, 0) or 0)
+                    >= settings.html_archive_minimum_score
+                )
+            )
         ]
         discarded_domains = [
             domain
@@ -1362,12 +1370,17 @@ async def crawl_once(
             discarded_domains,
         )
         retention_decided = True
-        classification["retained_investable"] = len(retained_domains)
+        classification["retained_qualified"] = len(retained_domains)
+        classification["retained_investable"] = sum(
+            buckets.get(domain) == "priority" for domain in retained_domains
+        )
+        classification["retained_needs_review"] = sum(
+            buckets.get(domain) == "review" for domain in retained_domains
+        )
         classification["discarded_pages"] = discarded_pages
         classification["discarded_classifications"] = discarded_classifications
         set_state(conn, "last_python_classification", classification)
         if settings.retain_raw_html:
-            scores = classification.get("scores", {})
             archived = 0
             for outcome in outcomes:
                 if outcome.status != "success":

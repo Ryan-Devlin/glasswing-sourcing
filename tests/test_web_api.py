@@ -342,6 +342,11 @@ def test_zone_stats_report_retained_and_discarded_separately(monkeypatch):
     monkeypatch.setattr(web_api, "zone_connect", lambda *args, **kwargs: ZoneConnection())
     monkeypatch.setattr(
         web_api,
+        "source_bucket_counts",
+        lambda _prefixes: {"priority": 4, "review": 1},
+    )
+    monkeypatch.setattr(
+        web_api,
         "zone_diagnostics",
         lambda conn: {
             "queued_domains": 1000,
@@ -376,6 +381,33 @@ def test_zone_stats_report_retained_and_discarded_separately(monkeypatch):
     assert result["live_rate"] == 100.0
     assert result["relevance_rate"] == 20.0
     assert result["batch_rate"] == 42.5
+    assert result["investable"] == 4
+    assert result["needs_review"] == 1
+
+
+def test_zone_candidates_return_only_qualified_retained_queue(monkeypatch):
+    monkeypatch.setattr(
+        web_api,
+        "source_bucket_counts",
+        lambda prefixes: {"priority": 2, "review": 3, "reject": 90},
+    )
+    captured = {}
+
+    def query(prefixes, buckets, **kwargs):
+        captured.update(prefixes=prefixes, buckets=buckets, **kwargs)
+        return [{"domain": "candidate.app", "routing_bucket": "review"}]
+
+    monkeypatch.setattr(web_api, "query_source_classifications", query)
+    monkeypatch.setattr(web_api, "hidden_domain_set", lambda domains: set())
+    monkeypatch.setattr(web_api, "tracked_domain_set", lambda domains: set())
+    monkeypatch.setattr(web_api, "_with_claude", lambda rows: rows)
+
+    result = client.get("/api/corpus/zone/candidates?limit=25").json()
+
+    assert result["total"] == 5
+    assert result["investable"] == 2
+    assert result["needs_review"] == 3
+    assert captured["buckets"] == ("priority", "review")
 
 
 def test_crawler_company_tables_are_source_scoped_and_paged(monkeypatch):

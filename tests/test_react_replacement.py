@@ -27,11 +27,11 @@ def test_react_app_has_every_primary_page_and_no_streamlit_dependency():
         "Live websites",
         "Relevant companies",
         "Investable deals",
-        "Deal yield",
+        "Qualified candidates",
         "Screening speed",
     ):
         assert zone_metric in source
-    assert "Deal-first mode · investable storage only" in source
+    assert "Deal-first mode · qualified-candidate storage only" in source
     assert "controlCrawler" in source
     assert "function GlobalWorkerControls" in source
     assert "<GlobalWorkerControls />" in source
@@ -57,7 +57,8 @@ def test_react_app_has_every_primary_page_and_no_streamlit_dependency():
     assert "set((current) => ({" in source
     assert "responseCache" in source
     assert "<DeferredContent minHeight={420}>" in source
-    assert "New investable discoveries" in source
+    assert "Qualified new deal candidates" in source
+    assert "/api/corpus/zone/candidates?limit=25" in source
     assert 'kind === "zone" ? [' in source
 
     styles = Path("webapp/src/polish.css").read_text(encoding="utf-8")

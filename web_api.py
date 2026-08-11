@@ -1131,6 +1131,9 @@ def corpus_stats(kind: Literal["ai", "zone"]):
             heartbeat = ""
             latest_deal_at = ""
     retained = int(details.get("success", 0) or 0)
+    zone_bucket_counts = source_bucket_counts(CORPUS_SOURCES["zone"])
+    investable = int(zone_bucket_counts.get("priority", 0) or 0)
+    needs_review = int(zone_bucket_counts.get("review", 0) or 0)
     discarded = max(
         0,
         int(details.get("low_priority_quarantined", 0) or 0)
@@ -1175,6 +1178,8 @@ def corpus_stats(kind: Literal["ai", "zone"]):
         "live": live,
         "crawled": retained,
         "retained": retained,
+        "investable": investable,
+        "needs_review": needs_review,
         "discarded": discarded,
         "failed": details.get("network_failed", 0),
         "preflight_rejected": details.get("preflight_rejected", 0),
@@ -1182,7 +1187,8 @@ def corpus_stats(kind: Literal["ai", "zone"]):
         "searchable": details.get("searchable_pages", 0),
         "live_rate": round((live / attempted * 100) if attempted else 0, 2),
         "relevance_rate": round((promising / live * 100) if live else 0, 2),
-        "investable_yield": round((retained / processed * 100) if processed else 0, 4),
+        "candidate_yield": round((retained / processed * 100) if processed else 0, 4),
+        "investable_yield": round((investable / processed * 100) if processed else 0, 4),
         "batch_rate": batch_rate,
         "recent_batch": recent_batch,
         "updated_at": heartbeat,
@@ -1222,6 +1228,35 @@ def corpus_companies(
         sort=sort,
     )
     return {"rows": _with_claude(rows), "total": total, "page": page, "page_size": page_size}
+
+
+@app.get("/api/corpus/zone/candidates")
+def zone_candidates(limit: int = Query(25, ge=1, le=50)):
+    """Return the small retained deal queue: approved plus high-score review."""
+    raw = source_bucket_counts(CORPUS_SOURCES["zone"])
+    rows = query_source_classifications(
+        CORPUS_SOURCES["zone"],
+        ("priority", "review"),
+        limit=limit,
+        offset=0,
+        sort="Recently classified",
+    )
+    hidden = hidden_domain_set([row["domain"] for row in rows])
+    tracked = tracked_domain_set([row["domain"] for row in rows])
+    return {
+        "rows": _with_claude([
+            {
+                **row,
+                "hidden": row["domain"] in hidden,
+                "tracked": row["domain"] in tracked,
+            }
+            for row in rows
+        ]),
+        "total": int(raw.get("priority", 0) or 0)
+        + int(raw.get("review", 0) or 0),
+        "investable": int(raw.get("priority", 0) or 0),
+        "needs_review": int(raw.get("review", 0) or 0),
+    }
 
 
 @app.post("/api/ai/upload", dependencies=[Depends(_require_admin)])

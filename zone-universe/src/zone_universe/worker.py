@@ -212,15 +212,27 @@ async def run() -> None:
     ]
     if existing_pages:
         from classification_store import (
-            classification_map,
             discard_uninvestable_classifications,
+            query_classifications_by_domains,
         )
 
-        classifications = classification_map(existing_pages)
+        classifications = {
+            str(row["domain"]): row
+            for row in query_classifications_by_domains(existing_pages)
+        }
         stale_domains = [
             domain
             for domain in existing_pages
-            if classifications.get(domain) != "priority"
+            if not (
+                str(classifications.get(domain, {}).get("routing_bucket", ""))
+                == "priority"
+                or (
+                    str(classifications.get(domain, {}).get("routing_bucket", ""))
+                    == "review"
+                    and int(classifications.get(domain, {}).get("fit_score", 0) or 0)
+                    >= settings.html_archive_minimum_score
+                )
+            )
         ]
         pages_removed = discard_cached_pages(conn, stale_domains)
         classifications_removed = discard_uninvestable_classifications(
@@ -231,7 +243,7 @@ async def run() -> None:
             "last_retention_sweep",
             {
                 "checked": len(existing_pages),
-                "retained_investable": len(existing_pages) - pages_removed,
+                "retained_qualified": len(existing_pages) - pages_removed,
                 "pages_removed": pages_removed,
                 "classifications_removed": classifications_removed,
             },

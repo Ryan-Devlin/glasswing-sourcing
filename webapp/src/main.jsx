@@ -1616,13 +1616,14 @@ function CorpusCompanies({ kind }) {
       <div className="table-toolbar table-heading">
         <div>
           <h2>{kind === "zone" ? "Retained companies" : "Crawled company buckets"}</h2>
-          <p>{kind === "zone" ? "Only investable crawler discoveries are retained; rejected site content is discarded." : "Only records sourced from this crawler are included."}</p>
+          <p>{kind === "zone" ? "Only high-scoring review candidates and approved Investable companies are retained; rejected site content is discarded." : "Only records sourced from this crawler are included."}</p>
         </div>
       </div>
       <BucketTabs
         value={bucket}
         tabs={kind === "zone" ? [
           ["investable", "Investable"],
+          ["review", "Needs Review"],
           ["yes", "YES"],
           ["no", "NO"],
         ] : BUCKET_TABS}
@@ -1742,8 +1743,11 @@ function CorpusCompanies({ kind }) {
 function CrawlerDiscoveries() {
   const { admin, requestLogin } = useAdmin();
   const [refresh, setRefresh] = useState(0);
+  const [claudeBusy, setClaudeBusy] = useState("");
+  const [claudeOverride, setClaudeOverride] = useState(null);
+  const [message, setMessage] = useState("");
   const result = useApi(
-    "/api/corpus/zone?bucket=investable&page=1&page_size=25&sort=Recently%20classified",
+    "/api/corpus/zone/candidates?limit=25",
     [refresh],
   );
   if (result.loading && !result.data) return <Loading />;
@@ -1764,19 +1768,34 @@ function CrawlerDiscoveries() {
     });
     setRefresh((value) => value + 1);
   };
+  const sendClaude = async (row, overrideDailyLimit = false) => {
+    if (!admin) return requestLogin();
+    setClaudeBusy(row.domain);
+    try {
+      await requestClaudeReview(row.domain, overrideDailyLimit);
+      setClaudeOverride(null);
+      setMessage(`${row.domain} queued for Claude diligence`);
+    } catch (error) {
+      if (error.status === 429) setClaudeOverride(row);
+      else setMessage(`Claude could not review ${row.domain}: ${error.message}`);
+    } finally {
+      setClaudeBusy("");
+    }
+  };
   return (
     <section className="top-picks crawler-discoveries">
       <div className="section-title">
         <div>
           <p className="eyebrow">Deal output</p>
-          <h2>New investable discoveries</h2>
-          <p>The newest companies this crawler believes deserve partner attention.</p>
+          <h2>Qualified new deal candidates</h2>
+          <p>High-scoring companies retained for partner or Claude review. Only approved companies become Investable.</p>
         </div>
-        <span className="pill">{fmt(result.data?.total || 0)} retained</span>
+        <span className="pill">{fmt(result.data?.total || 0)} qualified</span>
       </div>
+      {message && <p className="notice">{message}</p>}
       {!rows.length ? (
         <div className="crawler-empty-state">
-          <strong>No unreviewed investable discovery is waiting.</strong>
+          <strong>No qualified candidate is waiting.</strong>
           <span>The crawler is screening the ranked frontier; the next qualified company will appear here automatically.</span>
         </div>
       ) : (
@@ -1788,16 +1807,35 @@ function CrawlerDiscoveries() {
               <span className="deal-age">{dealAgeLabel(row.classified_at || row.updated_at)}</span>
               <div className="top-pick-head">
                 <span className="score-ring">{row.fit_score}<small>/100</small></span>
-                <span className="pill">Investable</span>
+                <span className="pill">{row.routing_bucket === "priority" ? "Investable" : "Needs Review"}</span>
               </div>
               <h3>{row.company_name || row.domain}</h3>
               <a href={row.final_url || `https://${row.domain}`} target="_blank">{row.domain}</a>
-              {row.claude_decision && <div className="deal-claude-review"><ClaudeReviewBadge row={row} prefix="Claude " /></div>}
+              {row.claude_decision ? (
+                <div className="deal-claude-review"><ClaudeReviewBadge row={row} prefix="Claude " /></div>
+              ) : (
+                <div className="deal-claude-review">
+                  <button
+                    className="pill claude-unreviewed claude-send-badge"
+                    disabled={claudeBusy === row.domain}
+                    onClick={() => sendClaude(row)}
+                  >
+                    {claudeBusy === row.domain ? "Queueing…" : "Send to Claude"}
+                  </button>
+                </div>
+              )}
               <p className="clamp-text" title={row.description}>{row.description || row.routing_reason}</p>
               <span className="top-pick-category">{String(row.thesis_pillar || "enterprise technology").replaceAll("_", " ")}</span>
             </article>
           ))}
         </div>
+      )}
+      {claudeOverride && (
+        <ClaudeOverrideModal
+          domain={claudeOverride.domain}
+          onClose={() => setClaudeOverride(null)}
+          onOverride={() => sendClaude(claudeOverride, true)}
+        />
       )}
     </section>
   );
@@ -1942,8 +1980,8 @@ function SearchCorpusPage({ kind }) {
               <Metric label="Domains screened" value={fmt(metrics.data.processed)} />
               <Metric label="Live websites" value={fmt(metrics.data.live)} />
               <Metric label="Relevant companies" value={fmt(metrics.data.promising)} />
-              <Metric label="Investable deals" value={fmt(metrics.data.retained)} />
-              <Metric label="Deal yield" value={`${Number(metrics.data.investable_yield || 0).toFixed(3)}%`} />
+              <Metric label="Qualified candidates" value={fmt(metrics.data.retained)} />
+              <Metric label="Investable deals" value={fmt(metrics.data.investable)} />
               <Metric label="Screening speed" value={`${fmt(metrics.data.batch_rate || 0)}/sec`} />
             </>
           )}
@@ -1951,9 +1989,10 @@ function SearchCorpusPage({ kind }) {
       )}
       {!isAi && metrics.data && (
         <section className="notice corpus-status retention-status">
-          <strong>Deal-first mode · investable storage only</strong>
+          <strong>Deal-first mode · qualified-candidate storage only</strong>
           <span>{fmt(metrics.data.available)} source domains are ranked offline; only high-signal names receive network screening.</span>
-          <span>{Number(metrics.data.live_rate || 0).toFixed(1)}% reached a live site · {Number(metrics.data.relevance_rate || 0).toFixed(1)}% of live sites passed relevance · {fmt(metrics.data.discarded)} discarded without retained content</span>
+          <span>{Number(metrics.data.live_rate || 0).toFixed(1)}% reached a live site · {Number(metrics.data.relevance_rate || 0).toFixed(1)}% passed relevance · {Number(metrics.data.candidate_yield || 0).toFixed(3)}% became qualified candidates</span>
+          <span>{fmt(metrics.data.discarded)} discarded without retained content · {fmt(metrics.data.needs_review)} awaiting review · {fmt(metrics.data.investable)} approved Investable</span>
           {metrics.data.last_deal_at && <span>Latest retained deal: {new Date(metrics.data.last_deal_at).toLocaleString()}</span>}
         </section>
       )}

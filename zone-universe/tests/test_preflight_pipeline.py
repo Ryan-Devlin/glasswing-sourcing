@@ -245,6 +245,61 @@ def test_investable_classification_is_retained(
     conn.close()
 
 
+def test_high_scoring_review_candidate_is_retained_temporarily(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    conn, settings, _ = prepared_database(tmp_path)
+    html = """
+    <html><title>Candidate AI</title><body>
+    Enterprise artificial intelligence infrastructure software platform.
+    </body></html>
+    """
+
+    async def promising(session, domain, selected_settings):
+        return CrawlOutcome(
+            domain=domain,
+            tld="com",
+            status="preflight_promising",
+            final_url=f"https://{domain}",
+            preflight_score=80,
+        )
+
+    async def full_crawl(session, domain, selected_settings, **kwargs):
+        return CrawlOutcome(
+            domain=domain,
+            tld="com",
+            status="success",
+            final_url=f"https://{domain}",
+            http_status=200,
+            html=html,
+            page=extract_page(html, f"https://{domain}"),
+        )
+
+    async def classified(domains, selected_settings):
+        return {
+            "classified": 1,
+            "scores": {"candidateai.com": 82},
+            "buckets": {"candidateai.com": "review"},
+        }
+
+    monkeypatch.setattr(crawler, "preflight_domain", promising)
+    monkeypatch.setattr(crawler, "crawl_domain", full_crawl)
+    monkeypatch.setattr(crawler, "classify_cached_successes", classified)
+    monkeypatch.setattr(
+        classification_store,
+        "excluded_domain_set",
+        lambda _domains: set(),
+    )
+
+    asyncio.run(crawler.crawl_once(conn, settings, tld="com"))
+
+    assert conn.execute("SELECT domain FROM pages").fetchone()[0] == (
+        "candidateai.com"
+    )
+    conn.close()
+
+
 def test_pause_after_quick_check_does_not_lose_queue_position(
     tmp_path: Path,
     monkeypatch,
