@@ -900,7 +900,7 @@ function TrackingDeals() {
           {rows.map((row) => (
             <article className="top-pick" key={row.domain}>
               <div className="tracking-card-actions">
-                <button
+                <div className="tracking-stage-actions"><button
                   className="tracking-stage"
                   title={trackingView === "tracking" ? "Mark as reached out" : "Move back one stage"}
                   onClick={async () => {
@@ -924,8 +924,8 @@ function TrackingDeals() {
                 {trackingView === "meeting" && <button className="tracking-stage" title="Build a sourced competitive landscape" onClick={() => {
                   sessionStorage.setItem("landscape_prefill", row.domain);
                   location.hash = "landscape";
-                }}><FileSpreadsheet size={14}/> Build landscape</button>}
-                <button
+                }}><FileSpreadsheet size={14}/> Build landscape</button>}</div>
+                <div className="tracking-secondary-actions"><button
                   className="tracking-untrack"
                   title="Remove from Tracking"
                   onClick={async () => {
@@ -947,7 +947,7 @@ function TrackingDeals() {
                   }}
                 >
                   <XCircle size={14} /> Kill
-                </button>
+                </button></div>
               </div>
               <span className="deal-age" title={row.classified_at || row.updated_at}>
                 {dealAgeLabel(row.classified_at || row.updated_at)}
