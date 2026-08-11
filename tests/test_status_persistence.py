@@ -9,6 +9,62 @@ from unittest.mock import patch
 import continuous_pipeline
 
 
+class ExtensionCountsTests(unittest.TestCase):
+    def test_postgres_aggregates_in_sql_without_streaming_every_row(self):
+        executed: list[str] = []
+
+        class Result:
+            def fetchall(self):
+                return [
+                    {"extension": ".ai", "status": "pending", "count": 7},
+                    {"extension": ".ai", "status": "complete", "count": 3},
+                    {"extension": ".io", "status": "discarded", "count": 5},
+                    {"extension": ".invalid", "status": "pending", "count": 99},
+                ]
+
+        class Connection:
+            def execute(self, sql, params=None):
+                executed.append(sql)
+                return Result()
+
+        with patch.object(continuous_pipeline, "using_postgres", return_value=True):
+            counts = continuous_pipeline.extension_counts(Connection())
+
+        self.assertIn("GROUP BY", executed[0])
+        self.assertNotIn("SELECT domain, status", executed[0])
+        self.assertEqual(counts[".ai"]["pending"], 7)
+        self.assertEqual(counts[".ai"]["complete"], 3)
+        self.assertEqual(counts[".ai"]["total"], 10)
+        self.assertEqual(counts[".io"]["discarded"], 5)
+        self.assertEqual(counts[".io"]["total"], 5)
+        # An unsupported extension must never leak into the reported buckets.
+        self.assertNotIn(".invalid", counts)
+
+    def test_sqlite_path_matches_postgres_aggregation(self):
+        rows = [
+            ("alpha.ai", "pending"),
+            ("beta.ai", "pending"),
+            ("gamma.ai", "complete"),
+            ("delta.io", "failed"),
+            ("sub.domain.app", "pending"),
+        ]
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("CREATE TABLE domains (domain TEXT PRIMARY KEY, status TEXT)")
+        conn.executemany("INSERT INTO domains VALUES (?, ?)", rows)
+
+        with patch.object(continuous_pipeline, "using_postgres", return_value=False):
+            counts = continuous_pipeline.extension_counts(conn)
+        conn.close()
+
+        self.assertEqual(counts[".ai"]["pending"], 2)
+        self.assertEqual(counts[".ai"]["complete"], 1)
+        self.assertEqual(counts[".ai"]["total"], 3)
+        self.assertEqual(counts[".io"]["failed"], 1)
+        self.assertEqual(counts[".app"]["pending"], 1)
+
+
 class StatusPersistenceTests(unittest.TestCase):
     def test_postgres_claim_prioritizes_active_certstream_run_then_manual(self):
         class Result:

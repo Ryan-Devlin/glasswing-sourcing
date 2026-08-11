@@ -56,6 +56,50 @@ def _make_zone_universe_db(path, paged_domains):
     _live_postgres_url() is None,
     reason="set TEST_DATABASE_URL to a reachable Postgres to run this",
 )
+def test_postgres_extension_counts_regex_matches_python(monkeypatch):
+    """The SQL suffix expression must agree with domain_extension() exactly."""
+    url = _live_postgres_url()
+    monkeypatch.setenv(continuous_pipeline.PIPELINE_DATABASE_ENV_VAR, url)
+    test_domains = [
+        "ext-count-a.ai",
+        "ext-count-b.io",
+        "sub.ext-count-c.app",
+        "ext-count-d.dev",
+    ]
+
+    def cleanup(conn):
+        marks = ",".join("?" for _ in test_domains)
+        conn.execute(f"DELETE FROM domains WHERE domain IN ({marks})", test_domains)
+        conn.commit()
+
+    with continuous_pipeline.connect_db() as conn:
+        cleanup(conn)
+
+    conn = continuous_pipeline.connect_db()
+    try:
+        before = continuous_pipeline.extension_counts(conn)
+        for domain in test_domains:
+            continuous_pipeline.register_domain_event(
+                conn, domain, {".ai", ".io", ".app", ".dev"}, run_id="ext-count-test"
+            )
+        after = continuous_pipeline.extension_counts(conn)
+
+        # Each domain must land in the bucket domain_extension() would pick.
+        for domain in test_domains:
+            extension = continuous_pipeline.domain_extension(domain)
+            delta = (
+                after[extension]["pending"] - before[extension]["pending"]
+            )
+            assert delta == 1, f"{domain} did not increment {extension}"
+    finally:
+        cleanup(conn)
+        conn.close()
+
+
+@pytest.mark.skipif(
+    _live_postgres_url() is None,
+    reason="set TEST_DATABASE_URL to a reachable Postgres to run this",
+)
 def test_postgres_queue_matches_sqlite_behavior(monkeypatch, tmp_path):
     url = _live_postgres_url()
     monkeypatch.setenv(continuous_pipeline.PIPELINE_DATABASE_ENV_VAR, url)

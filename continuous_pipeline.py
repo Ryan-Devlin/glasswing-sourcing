@@ -293,6 +293,10 @@ _PIPELINE_POSTGRES_SCHEMA = """
         first_seen_run_id TEXT NOT NULL DEFAULT '',
         last_seen_run_id TEXT NOT NULL DEFAULT ''
     );
+    CREATE INDEX IF NOT EXISTS idx_domains_pending_claim
+        ON domains (first_seen DESC) WHERE status='pending';
+    CREATE INDEX IF NOT EXISTS idx_domains_status
+        ON domains (status);
     CREATE TABLE IF NOT EXISTS claude_calls (
         called_at TEXT NOT NULL,
         domain TEXT NOT NULL
@@ -394,6 +398,13 @@ def _connect_db_sqlite() -> sqlite3.Connection:
         )
     """)
     conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_domains_pending_claim
+            ON domains (first_seen DESC) WHERE status='pending'
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_domains_status ON domains (status)
+    """)
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS claude_calls (
             called_at TEXT NOT NULL,
             domain TEXT NOT NULL
@@ -438,6 +449,28 @@ def extension_counts(
         }
         for extension in sorted(SUPPORTED_EXTENSIONS)
     }
+    if using_postgres(PIPELINE_DATABASE_ENV_VAR):
+        # Aggregate in the database instead of shipping every row. The screening
+        # loop calls this before every wave, so streaming the whole table (562k
+        # rows and growing ~170k/day at live CertStream rates) put a cost that
+        # scales with total corpus size directly on the per-wave critical path.
+        rows = conn.execute(
+            """
+            SELECT substring(domain from '\\.[^.]+$') AS extension,
+                   status,
+                   COUNT(*) AS count
+            FROM domains
+            GROUP BY extension, status
+            """
+        ).fetchall()
+        for row in rows:
+            extension = str(row["extension"] or "").lower()
+            if extension not in results:
+                continue
+            results[extension][str(row["status"])] = int(row["count"])
+            results[extension]["total"] += int(row["count"])
+        return results
+
     rows = conn.execute(
         """
         SELECT domain, status
