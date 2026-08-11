@@ -14,9 +14,10 @@ class StatusPersistenceTests(unittest.TestCase):
         class Result:
             def fetchall(self):
                 return [
-                    {"domain": "manual.com", "first_seen": "3", "last_seen_run_id": "manual_domain_intake"},
-                    {"domain": "current.ai", "first_seen": "2", "last_seen_run_id": "run-now"},
-                    {"domain": "old-cached.ai", "first_seen": "1", "last_seen_run_id": "ai_search_cache_reuse_v1"},
+                    {"domain": "manual.com", "first_seen": "3", "first_seen_run_id": "manual_domain_intake", "last_seen_run_id": "manual_domain_intake"},
+                    {"domain": "current.ai", "first_seen": "2", "first_seen_run_id": "run-now", "last_seen_run_id": "run-now"},
+                    {"domain": "old-repeat.ai", "first_seen": "1", "first_seen_run_id": "old-run", "last_seen_run_id": "run-now"},
+                    {"domain": "old-cached.ai", "first_seen": "0", "first_seen_run_id": "old-run", "last_seen_run_id": "ai_search_cache_reuse_v1"},
                 ]
 
         class Connection:
@@ -37,18 +38,21 @@ class StatusPersistenceTests(unittest.TestCase):
         with patch.object(continuous_pipeline, "using_postgres", return_value=True), patch.object(
             continuous_pipeline,
             "_corpus_priority_for_domains",
-            return_value={"old-cached.ai": 0, "current.ai": 2},
+            return_value={"old-cached.ai": 0, "old-repeat.ai": 0, "current.ai": 2},
         ):
             claimed = continuous_pipeline.claim_batch(
                 conn,
-                size=3,
+                size=4,
                 allowed_extensions={".ai"},
                 preferred_run_id="run-now",
             )
 
-        self.assertEqual(claimed, ["current.ai", "manual.com", "old-cached.ai"])
+        self.assertEqual(
+            claimed,
+            ["current.ai", "old-repeat.ai", "manual.com", "old-cached.ai"],
+        )
         self.assertEqual(conn.claimed, claimed)
-        self.assertEqual(conn.params[1], "run-now")
+        self.assertEqual(conn.params[1:3], ("run-now", "run-now"))
 
     def test_listener_connectivity_does_not_clobber_active_screening_stage(self):
         with tempfile.TemporaryDirectory() as directory:

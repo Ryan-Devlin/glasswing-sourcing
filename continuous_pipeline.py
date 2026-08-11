@@ -626,19 +626,21 @@ def claim_batch(
         candidate_limit = min(max(size * 10, size), 2000)
         rows = conn.execute(
             """
-            SELECT domain, first_seen, last_seen_run_id FROM domains
+            SELECT domain, first_seen, first_seen_run_id, last_seen_run_id
+            FROM domains
             WHERE status='pending'
               AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
             ORDER BY
               CASE
-                WHEN last_seen_run_id=? THEN 0
-                WHEN last_seen_run_id IN ('manual_domain_intake','csv_upload') THEN 1
-                ELSE 2
+                WHEN first_seen_run_id=? THEN 0
+                WHEN last_seen_run_id=? THEN 1
+                WHEN last_seen_run_id IN ('manual_domain_intake','csv_upload') THEN 2
+                ELSE 3
               END,
               first_seen DESC
             LIMIT ?
             """,
-            (now, preferred_run_id, candidate_limit),
+            (now, preferred_run_id, preferred_run_id, candidate_limit),
         ).fetchall()
         if allowed_extensions:
             rows = [
@@ -658,13 +660,16 @@ def claim_batch(
         # preserves that ordering within each tier) instead of re-sorting
         # by first_seen ascending.
         def queue_tier(row) -> tuple[int, int]:
+            first_source = str(row["first_seen_run_id"] or "")
             source = str(row["last_seen_run_id"] or "")
-            if preferred_run_id and source == preferred_run_id:
+            if preferred_run_id and first_source == preferred_run_id:
                 source_priority = 0
-            elif source in {"manual_domain_intake", "csv_upload"}:
+            elif preferred_run_id and source == preferred_run_id:
                 source_priority = 1
-            else:
+            elif source in {"manual_domain_intake", "csv_upload"}:
                 source_priority = 2
+            else:
+                source_priority = 3
             return source_priority, priority.get(row["domain"], 2)
 
         ordered = sorted(rows, key=queue_tier)
