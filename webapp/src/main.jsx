@@ -109,23 +109,31 @@ function ClaudeReviewBadge({ row, prefix = "" }) {
 async function api(path, options = {}) {
   const method = String(options.method || "GET").toUpperCase();
   const request = async () => {
-    const r = await fetch(path, {
-      headers: {
-        ...(options.body instanceof FormData
-          ? {}
-          : { "Content-Type": "application/json" }),
-        ...(options.headers || {}),
-      },
-      ...options,
-    });
-    if (!r.ok) {
+    const attempts = method === "GET" ? 4 : 1;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const r = await fetch(path, {
+        headers: {
+          ...(options.body instanceof FormData
+            ? {}
+            : { "Content-Type": "application/json" }),
+          ...(options.headers || {}),
+        },
+        ...options,
+      });
+      if (r.ok) return r.json();
       const text = await r.text();
-      const error = new Error(text || `Request failed ${r.status}`);
+      let payload;
+      try { payload = JSON.parse(text); } catch {}
+      if ([502, 503, 504].includes(r.status) && attempt < attempts - 1) {
+        await new Promise((resolve) => setTimeout(resolve, 750 * (2 ** attempt)));
+        continue;
+      }
+      const error = new Error(payload?.message || text || `Request failed ${r.status}`);
       error.status = r.status;
-      try { error.payload = JSON.parse(text); } catch {}
+      error.payload = payload;
       throw error;
     }
-    return r.json();
+    throw new Error("Service temporarily unavailable");
   };
   if (method !== "GET") {
     // A mutation can affect several homepage views. Never hydrate a later
