@@ -1651,35 +1651,23 @@ function CertStreamPage() {
           label="Domains discovered"
           value={fmt(s.new_domains_received || s.domains_received)}
         />
-        <Metric label="Ignored repeats" value={fmt(s.repeat_events_ignored)} />
-        <Metric
-          label="Worker attempts"
-          value={fmt(s.current_run_queue?.attempts ?? s.processed)}
-        />
         <Metric label="Screening complete" value={fmt(s.current_run_queue?.complete)} />
         <Metric
           label="Candidates retained"
           value={fmt(s.retained_in_buckets)}
         />
         <Metric
-          label="Discarded after screening"
+          label="Filtered out"
           value={fmt(s.discarded_after_screening)}
         />
         <Metric
-          label="Awaiting first attempt"
-          value={fmt(s.current_run_queue?.awaiting_first_attempt)}
+          label="Still processing"
+          value={fmt(
+            Number(s.current_run_queue?.awaiting_first_attempt || 0) +
+            Number(s.current_run_queue?.processing || 0) +
+            Number(s.current_run_queue?.retrying || 0)
+          )}
         />
-        <Metric
-          label="Queued for retry"
-          value={fmt(s.current_run_queue?.retrying)}
-        />
-        <Metric label="Screening now" value={fmt(s.current_run_queue?.processing)} />
-        <Metric label="Retries exhausted" value={fmt(s.current_run_queue?.failed)} />
-        <Metric label="Claude calls" value={fmt(s.claude_calls)} />
-        <Metric label="Reviewed by Claude" value={fmt(claude.data?.reviewed)} />
-        <Metric label="Claude KEEP" value={fmt(claude.data?.kept)} />
-        <Metric label="Claude REJECT" value={fmt(claude.data?.rejected)} />
-        <Metric label="Awaiting new rubric" value={fmt(claude.data?.awaiting_rescore)} />
       </div>
       <p className="notice certstream-funnel">
         <strong>{fmt(s.current_run_queue?.complete)} screening decisions</strong>
@@ -2777,6 +2765,22 @@ function App() {
     api("/api/auth/status")
       .then((result) => setAdmin(result.admin))
       .catch(() => {});
+  }, []);
+  useEffect(() => {
+    const loadedBundle = document.querySelector('script[type="module"][src]')
+      ?.getAttribute("src") || "";
+    const checkVersion = () => {
+      fetch(`/api/version?t=${Date.now()}`, { cache: "no-store" })
+        .then((response) => response.ok ? response.json() : null)
+        .then((result) => {
+          if (result?.bundle && loadedBundle && result.bundle !== loadedBundle) {
+            window.location.reload();
+          }
+        })
+        .catch(() => {});
+    };
+    const timer = window.setInterval(checkVersion, 30000);
+    return () => window.clearInterval(timer);
   }, []);
   const logout = async () => {
     await api("/api/auth/logout", { method: "POST" });

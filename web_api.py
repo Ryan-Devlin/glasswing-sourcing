@@ -171,6 +171,11 @@ async def production_headers(request, call_next):
         response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
     elif request.url.path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-store"
+    else:
+        # The HTML shell names a content-hashed JS bundle. It must always be
+        # revalidated or an open/stale tab can keep rendering retired metrics
+        # after a successful deployment.
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
     return response
 
 BUCKETS = {
@@ -1578,6 +1583,12 @@ async def upload_domains(file: UploadFile = File(...)):
 
 DIST = ROOT / "webapp" / "dist"
 if DIST.exists():
+    @app.get("/api/version")
+    def frontend_version():
+        index = (DIST / "index.html").read_text(encoding="utf-8")
+        match = re.search(r'<script[^>]+src="([^"]+index-[^"]+\.js)"', index)
+        return {"bundle": match.group(1) if match else ""}
+
     app.mount("/assets", StaticFiles(directory=DIST / "assets"), name="assets")
 
     @app.get("/{path:path}", include_in_schema=False)
