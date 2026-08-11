@@ -137,7 +137,7 @@ function GreenFlagTags({ row }) {
 async function api(path, options = {}) {
   const method = String(options.method || "GET").toUpperCase();
   const request = async () => {
-    const attempts = method === "GET" ? 4 : 1;
+    const attempts = method === "GET" ? 2 : 1;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       const r = await fetch(path, {
         headers: {
@@ -153,7 +153,7 @@ async function api(path, options = {}) {
       let payload;
       try { payload = JSON.parse(text); } catch {}
       if ([502, 503, 504].includes(r.status) && attempt < attempts - 1) {
-        await new Promise((resolve) => setTimeout(resolve, 750 * (2 ** attempt)));
+        await new Promise((resolve) => setTimeout(resolve, 300));
         continue;
       }
       const error = new Error(payload?.message || text || `Request failed ${r.status}`);
@@ -228,7 +228,7 @@ function useApi(path, deps = []) {
             error: "",
             loading: !current.data,
           }));
-          retryTimer = window.setTimeout(load, 3000);
+          retryTimer = window.setTimeout(load, 1000);
         });
     };
     load();
@@ -2087,7 +2087,12 @@ function SearchCorpusPage({ kind }) {
           <div>
             <strong>{desiredRunning ? "Crawler enabled" : "Crawler paused"}</strong>
             <span>
-              {String(metrics.data?.crawler_phase || metrics.data?.crawler_status || "waiting for status").replaceAll("_", " ")}
+              {String(
+                metrics.data?.crawler_phase ||
+                metrics.data?.crawler_status ||
+                service.actual_status ||
+                (desiredRunning ? "starting" : "paused")
+              ).replaceAll("_", " ")}
             </span>
           </div>
         </div>
@@ -2608,7 +2613,7 @@ function GlobalWorkerControls() {
   const allRunning = values.length > 0 && values.every((row) => row.desired);
   const allPaused = values.length > 0 && values.every((row) => !row.desired);
   const activeCount = values.filter((row) =>
-    row.desired && /running|screening|crawling|importing|starting/.test(
+    row.desired && /running|screening|crawling|importing|starting|listening|idle|waiting/.test(
       String(row.actual_status || "").toLowerCase(),
     )
   ).length;

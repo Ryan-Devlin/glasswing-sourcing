@@ -85,7 +85,9 @@ def test_react_app_has_every_primary_page_and_no_streamlit_dependency():
     assert "result.loading && !result.data" in source
     assert "set((current) => ({" in source
     assert "responseCache" in source
-    assert "window.setTimeout(load, 3000)" in source
+    # Recover quickly after Railway swaps containers instead of leaving the
+    # page in stacked loading placeholders for several seconds.
+    assert "window.setTimeout(load, 1000)" in source
     assert "Search was interrupted. Please try again." in source
     assert "<DeferredContent minHeight={420}>" in source
     assert "Qualified new deal candidates" in source
