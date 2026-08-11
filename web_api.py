@@ -37,6 +37,7 @@ for source in (ROOT, AI_SRC, ZONE_SRC):
         sys.path.insert(0, str(source))
 
 from ai_search.og_bridge import enqueue_for_screening, search_companies, search_stats
+from ai_search.domains import normalize_any_domain
 from ai_search.database import (
     connect as ai_connect,
     diagnostics as ai_diagnostics,
@@ -1475,10 +1476,14 @@ def _queue_ai_domains(values: list[str], source: str) -> dict[str, object]:
     from ai_search.database import add_domain
     from ai_search.database import connect as ai_connect
 
-    domains = list(dict.fromkeys(stable_domain(value) for value in values))
-    domains = [domain for domain in domains if domain]
+    normalized = [normalize_any_domain(value) for value in values]
+    invalid = [str(value).strip() for value, domain in zip(values, normalized) if not domain]
+    domains = list(dict.fromkeys(domain for domain in normalized if domain))
     if not domains:
-        raise HTTPException(400, "Enter a valid domain or website URL")
+        raise HTTPException(
+            400,
+            "Enter a complete domain such as company.com or https://company.ai",
+        )
     added = 0
     requeued = 0
     searchable = 0
@@ -1532,6 +1537,8 @@ def _queue_ai_domains(values: list[str], source: str) -> dict[str, object]:
     )
     return {
         "received": len(domains),
+        "invalid": len(invalid),
+        "invalid_examples": invalid[:5],
         "added": added,
         "duplicates": max(0, len(domains) - added),
         "domain": domains[0] if len(domains) == 1 else "",
@@ -1544,9 +1551,12 @@ def _queue_ai_domains(values: list[str], source: str) -> dict[str, object]:
 
 @app.post("/api/ai/domain", dependencies=[Depends(_require_admin)])
 async def intake_domain(payload: DomainIntakeRequest):
-    domain = stable_domain(payload.domain)
+    domain = normalize_any_domain(payload.domain)
     if not domain:
-        raise HTTPException(400, "Enter a valid domain or website URL")
+        raise HTTPException(
+            400,
+            "Enter a complete domain such as company.com or https://company.ai",
+        )
 
     # Manual intake is an interactive action, not bulk ingestion. Screen the
     # website in this request and return its real result instead of merely

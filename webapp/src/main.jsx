@@ -247,6 +247,30 @@ function Metric({ label, value, tone = "" }) {
     </div>
   );
 }
+
+function validateDomainInput(value) {
+  const text = String(value || "").trim();
+  if (!text) return { domain: "", error: "Enter a domain or website URL." };
+  try {
+    const parsed = new URL(text.includes("://") ? text : `https://${text}`);
+    const host = parsed.hostname.toLowerCase().replace(/^www\./, "").replace(/\.$/, "");
+    const labels = host.split(".");
+    const validLabels = labels.length >= 2 && labels.every((label) =>
+      label && label.length <= 63 && !label.startsWith("-") &&
+      !label.endsWith("-") && /^[a-z0-9-]+$/i.test(label)
+    );
+    const validTld = labels.at(-1)?.length >= 2 && /^(?:[a-z]{2,63}|xn--[a-z0-9-]+)$/i.test(labels.at(-1));
+    if (!validLabels || !validTld || /^\d+(?:\.\d+){3}$/.test(host)) {
+      throw new Error("invalid host");
+    }
+    return { domain: host, error: "" };
+  } catch {
+    return {
+      domain: "",
+      error: "Enter a complete domain such as company.com or https://company.ai.",
+    };
+  }
+}
 function Loading() {
   return (
     <div className="loading">
@@ -2171,12 +2195,17 @@ function SearchCorpusPage({ kind }) {
                   <form onSubmit={async (event) => {
                     event.preventDefault();
                     if (!admin) return requestLogin();
+                    const validated = validateDomainInput(quickDomain);
+                    if (validated.error) {
+                      setQuickResult({ error: validated.error });
+                      return;
+                    }
                     setQuickBusy(true);
                     setQuickResult(null);
                     try {
                       const response = await api("/api/ai/domain", {
                         method: "POST",
-                        body: JSON.stringify({ domain: quickDomain }),
+                        body: JSON.stringify({ domain: validated.domain }),
                       });
                       setQuickResult(response);
                       setQuickDomain("");
@@ -2191,7 +2220,10 @@ function SearchCorpusPage({ kind }) {
                       type="text"
                       inputMode="url"
                       value={quickDomain}
-                      onChange={(event) => setQuickDomain(event.target.value)}
+                      onChange={(event) => {
+                        setQuickDomain(event.target.value);
+                        if (quickResult?.error) setQuickResult(null);
+                      }}
                       placeholder="company.com"
                       aria-label="Domain or website URL"
                       required

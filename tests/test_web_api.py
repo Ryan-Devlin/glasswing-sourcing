@@ -26,6 +26,12 @@ def test_admin_login_is_server_enforced():
     assert client.get("/api/auth/status").json() == {"admin": True}
 
 
+def test_manual_domain_intake_rejects_incomplete_domain_immediately():
+    response = client.post("/api/ai/domain", json={"domain": "hiai"})
+    assert response.status_code == 400
+    assert "complete domain" in response.json()["detail"]
+
+
 def test_health_and_spa_are_served():
     assert client.get("/api/healthz").json() == {"status": "ok"}
     response = client.get("/")
