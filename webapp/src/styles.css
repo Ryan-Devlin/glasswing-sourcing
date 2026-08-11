@@ -804,6 +804,15 @@ tbody tr:hover {
 .upload-error {
   color: #a52f22;
 }
+.claude-pending-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #76566f;
+  border: 1px solid #e5d8e3;
+  background: #f8f3f7;
+  cursor: default;
+}
 .intake-panel {
   display: grid;
   grid-template-columns: 1.25fr 1fr;

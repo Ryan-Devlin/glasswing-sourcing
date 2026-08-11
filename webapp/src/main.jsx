@@ -106,6 +106,17 @@ function ClaudeReviewBadge({ row, prefix = "" }) {
     </span>
   );
 }
+function claudePending(row) {
+  return ["queued", "reviewing"].includes(String(row.claude_queue_status || "").toLowerCase());
+}
+function ClaudePendingBadge({ row }) {
+  const reviewing = String(row.claude_queue_status || "").toLowerCase() === "reviewing";
+  return (
+    <span className="pill claude-pending-badge" title={reviewing ? "Claude diligence is currently running" : "Waiting in the durable Claude diligence queue"}>
+      <Bot size={13} /> {reviewing ? "Claude processing" : "Queued for Claude"}
+    </span>
+  );
+}
 async function api(path, options = {}) {
   const method = String(options.method || "GET").toUpperCase();
   const request = async () => {
@@ -506,11 +517,14 @@ function Table({
                       className="claude"
                       disabled={
                         claudeBusy === row.domain ||
-                        Boolean(row.claude_decision)
+                        Boolean(row.claude_decision) ||
+                        claudePending(row)
                       }
                       title={
                         row.claude_decision
                           ? `Reviewed: ${row.claude_decision}`
+                          : claudePending(row)
+                            ? "Already queued for Claude diligence"
                           : "Send this company through Claude diligence"
                       }
                       onClick={() => onClaude(row)}
@@ -520,6 +534,8 @@ function Table({
                         ? "Reviewing…"
                         : row.claude_decision
                           ? "Reviewed"
+                          : claudePending(row)
+                            ? String(row.claude_queue_status).toLowerCase() === "reviewing" ? "Claude processing" : "Queued for Claude"
                           : "Send to Claude"}
                     </button>
                   )}
@@ -779,6 +795,7 @@ function GoodDeals() {
       await requestClaudeReview(row.domain, overrideDailyLimit);
       setClaudeOverride(null);
       setMessage(`${row.domain} queued for Claude diligence`);
+      setRefresh((value) => value + 1);
     } catch (error) {
       if (error.status === 429) setClaudeOverride(row);
       else setMessage(`Claude could not review ${row.domain}: ${error.message}`);
@@ -811,6 +828,8 @@ function GoodDeals() {
               <div className="deal-claude-review">
                 <ClaudeReviewBadge row={row} prefix="Claude " />
               </div>
+            ) : claudePending(row) ? (
+              <div className="deal-claude-review"><ClaudePendingBadge row={row} /></div>
             ) : (
               <div className="deal-claude-review">
                 <button
@@ -1807,6 +1826,7 @@ function CrawlerDiscoveries() {
       await requestClaudeReview(row.domain, overrideDailyLimit);
       setClaudeOverride(null);
       setMessage(`${row.domain} queued for Claude diligence`);
+      setRefresh((value) => value + 1);
     } catch (error) {
       if (error.status === 429) setClaudeOverride(row);
       else setMessage(`Claude could not review ${row.domain}: ${error.message}`);
@@ -1845,6 +1865,8 @@ function CrawlerDiscoveries() {
               <a href={row.final_url || `https://${row.domain}`} target="_blank">{row.domain}</a>
               {row.claude_decision ? (
                 <div className="deal-claude-review"><ClaudeReviewBadge row={row} prefix="Claude " /></div>
+              ) : claudePending(row) ? (
+                <div className="deal-claude-review"><ClaudePendingBadge row={row} /></div>
               ) : (
                 <div className="deal-claude-review">
                   <button

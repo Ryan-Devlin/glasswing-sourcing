@@ -341,6 +341,7 @@ def _safe_corpus_rows(rows: list[dict]) -> list[dict]:
 
 def _with_claude(rows: list[dict]) -> list[dict]:
     decisions: dict[str, dict] = {}
+    queue_statuses: dict[str, str] = {}
     domains = [row.get("domain", "") for row in rows]
     for start in range(0, len(domains), 500):
         decisions.update(claude_decisions_for_domains(domains[start:start + 500]))
@@ -357,6 +358,15 @@ def _with_claude(rows: list[dict]) -> list[dict]:
                 ).fetchall()
                 for match in matches:
                     form_d.setdefault(str(match["domain"]), dict(match))
+                queued = conn.execute(
+                    "SELECT domain,status FROM claude_review_queue "
+                    f"WHERE domain IN ({marks})",
+                    batch,
+                ).fetchall()
+                queue_statuses.update(
+                    (str(item["domain"]), str(item["status"] or ""))
+                    for item in queued
+                )
     except Exception:
         pass
     return [
@@ -373,6 +383,7 @@ def _with_claude(rows: list[dict]) -> list[dict]:
                 for name in ("thesis_fit", "enterprise_value", "product_depth", "technical_moat", "stage_fit", "evidence_confidence")
             },
             "claude_reviewed_at": decisions.get(row.get("domain", ""), {}).get("updated_at", ""),
+            "claude_queue_status": queue_statuses.get(row.get("domain", ""), ""),
             "form_d_match": row.get("domain", "") in form_d,
             "form_d_filing_date": form_d.get(row.get("domain", ""), {}).get("filing_date", ""),
             "form_d_filing_url": form_d.get(row.get("domain", ""), {}).get("filing_url", ""),
