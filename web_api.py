@@ -135,6 +135,7 @@ async def lifespan(_app: FastAPI):
     tasks = [
         asyncio.create_task(_claude_queue_worker()),
         asyncio.create_task(_landscape_worker()),
+        asyncio.create_task(_form_d_worker()),
     ]
     try:
         yield
@@ -918,6 +919,50 @@ async def _landscape_worker() -> None:
             await asyncio.to_thread(execute_landscape_job, queued)
         else:
             await asyncio.sleep(3)
+
+
+async def _form_d_worker() -> None:
+    from form_d import desired, ingest_once
+
+    while True:
+        try:
+            if await asyncio.to_thread(desired):
+                await asyncio.to_thread(ingest_once)
+                await asyncio.sleep(600)
+            else:
+                await asyncio.sleep(5)
+        except Exception as exc:
+            print(f"Form D worker retrying: {exc}", file=sys.stderr)
+            await asyncio.sleep(60)
+
+
+@app.get("/api/form-d")
+def form_d_filings(bucket: str = "all", limit: int = Query(100, ge=1, le=250)):
+    from form_d import dashboard, desired
+
+    result = dashboard(bucket=bucket, limit=limit)
+    result["desired"] = desired()
+    return result
+
+
+@app.post("/api/form-d/control", dependencies=[Depends(_require_admin)])
+def form_d_control(update: WorkerUpdate):
+    from form_d import set_desired
+
+    set_desired(update.desired)
+    record_admin_audit(
+        "form_d_resumed" if update.desired else "form_d_paused",
+        "form_d",
+    )
+    return {"ok": True, "desired": update.desired}
+
+
+@app.post("/api/form-d/refresh", dependencies=[Depends(_require_admin)])
+async def form_d_refresh():
+    from form_d import ingest_once
+
+    result = await asyncio.to_thread(ingest_once)
+    return result
 
 
 @app.get("/api/competitive-landscapes")

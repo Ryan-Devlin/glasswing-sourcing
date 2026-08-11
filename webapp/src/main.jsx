@@ -13,6 +13,7 @@ import {
   Database,
   Download,
   FileSpreadsheet,
+  FileText,
   Globe2,
   HeartPulse,
   Home,
@@ -37,6 +38,7 @@ import { dealAgeLabel, formatCount as fmt, pageCount, plainSnippet } from "./dom
 const NAV = [
   ["home", "Home", Home],
   ["certstream", "CertStream Scraper", Activity],
+  ["formd", "Form D Deal Flow", FileText],
   ["csv", "CSV Scraper", Database],
   ["domains", "Domain Crawler (.com, .app)", Globe2],
   ["health", "System Health", HeartPulse],
@@ -1841,6 +1843,70 @@ function CrawlerDiscoveries() {
   );
 }
 
+function FormDPage() {
+  const { admin, requestLogin } = useAdmin();
+  const [bucket, setBucket] = useState("all");
+  const [tick, setTick] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const result = useApi(`/api/form-d?bucket=${bucket}&limit=100`, [bucket, tick]);
+  const data = result.data;
+  const control = async (desired) => {
+    if (!admin) return requestLogin();
+    setBusy(true);
+    try {
+      await api("/api/form-d/control", { method: "POST", body: JSON.stringify({ desired }) });
+      setTick((value) => value + 1);
+    } finally { setBusy(false); }
+  };
+  const refresh = async () => {
+    if (!admin) return requestLogin();
+    setBusy(true);
+    try {
+      await api("/api/form-d/refresh", { method: "POST" });
+      setTick((value) => value + 1);
+    } finally { setBusy(false); }
+  };
+  const money = (value) => value ? `$${Number(value).toLocaleString()}` : "Not disclosed";
+  return (
+    <>
+      <header>
+        <p className="eyebrow">SEC fundraising signals</p>
+        <h1>Form D Deal Flow</h1>
+        <p>New Regulation D offerings screened for venture relevance. Funds and amendments are removed before partner review.</p>
+      </header>
+      <section className="crawler-command-bar">
+        <div><span className={`dot ${data?.desired ? "" : "paused"}`} /><div><strong>{data?.desired ? "EDGAR monitoring enabled" : "EDGAR monitoring paused"}</strong><span>Checks the SEC every 10 minutes · fair-access limited</span></div></div>
+        <div className="crawler-command-actions">
+          <button className="primary" disabled={busy || data?.desired} onClick={() => control(true)}><Play size={15}/> Start</button>
+          <button disabled={busy || !data?.desired} onClick={() => control(false)}><Pause size={15}/> Pause</button>
+          <button className="icon" disabled={busy} title="Pull latest SEC filings now" onClick={refresh}><RefreshCw size={15}/></button>
+        </div>
+      </section>
+      {result.loading && !data ? <Loading /> : result.error && !data ? <ErrorBox>{result.error}</ErrorBox> : data && <>
+        <div className="metrics form-d-metrics">
+          <Metric label="Filings processed" value={fmt(data.counts?.all || 0)} />
+          <Metric label="Investable leads" value={fmt(data.counts?.investable || 0)} />
+          <Metric label="Needs review" value={fmt(data.counts?.review || 0)} />
+          <Metric label="Funds / denied" value={fmt(data.counts?.denied || 0)} />
+        </div>
+        <section className="notice"><strong>Python screening is deterministic</strong><span>New Form D notices are scored using issuer type, industry, offering size, capital sold, and investor count. Missing facts do not become fabricated facts.</span></section>
+        <BucketTabs value={bucket} onChange={setBucket} tabs={[["all", "All filings"], ["investable", "Investable"], ["review", "Needs Review"], ["denied", "Hard Denied"]]} />
+        <Table rows={data.rows || []} columns={[
+          { key: "company_name", label: "Issuer", sortable: false },
+          { key: "filing_date", label: "Filed" },
+          { key: "industry", label: "Industry" },
+          { key: "offering_amount", label: "Offering", render: (row) => money(row.offering_amount) },
+          { key: "amount_sold", label: "Sold", render: (row) => money(row.amount_sold) },
+          { key: "score", label: "Score" },
+          { key: "bucket", label: "Decision", render: (row) => <span className={`pill form-d-${row.bucket}`}>{String(row.bucket).replace("denied", "Hard Denied")}</span> },
+          { key: "reason", label: "Why" },
+          { key: "filing_url", label: "SEC", render: (row) => <a href={row.filing_url} target="_blank">View filing</a> },
+        ]} />
+      </>}
+    </>
+  );
+}
+
 function SearchCorpusPage({ kind }) {
   const { admin, requestLogin } = useAdmin();
   const isAi = kind === "ai";
@@ -2627,6 +2693,7 @@ function App() {
   const body = {
     home: <HomePage />,
     certstream: <CertStreamPage />,
+    formd: <FormDPage />,
     csv: <SearchCorpusPage kind="ai" />,
     domains: <SearchCorpusPage kind="zone" />,
     health: <HealthPage />,

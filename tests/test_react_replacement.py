@@ -6,6 +6,7 @@ def test_react_app_has_every_primary_page_and_no_streamlit_dependency():
     for label in (
         "Home",
         "CertStream Scraper",
+        "Form D Deal Flow",
         "CSV Scraper",
         "Domain Crawler (.com, .app)",
         "System Health",
@@ -35,6 +36,8 @@ def test_react_app_has_every_primary_page_and_no_streamlit_dependency():
     assert "controlCrawler" in source
     assert "function GlobalWorkerControls" in source
     assert "<GlobalWorkerControls />" in source
+    assert "function FormDPage" in source
+    assert "/api/form-d/control" in source
     assert "Resume all" in source
     assert "Pause all" in source
     assert "Send to Claude" in source
