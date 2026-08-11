@@ -43,6 +43,8 @@ def test_react_app_has_every_primary_page_and_no_streamlit_dependency():
     assert "sort=Recently%20detected" in source
     assert "<ClaudeTopPicks />" not in source
     assert "[502, 503, 504].includes(r.status)" in source
+    assert '`Meeting · ${meetingCount}`' in source
+    assert 'sessionStorage.setItem("landscape_prefill", row.domain)' in source
     assert "Resume all" in source
     assert "Pause all" in source
     assert "Send to Claude" in source

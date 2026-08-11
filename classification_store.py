@@ -1841,12 +1841,12 @@ def set_tracking_status(
     *,
     path: Path | str = CLASSIFICATION_DB,
 ) -> bool:
-    """Move a tracked company between active and reached-out workflow tabs."""
+    """Move a tracked company through the lightweight sourcing workflow."""
     target = stable_domain(domain)
     normalized_status = str(status).strip().lower()
-    if not target or normalized_status not in {"tracking", "reached_out"}:
+    if not target or normalized_status not in {"tracking", "reached_out", "meeting"}:
         return False
-    reached_out_at = utc_now() if normalized_status == "reached_out" else ""
+    reached_out_at = utc_now() if normalized_status in {"reached_out", "meeting"} else ""
     with connect_store(path) as conn:
         cursor = conn.execute(
             "UPDATE tracked_domains SET tracking_status=?,reached_out_at=? "

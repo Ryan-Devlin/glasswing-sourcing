@@ -283,6 +283,12 @@ def test_tracking_status_and_kill_workflow(monkeypatch):
     assert response.status_code == 200
     assert status_change == {"domain": "example.ai", "status": "reached_out"}
 
+    response = client.patch(
+        "/api/tracking/example.ai", json={"status": "meeting"}
+    )
+    assert response.status_code == 200
+    assert status_change == {"domain": "example.ai", "status": "meeting"}
+
     response = client.post("/api/tracking/example.ai/kill")
     assert response.status_code == 200
     assert response.json()["rating"] == 88

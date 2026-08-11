@@ -219,7 +219,7 @@ class TrackingUpdate(BaseModel):
 
 
 class TrackingStatusUpdate(BaseModel):
-    status: Literal["tracking", "reached_out"]
+    status: Literal["tracking", "reached_out", "meeting"]
 
 
 class LoginRequest(BaseModel):

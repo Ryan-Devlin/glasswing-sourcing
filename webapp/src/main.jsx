@@ -861,6 +861,7 @@ function TrackingDeals() {
   const allRows = result.data?.rows || [];
   const activeCount = allRows.filter((row) => (row.tracking_status || "tracking") === "tracking").length;
   const reachedOutCount = allRows.filter((row) => row.tracking_status === "reached_out").length;
+  const meetingCount = allRows.filter((row) => row.tracking_status === "meeting").length;
   const rows = allRows
     .filter((row) => (row.tracking_status || "tracking") === trackingView)
     .slice(0, 8);
@@ -883,13 +884,16 @@ function TrackingDeals() {
         tabs={[
           ["tracking", `Tracking · ${activeCount}`],
           ["reached_out", `Reached out · ${reachedOutCount}`],
+          ["meeting", `Meeting · ${meetingCount}`],
         ]}
       />
       {!rows.length ? (
         <p className="empty-tracking">
           {trackingView === "tracking"
             ? "Click Track on a good deal to add it here."
-            : "Companies marked Reached out will appear here."}
+            : trackingView === "reached_out"
+              ? "Companies marked Reached out will appear here."
+              : "Companies with an active meeting will appear here."}
         </p>
       ) : (
         <div className="top-pick-grid">
@@ -898,10 +902,10 @@ function TrackingDeals() {
               <div className="tracking-card-actions">
                 <button
                   className="tracking-stage"
-                  title={trackingView === "tracking" ? "Mark as reached out" : "Move back to Tracking"}
+                  title={trackingView === "tracking" ? "Mark as reached out" : "Move back one stage"}
                   onClick={async () => {
                     if (!admin) return requestLogin();
-                    const status = trackingView === "tracking" ? "reached_out" : "tracking";
+                    const status = trackingView === "meeting" ? "reached_out" : trackingView === "reached_out" ? "tracking" : "reached_out";
                     await api(`/api/tracking/${encodeURIComponent(row.domain)}`, {
                       method: "PATCH",
                       body: JSON.stringify({ status }),
@@ -912,6 +916,15 @@ function TrackingDeals() {
                   {trackingView === "tracking" ? <MailCheck size={14} /> : <RotateCcw size={14} />}
                   {trackingView === "tracking" ? "Reached out" : "Move back"}
                 </button>
+                {trackingView === "reached_out" && <button className="tracking-stage" title="Move to Meeting" onClick={async () => {
+                  if (!admin) return requestLogin();
+                  await api(`/api/tracking/${encodeURIComponent(row.domain)}`, { method: "PATCH", body: JSON.stringify({ status: "meeting" }) });
+                  refreshTracking();
+                }}><MailCheck size={14}/> Meeting</button>}
+                {trackingView === "meeting" && <button className="tracking-stage" title="Build a sourced competitive landscape" onClick={() => {
+                  sessionStorage.setItem("landscape_prefill", row.domain);
+                  location.hash = "landscape";
+                }}><FileSpreadsheet size={14}/> Build landscape</button>}
                 <button
                   className="tracking-untrack"
                   title="Remove from Tracking"
@@ -2606,6 +2619,11 @@ function GlobalWorkerControls() {
 
 function CompetitiveLandscapePage() {
   const { admin, requestLogin } = useAdmin();
+  const [website, setWebsite] = useState(() => {
+    const value = sessionStorage.getItem("landscape_prefill") || "";
+    sessionStorage.removeItem("landscape_prefill");
+    return value;
+  });
   const [tick, setTick] = useState(0);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
@@ -2634,6 +2652,7 @@ function CompetitiveLandscapePage() {
       const result = await api("/api/competitive-landscapes", { method: "POST", body: form });
       setMessage(`Research job ${result.job_id.slice(0, 8)} is queued. You can leave this page; it will keep running.`);
       formElement.reset();
+      setWebsite("");
       setTick((value) => value + 1);
     } catch (err) {
       setError(err.payload?.detail || err.message || "Upload failed");
@@ -2666,7 +2685,7 @@ function CompetitiveLandscapePage() {
     <form className="landscape-form" onSubmit={submit}>
       <div className="section-title"><div><h2>Build a landscape</h2><p>Claude researches the market and fills every applicable field without fabricating unknown data.</p></div></div>
       <div className="form-grid">
-        <label className="wide"><span>Company website *</span><input name="website" type="text" inputMode="url" placeholder="https://company.com" required /></label>
+        <label className="wide"><span>Company website *</span><input name="website" type="text" inputMode="url" placeholder="https://company.com" value={website} onChange={(event) => setWebsite(event.target.value)} required /></label>
         <label className="wide"><span>Competitors</span><input name="requested_count" type="number" min="5" max="75" defaultValue="25" required /></label>
         <label className="wide"><span>Supporting materials <small>optional · PDF, DOCX, XLSX, CSV, TXT</small></span><input name="materials" type="file" accept=".pdf,.docx,.xlsx,.csv,.txt,.md" multiple /></label>
         <label className="wide"><span>Research notes <small>optional</small></span><textarea name="notes" rows="3" placeholder="Product positioning, geographies, competitor types, or special questions…" /></label>
