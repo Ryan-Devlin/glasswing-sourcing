@@ -1841,24 +1841,16 @@ async def worker_loop(
                 }
                 for domain in domains
             ]
-            # A hang inside screen_records (confirmed live: worker stuck
-            # reporting stage="screening" indefinitely, Classified/Failed
-            # both frozen at 0, no exception ever raised) used to block this
-            # entire worker forever -- the per-domain fetch timeout bounds
-            # one HTTP request, not the batch as a whole, so anything that
-            # blocks after that stage (a downstream write, a stuck lock, an
-            # await that never resolves) had no ceiling at all. Confirmed
-            # live: once claim_batch started prioritizing fresh, live domains
-            # and scoring got its own dedicated thread pool (removing
-            # queueing as a variable), a batch finally completed with real
-            # results -- but a following batch of different domains still
-            # occasionally hit 180s with zero individual operation ever
-            # flagged as slow, consistent with real-world variance in how
-            # long different websites take to load rather than a remaining
-            # bug. 240s gives a batch containing a few slow-loading real
-            # sites realistic room, while still failing fast on a genuine
-            # hang (still 2.5x faster than the original 600s).
-            outer_deadline_seconds = 240.0
+            # The outer deadline is a throughput invariant, not merely a
+            # crash guard. A 240-second allowance meant one pathological
+            # batch could accept six minutes of new certificates while
+            # completing nothing. With 40 domains per surge wave, a 45s
+            # ceiling provides >53 attempts/minute even in the worst case,
+            # above the observed live arrival rate. Normal mode keeps more
+            # room for its deliberate retry pass.
+            outer_deadline_seconds = (
+                45.0 if profile["mode"] in {"surge", "catch_up"} else 120.0
+            )
             batch_started_wall = time.monotonic()
             try:
                 output, screening_stats = await asyncio.wait_for(
