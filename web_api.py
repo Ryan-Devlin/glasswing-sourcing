@@ -66,6 +66,7 @@ from classification_store import (
     search_classifications,
     source_bucket_counts,
     list_tracked_domains,
+    set_tracking_status,
     track_domains,
     tracked_domain_set,
     top_claude_keeps,
@@ -213,6 +214,10 @@ class HiddenUpdate(BaseModel):
 
 class TrackingUpdate(BaseModel):
     domain: str
+
+
+class TrackingStatusUpdate(BaseModel):
+    status: Literal["tracking", "reached_out"]
 
 
 class LoginRequest(BaseModel):
@@ -564,12 +569,18 @@ def set_hidden(update: HiddenUpdate):
 @app.get("/api/tracking")
 def tracking(limit: int = Query(100, ge=1, le=500)):
     tracked_rows = list_tracked_domains(limit=limit)
-    timestamps = {row["domain"]: row["tracked_at"] for row in tracked_rows}
-    records = query_classifications_by_domains(list(timestamps))
+    tracking_meta = {row["domain"]: row for row in tracked_rows}
+    records = query_classifications_by_domains(list(tracking_meta))
     by_domain = {row["domain"]: row for row in records}
     ordered = [
-        {**by_domain[domain], "tracked": True, "tracked_at": tracked_at}
-        for domain, tracked_at in timestamps.items()
+        {
+            **by_domain[domain],
+            "tracked": True,
+            "tracked_at": meta["tracked_at"],
+            "tracking_status": meta.get("tracking_status", "tracking"),
+            "reached_out_at": meta.get("reached_out_at", ""),
+        }
+        for domain, meta in tracking_meta.items()
         if domain in by_domain
     ]
     return {"rows": _with_claude(ordered), "total": len(ordered)}
@@ -595,6 +606,55 @@ def delete_tracking(domain: str):
     untrack_domains([target])
     record_admin_audit("company_untracked", target)
     return {"ok": True, "domain": target, "tracked": False}
+
+
+@app.patch("/api/tracking/{domain}", dependencies=[Depends(_require_admin)])
+def update_tracking(domain: str, update: TrackingStatusUpdate):
+    target = stable_domain(domain)
+    if not target:
+        raise HTTPException(400, "Invalid domain")
+    if not set_tracking_status(target, update.status):
+        raise HTTPException(404, "Tracked company not found")
+    record_admin_audit("tracking_status_updated", target, update.status)
+    return {"ok": True, "domain": target, "status": update.status}
+
+
+@app.post("/api/tracking/{domain}/kill", dependencies=[Depends(_require_admin)])
+def kill_tracked_company(domain: str):
+    """Close a tracked card while retaining domain + score in the YES basket."""
+    target = stable_domain(domain)
+    if not target:
+        raise HTTPException(400, "Invalid domain")
+    record = classification_record_for_domain(target)
+    if not record:
+        raise HTTPException(404, "Company not found")
+    rating = max(0, min(100, int(record.get("fit_score", 0) or 0)))
+    save_basket_entry(
+        target,
+        "yes",
+        rating,
+        source="human",
+        reason="tracking_killed_to_yes",
+    )
+    record_manual_move(
+        [target],
+        target_label="yes",
+        target_bucket="priority",
+        scores={target: rating},
+        note="tracking_killed_to_yes",
+        source="human",
+    )
+    hide_domains([target])
+    untrack_domains([target])
+    record_admin_audit("tracked_company_killed_to_yes", target, f"score={rating}")
+    return {
+        "ok": True,
+        "domain": target,
+        "rating": rating,
+        "label": "yes",
+        "hidden": True,
+        "tracked": False,
+    }
 
 
 @app.get("/api/certstream/status")

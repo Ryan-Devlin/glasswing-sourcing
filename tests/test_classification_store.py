@@ -30,6 +30,7 @@ from classification_store import (
     unhide_domains,
     track_domains,
     tracked_domain_set,
+    set_tracking_status,
     untrack_domains,
     upsert_classifications,
 )
@@ -46,6 +47,12 @@ def test_tracking_is_persistent_and_idempotent(tmp_path):
     assert [row["domain"] for row in list_tracked_domains(path=database)] == [
         "example.ai"
     ]
+    assert set_tracking_status("example.ai", "reached_out", path=database)
+    tracked = list_tracked_domains(path=database)[0]
+    assert tracked["tracking_status"] == "reached_out"
+    assert tracked["reached_out_at"]
+    assert set_tracking_status("example.ai", "tracking", path=database)
+    assert list_tracked_domains(path=database)[0]["reached_out_at"] == ""
     assert untrack_domains(["example.ai"], path=database) == 1
     assert tracked_domain_set(["example.ai"], path=database) == set()
 

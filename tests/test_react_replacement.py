@@ -33,7 +33,9 @@ def test_react_app_has_every_primary_page_and_no_streamlit_dependency():
     assert source.count("<CompaniesTable />") >= 2
     assert "clamp-text" in source
     assert "Claude’s strongest investment recommendations" in source
-    assert "/api/claude/top?limit=6" in source
+    # Fetch enough candidates to backfill the six-card view after tracked
+    # companies are moved out of the recommendation grid.
+    assert "/api/claude/top?limit=20" in source
 
 
 def test_production_entrypoint_is_fastapi():

@@ -245,6 +245,55 @@ def test_tracking_endpoints_persist_and_return_company_details(monkeypatch):
     assert listing["rows"][0]["tracked"] is True
 
 
+def test_tracking_status_and_kill_workflow(monkeypatch):
+    status_change = {}
+    basket = {}
+    movement = {}
+    hidden = []
+    untracked = []
+    monkeypatch.setattr(
+        web_api,
+        "set_tracking_status",
+        lambda domain, status: status_change.update(domain=domain, status=status) or True,
+    )
+    monkeypatch.setattr(
+        web_api,
+        "classification_record_for_domain",
+        lambda domain: {"domain": domain, "fit_score": 88},
+    )
+    monkeypatch.setattr(
+        web_api,
+        "save_basket_entry",
+        lambda domain, label, rating, **kwargs: basket.update(
+            domain=domain, label=label, rating=rating, **kwargs
+        ),
+    )
+    monkeypatch.setattr(
+        web_api,
+        "record_manual_move",
+        lambda domains, **kwargs: movement.update(domains=domains, **kwargs),
+    )
+    monkeypatch.setattr(web_api, "hide_domains", lambda domains: hidden.extend(domains))
+    monkeypatch.setattr(web_api, "untrack_domains", lambda domains: untracked.extend(domains))
+    monkeypatch.setattr(web_api, "record_admin_audit", lambda *args: None)
+
+    response = client.patch(
+        "/api/tracking/example.ai", json={"status": "reached_out"}
+    )
+    assert response.status_code == 200
+    assert status_change == {"domain": "example.ai", "status": "reached_out"}
+
+    response = client.post("/api/tracking/example.ai/kill")
+    assert response.status_code == 200
+    assert response.json()["rating"] == 88
+    assert basket["label"] == "yes"
+    assert basket["rating"] == 88
+    assert movement["target_label"] == "yes"
+    assert movement["target_bucket"] == "priority"
+    assert hidden == ["example.ai"]
+    assert untracked == ["example.ai"]
+
+
 def test_worker_control_is_explicit_and_scoped(monkeypatch):
     captured = {}
     monkeypatch.setattr(

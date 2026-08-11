@@ -357,6 +357,54 @@ td a,
 .tracking-view {
   background: linear-gradient(135deg, #fbf8f6, #fff 42%);
 }
+.tracking-view > .bucket-tabs {
+  width: max-content;
+  max-width: 100%;
+  margin: -2px 0 18px;
+}
+.tracking-view .top-pick {
+  padding-bottom: 96px;
+}
+.tracking-view .deal-age {
+  bottom: 64px;
+}
+.tracking-card-actions {
+  position: absolute;
+  right: 14px;
+  bottom: 12px;
+  left: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--gw-border);
+}
+.tracking-card-actions button {
+  min-height: 30px;
+  padding: 6px 9px;
+  font-size: 11px;
+  font-weight: 700;
+}
+.tracking-stage {
+  color: var(--gw-red-dark);
+  border-color: #e6bdc5;
+  background: var(--gw-red-mist);
+}
+.tracking-untrack {
+  color: var(--gw-muted);
+  background: #fff;
+}
+.tracking-kill {
+  color: #fff;
+  border-color: var(--gw-red);
+  background: var(--gw-red);
+}
+.tracking-kill:hover:not(:disabled) {
+  color: #fff;
+  border-color: var(--gw-red-dark);
+  background: var(--gw-red-dark);
+}
 .top-pick {
   border-top: 3px solid transparent;
 }

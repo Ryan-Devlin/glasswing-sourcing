@@ -228,7 +228,9 @@ def migrate(conn: sqlite3.Connection | PostgresConnection) -> None:
 
         CREATE TABLE IF NOT EXISTS tracked_domains (
             domain TEXT PRIMARY KEY,
-            tracked_at TEXT NOT NULL
+            tracked_at TEXT NOT NULL,
+            tracking_status TEXT NOT NULL DEFAULT 'tracking',
+            reached_out_at TEXT NOT NULL DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS idx_tracked_domains_recent
             ON tracked_domains(tracked_at DESC, domain);
@@ -377,6 +379,23 @@ def migrate(conn: sqlite3.Connection | PostgresConnection) -> None:
         conn.execute(
             "ALTER TABLE claude_review_queue ADD COLUMN "
             "override_budget BOOLEAN NOT NULL DEFAULT FALSE"
+        )
+    tracked_columns = (
+        table_columns_postgres(conn, "tracked_domains")
+        if postgres else {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(tracked_domains)")
+        }
+    )
+    if "tracking_status" not in tracked_columns:
+        conn.execute(
+            "ALTER TABLE tracked_domains ADD COLUMN "
+            "tracking_status TEXT NOT NULL DEFAULT 'tracking'"
+        )
+    if "reached_out_at" not in tracked_columns:
+        conn.execute(
+            "ALTER TABLE tracked_domains ADD COLUMN "
+            "reached_out_at TEXT NOT NULL DEFAULT ''"
         )
     membership_count = int(conn.execute(
         "SELECT count(*) AS total FROM classification_run_membership"
@@ -1808,6 +1827,28 @@ def untrack_domains(
     return removed
 
 
+def set_tracking_status(
+    domain: str,
+    status: str,
+    *,
+    path: Path | str = CLASSIFICATION_DB,
+) -> bool:
+    """Move a tracked company between active and reached-out workflow tabs."""
+    target = stable_domain(domain)
+    normalized_status = str(status).strip().lower()
+    if not target or normalized_status not in {"tracking", "reached_out"}:
+        return False
+    reached_out_at = utc_now() if normalized_status == "reached_out" else ""
+    with connect_store(path) as conn:
+        cursor = conn.execute(
+            "UPDATE tracked_domains SET tracking_status=?,reached_out_at=? "
+            "WHERE domain=?",
+            (normalized_status, reached_out_at, target),
+        )
+        conn.commit()
+    return int(cursor.rowcount or 0) > 0
+
+
 def tracked_domain_set(
     domains: Iterable[str],
     *,
@@ -1849,7 +1890,8 @@ def list_tracked_domains(
     try:
         with connect_store(path, read_only=True) as conn:
             rows = conn.execute(
-                "SELECT domain,tracked_at FROM tracked_domains "
+                "SELECT domain,tracked_at,tracking_status,reached_out_at "
+                "FROM tracked_domains "
                 "ORDER BY tracked_at DESC,domain LIMIT ?",
                 (max(1, min(int(limit), 1000)),),
             ).fetchall()

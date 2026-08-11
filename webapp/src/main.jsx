@@ -18,12 +18,15 @@ import {
   Home,
   LogIn,
   LogOut,
+  MailCheck,
   Pause,
   Play,
   RefreshCw,
+  RotateCcw,
   Search,
   Trash2,
   Upload,
+  XCircle,
 } from "lucide-react";
 import "./styles.css";
 import "./polish.css";
@@ -769,6 +772,7 @@ function GoodDeals() {
 function TrackingDeals() {
   const { admin, requestLogin } = useAdmin();
   const [refresh, setRefresh] = useState(0);
+  const [trackingView, setTrackingView] = useState("tracking");
   useEffect(() => {
     const refreshTracking = () => setRefresh((value) => value + 1);
     window.addEventListener("tracking-changed", refreshTracking);
@@ -777,7 +781,16 @@ function TrackingDeals() {
   const result = useApi("/api/tracking?limit=100", [refresh]);
   if (result.loading) return <Loading />;
   if (result.error) return <ErrorBox>{result.error}</ErrorBox>;
-  const rows = (result.data?.rows || []).slice(0, 8);
+  const allRows = result.data?.rows || [];
+  const activeCount = allRows.filter((row) => (row.tracking_status || "tracking") === "tracking").length;
+  const reachedOutCount = allRows.filter((row) => row.tracking_status === "reached_out").length;
+  const rows = allRows
+    .filter((row) => (row.tracking_status || "tracking") === trackingView)
+    .slice(0, 8);
+  const refreshTracking = () => {
+    setRefresh((value) => value + 1);
+    window.dispatchEvent(new CustomEvent("tracking-changed"));
+  };
   return (
     <section className="top-picks tracking-view">
       <div className="section-title">
@@ -787,24 +800,65 @@ function TrackingDeals() {
         </div>
         <span className="pill">{fmt(result.data?.total || 0)} tracked</span>
       </div>
+      <BucketTabs
+        value={trackingView}
+        onChange={setTrackingView}
+        tabs={[
+          ["tracking", `Tracking · ${activeCount}`],
+          ["reached_out", `Reached out · ${reachedOutCount}`],
+        ]}
+      />
       {!rows.length ? (
-        <p className="empty-tracking">Click Track on a good deal to add it here.</p>
+        <p className="empty-tracking">
+          {trackingView === "tracking"
+            ? "Click Track on a good deal to add it here."
+            : "Companies marked Reached out will appear here."}
+        </p>
       ) : (
         <div className="top-pick-grid">
           {rows.map((row) => (
             <article className="top-pick" key={row.domain}>
-              <button
-                className="card-dismiss"
-                title="Remove from Tracking"
-                onClick={async () => {
-                  if (!admin) return requestLogin();
-                  await api(`/api/tracking/${encodeURIComponent(row.domain)}`, { method: "DELETE" });
-                  setRefresh((value) => value + 1);
-                  window.dispatchEvent(new CustomEvent("tracking-changed"));
-                }}
-              >
-                Untrack
-              </button>
+              <div className="tracking-card-actions">
+                <button
+                  className="tracking-stage"
+                  title={trackingView === "tracking" ? "Mark as reached out" : "Move back to Tracking"}
+                  onClick={async () => {
+                    if (!admin) return requestLogin();
+                    const status = trackingView === "tracking" ? "reached_out" : "tracking";
+                    await api(`/api/tracking/${encodeURIComponent(row.domain)}`, {
+                      method: "PATCH",
+                      body: JSON.stringify({ status }),
+                    });
+                    refreshTracking();
+                  }}
+                >
+                  {trackingView === "tracking" ? <MailCheck size={14} /> : <RotateCcw size={14} />}
+                  {trackingView === "tracking" ? "Reached out" : "Move back"}
+                </button>
+                <button
+                  className="tracking-untrack"
+                  title="Remove from Tracking"
+                  onClick={async () => {
+                    if (!admin) return requestLogin();
+                    await api(`/api/tracking/${encodeURIComponent(row.domain)}`, { method: "DELETE" });
+                    refreshTracking();
+                  }}
+                >
+                  Untrack
+                </button>
+                <button
+                  className="tracking-kill"
+                  title="Add domain and score to YES, then remove this card"
+                  onClick={async () => {
+                    if (!admin) return requestLogin();
+                    if (!window.confirm(`Kill ${row.domain}? This adds it to YES and removes it from active review views.`)) return;
+                    await api(`/api/tracking/${encodeURIComponent(row.domain)}/kill`, { method: "POST" });
+                    refreshTracking();
+                  }}
+                >
+                  <XCircle size={14} /> Kill
+                </button>
+              </div>
               <span className="deal-age" title={row.classified_at || row.updated_at}>
                 {dealAgeLabel(row.classified_at || row.updated_at)}
               </span>
