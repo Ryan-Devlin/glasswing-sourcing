@@ -27,6 +27,8 @@ import {
 } from "lucide-react";
 import "./styles.css";
 import "./polish.css";
+import glasswingLogo from "../../assets/glasswing_logo.svg";
+import glasswingMark from "../../assets/glasswing_mark.png";
 import { dealAgeLabel, formatCount as fmt, pageCount, plainSnippet } from "./domain";
 
 const NAV = [
@@ -2336,11 +2338,8 @@ function App() {
       <div className="app">
         <aside>
           <div className="brand">
-            <div className="mark">G</div>
-            <div>
-              <strong>Glasswing</strong>
-              <span>VENTURES</span>
-            </div>
+            <img src={glasswingLogo} alt="Glasswing Ventures" />
+            <span>SOURCING INTELLIGENCE</span>
           </div>
           <nav>
             {NAV.map(([id, label, Icon]) => (
@@ -2364,6 +2363,7 @@ function App() {
           <ApiStatus />
         </aside>
         <main>
+          <img className="glasswing-watermark" src={glasswingMark} alt="" aria-hidden="true" />
           <GlobalWorkerControls />
           <ErrorBoundary>{body}</ErrorBoundary>
         </main>
