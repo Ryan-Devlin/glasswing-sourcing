@@ -13,7 +13,6 @@ import {
   Database,
   Download,
   FileSpreadsheet,
-  FileText,
   Globe2,
   HeartPulse,
   Home,
@@ -38,7 +37,6 @@ import { dealAgeLabel, formatCount as fmt, pageCount, plainSnippet } from "./dom
 const NAV = [
   ["home", "Home", Home],
   ["certstream", "CertStream Scraper", Activity],
-  ["formd", "Form D Deal Flow", FileText],
   ["csv", "CSV Scraper", Database],
   ["domains", "Domain Crawler (.com, .app)", Globe2],
   ["health", "System Health", HeartPulse],
@@ -76,6 +74,13 @@ function shortClaudeReason(value) {
     .replace(/\s+/g, " ")
     .trim();
   return reason.length > 260 ? `${reason.slice(0, 257)}…` : reason;
+}
+function moneyCompact(value) {
+  const amount = Number(value || 0);
+  if (!amount) return "Undisclosed";
+  if (amount >= 1_000_000) return `$${(amount / 1_000_000).toFixed(amount >= 10_000_000 ? 0 : 1)}M`;
+  if (amount >= 1_000) return `$${Math.round(amount / 1_000)}K`;
+  return `$${amount.toLocaleString()}`;
 }
 function claudeScorecard(row) {
   const d = row.claude_dimensions || {};
@@ -653,7 +658,6 @@ function HomePage() {
       </header>
       <TrackingDeals />
       <GoodDeals />
-      <ClaudeTopPicks />
       <form
         className="searchbar"
         onSubmit={async (e) => {
@@ -740,7 +744,7 @@ function GoodDeals() {
     return () => window.removeEventListener("tracking-changed", refreshDeals);
   }, []);
   const deals = useApi(
-    "/api/classifications?bucket=investable&page=1&page_size=25&sort=Highest%20score",
+    "/api/classifications?bucket=investable&page=1&page_size=25&sort=Recently%20detected",
     [refresh],
   );
   if (deals.loading && !deals.data) return <Loading />;
@@ -812,6 +816,11 @@ function GoodDeals() {
                   <span className="send-label">Send to Claude</span>
                 </button>
               </div>
+            )}
+            {row.form_d_match && (
+              <a className="pill form-d-investable" href={row.form_d_filing_url} target="_blank" rel="noreferrer" title={`Form D filed ${row.form_d_filing_date} · ${moneyCompact(row.form_d_offering_amount)} offering`}>
+                Form D · {moneyCompact(row.form_d_offering_amount)}
+              </a>
             )}
             <p className="clamp-text" title={row.description}>{row.description || row.routing_reason}</p>
             <span className="top-pick-category">{String(row.thesis_pillar || "enterprise technology").replaceAll("_", " ")}</span>

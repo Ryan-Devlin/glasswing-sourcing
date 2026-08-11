@@ -38,6 +38,10 @@ def test_react_app_has_every_primary_page_and_no_streamlit_dependency():
     assert "<GlobalWorkerControls />" in source
     assert "function FormDPage" in source
     assert "/api/form-d/control" in source
+    assert '["formd", "Form D Deal Flow"' not in source
+    assert "formd: <FormDPage />" in source
+    assert "sort=Recently%20detected" in source
+    assert "<ClaudeTopPicks />" not in source
     assert "Resume all" in source
     assert "Pause all" in source
     assert "Send to Claude" in source

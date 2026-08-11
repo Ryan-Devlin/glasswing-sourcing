@@ -1101,6 +1101,7 @@ def query_classifications(
         "Fit: high to low": "fit_score DESC, priority_score DESC, domain",
         "Fit: low to high": "fit_score ASC, priority_score ASC, domain",
         "Recently classified": "updated_at DESC, domain",
+        "Recently detected": "COALESCE(NULLIF(classified_at,''),updated_at) DESC, domain",
         "Oldest classified": "updated_at ASC, domain",
         "Company: A to Z": "lower(company_name), domain",
         "Company: Z to A": "lower(company_name) DESC, domain DESC",

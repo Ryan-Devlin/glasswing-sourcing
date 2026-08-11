@@ -339,6 +339,21 @@ def _with_claude(rows: list[dict]) -> list[dict]:
     domains = [row.get("domain", "") for row in rows]
     for start in range(0, len(domains), 500):
         decisions.update(claude_decisions_for_domains(domains[start:start + 500]))
+    form_d: dict[str, dict] = {}
+    try:
+        with connect_store(read_only=True) as conn:
+            for start in range(0, len(domains), 500):
+                batch = domains[start:start + 500]
+                marks = ",".join("?" for _ in batch)
+                matches = conn.execute(
+                    "SELECT domain,filing_date,filing_url,offering_amount,amount_sold "
+                    f"FROM form_d_filings WHERE domain IN ({marks}) ORDER BY filing_date DESC",
+                    batch,
+                ).fetchall()
+                for match in matches:
+                    form_d.setdefault(str(match["domain"]), dict(match))
+    except Exception:
+        pass
     return [
         {
             **row,
@@ -352,6 +367,11 @@ def _with_claude(rows: list[dict]) -> list[dict]:
                 for name in ("thesis_fit", "enterprise_value", "product_depth", "technical_moat", "stage_fit", "evidence_confidence")
             },
             "claude_reviewed_at": decisions.get(row.get("domain", ""), {}).get("updated_at", ""),
+            "form_d_match": row.get("domain", "") in form_d,
+            "form_d_filing_date": form_d.get(row.get("domain", ""), {}).get("filing_date", ""),
+            "form_d_filing_url": form_d.get(row.get("domain", ""), {}).get("filing_url", ""),
+            "form_d_offering_amount": form_d.get(row.get("domain", ""), {}).get("offering_amount", 0),
+            "form_d_amount_sold": form_d.get(row.get("domain", ""), {}).get("amount_sold", 0),
         }
         for row in rows
     ]
