@@ -1865,7 +1865,12 @@ async def worker_loop(
                         # inside the same hot batch duplicated network/CPU
                         # work and cut throughput below the live arrival rate.
                         retry_timeouts=profile["mode"] == "normal",
-                        persist=True,
+                        # Persistence has its own database/cleanup cost and
+                        # must not live inside the network batch deadline.
+                        # Previously a batch could finish real website
+                        # scoring, enter a slow Postgres write, then have the
+                        # outer timeout discard every completed result.
+                        persist=False,
                     ),
                     timeout=outer_deadline_seconds,
                 )
@@ -1876,6 +1881,17 @@ async def worker_loop(
                     f"(batch={len(domains)}, workers={profile['workers']}, "
                     f"per_domain_timeout={profile['timeout']})"
                 ) from None
+            timed_out_before_persist = list(
+                screening_stats.get("timed_out_domains", [])
+            )
+            persisted_stats = await asyncio.to_thread(
+                screening_filter.persist_screening_output,
+                output,
+            )
+            screening_stats = {
+                **persisted_stats,
+                "timed_out_domains": timed_out_before_persist,
+            }
             # Confirmed live: screen_records used to discard an entire
             # batch outright once 80%+ timed out, throwing away the real,
             # successfully-fetched companies in it too. It now persists
