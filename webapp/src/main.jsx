@@ -117,6 +117,22 @@ function ClaudePendingBadge({ row }) {
     </span>
   );
 }
+function GreenFlagTags({ row }) {
+  if (String(row.claude_decision || row.decision || "").toUpperCase() !== "KEEP") return null;
+  const flags = Array.isArray(row.claude_green_flags)
+    ? row.claude_green_flags
+    : Array.isArray(row.green_flags) ? row.green_flags : [];
+  if (!flags.length) return null;
+  return (
+    <div className="green-flag-tags" aria-label="Positive diligence signals">
+      {flags.slice(0, 4).map((flag) => (
+        <span className="green-flag" key={flag.type || flag.label} title={flag.evidence || "Verified by Claude diligence"}>
+          <CheckCircle2 size={12} /> {flag.label}
+        </span>
+      ))}
+    </div>
+  );
+}
 async function api(path, options = {}) {
   const method = String(options.method || "GET").toUpperCase();
   const request = async () => {
@@ -849,6 +865,7 @@ function GoodDeals() {
                 Form D · {moneyCompact(row.form_d_offering_amount)}
               </a>
             )}
+            <GreenFlagTags row={row} />
             <p className="clamp-text" title={row.description || row.claude_summary || row.claude_reasoning || "Company description is being enriched."}>{row.description || row.claude_summary || shortClaudeReason(row.claude_reasoning) || "Company description is being enriched."}</p>
             <span className="top-pick-category">{String(row.thesis_pillar || "enterprise technology").replaceAll("_", " ")}</span>
           </article>
@@ -980,6 +997,7 @@ function TrackingDeals() {
               {row.claude_decision && (
                 <div className="deal-claude-review"><ClaudeReviewBadge row={row} prefix="Claude " /></div>
               )}
+              <GreenFlagTags row={row} />
               <p className="clamp-text" title={row.description || row.claude_summary || row.claude_reasoning || "Company description is being enriched."}>{row.description || row.claude_summary || shortClaudeReason(row.claude_reasoning) || "Company description is being enriched."}</p>
               <span className="top-pick-category">{String(row.thesis_pillar || "enterprise technology").replaceAll("_", " ")}</span>
             </article>
@@ -1051,6 +1069,7 @@ function ClaudeTopPicks() {
               >
                 {row.domain}
               </a>
+              <GreenFlagTags row={row} />
               <p className="clamp-text" title={reason}>
                 {reason}
               </p>
@@ -1878,6 +1897,7 @@ function CrawlerDiscoveries() {
                   </button>
                 </div>
               )}
+              <GreenFlagTags row={row} />
               <p className="clamp-text" title={row.description || row.claude_summary || row.claude_reasoning || "Company description is being enriched."}>{row.description || row.claude_summary || shortClaudeReason(row.claude_reasoning) || "Company description is being enriched."}</p>
               <span className="top-pick-category">{String(row.thesis_pillar || "enterprise technology").replaceAll("_", " ")}</span>
             </article>

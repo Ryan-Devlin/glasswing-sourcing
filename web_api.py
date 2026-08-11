@@ -378,6 +378,7 @@ def _with_claude(rows: list[dict]) -> list[dict]:
             "claude_summary": decisions.get(row.get("domain", ""), {}).get("product_summary", ""),
             "claude_concerns": decisions.get(row.get("domain", ""), {}).get("concerns", ""),
             "claude_unknowns": decisions.get(row.get("domain", ""), {}).get("unknowns", ""),
+            "claude_green_flags": decisions.get(row.get("domain", ""), {}).get("green_flags", []),
             "claude_dimensions": {
                 name: decisions.get(row.get("domain", ""), {}).get(name, "")
                 for name in ("thesis_fit", "enterprise_value", "product_depth", "technical_moat", "stage_fit", "evidence_confidence")
@@ -751,7 +752,15 @@ def claude_top_companies(limit: int = Query(6, ge=1, le=20)):
     visible = [row for row in rows if row["domain"] not in hidden][:limit]
     tracked = tracked_domain_set([row["domain"] for row in visible])
     return {
-        "rows": [{**row, "tracked": row["domain"] in tracked} for row in visible]
+        "rows": [
+            {
+                **row,
+                "tracked": row["domain"] in tracked,
+                "claude_decision": "KEEP",
+                "claude_green_flags": row.get("green_flags", []),
+            }
+            for row in visible
+        ]
     }
 
 

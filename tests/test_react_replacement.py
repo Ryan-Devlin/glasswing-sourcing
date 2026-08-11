@@ -53,6 +53,8 @@ def test_react_app_has_every_primary_page_and_no_streamlit_dependency():
     assert "Queued for Claude" in source
     assert "Claude processing" in source
     assert "claude_queue_status" in source
+    assert "Positive diligence signals" in source
+    assert "GreenFlagTags" in source
     assert "/api/claude/review/" in source
     assert "sort.key, sort.direction" in source
     assert "Claude calls per day" in source

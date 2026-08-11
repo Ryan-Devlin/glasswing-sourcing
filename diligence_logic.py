@@ -52,6 +52,7 @@ FIELDS = [
     "funding_evidence",
     "location_evidence",
     "positive_evidence",
+    "green_flags",
     "negative_evidence",
     "unknowns",
 ]
@@ -82,6 +83,43 @@ def to_int(value: Any, default: int = -1) -> int:
 
 def clamp_words(value: str, limit: int) -> str:
     return " ".join(clean(value).split()[:limit])
+
+
+GREEN_FLAG_LABELS = {
+    "ivy_league_spinout": "Ivy League spinout",
+    "top_university_spinout": "University spinout",
+    "ex_big_tech": "Ex-big tech team",
+    "repeat_founder": "Repeat founder",
+    "prior_exit": "Prior founder exit",
+    "top_accelerator": "Top accelerator",
+    "enterprise_traction": "Enterprise traction",
+    "government_validation": "Government validation",
+    "strategic_backing": "Strategic backing",
+    "deep_tech_ip": "Defensible IP",
+}
+
+
+def parse_green_flags(value: str) -> list[dict[str, str]]:
+    """Parse bounded, evidence-backed positive signals from model output."""
+    flags: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in clean(value).split("|"):
+        parts = [clean(part) for part in item.split("::", 2)]
+        if len(parts) != 3:
+            continue
+        kind, label, evidence = parts
+        kind = kind.lower()
+        if kind not in GREEN_FLAG_LABELS or kind in seen or not evidence:
+            continue
+        seen.add(kind)
+        flags.append({
+            "type": kind,
+            "label": clamp_words(label or GREEN_FLAG_LABELS[kind], 5),
+            "evidence": clamp_words(evidence, 18),
+        })
+        if len(flags) == 4:
+            break
+    return flags
 
 
 def recursively_collect_urls(value: Any, urls: set[str]) -> None:
@@ -242,6 +280,7 @@ def parse_assessment(
         "funding_evidence": clamp_words(raw["funding_evidence"], 18),
         "location_evidence": clamp_words(raw["location_evidence"], 18),
         "positive_evidence": clamp_words(raw["positive_evidence"], 35),
+        "green_flags": parse_green_flags(raw["green_flags"]),
         "negative_evidence": clamp_words(raw["negative_evidence"], 25),
         "unknowns": clamp_words(raw["unknowns"], 25),
         "diligence_sources": " | ".join(urls[:5]),

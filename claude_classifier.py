@@ -100,6 +100,7 @@ Return ONLY these tags, with no prose before or after:
 <funding_evidence>eighteen words maximum</funding_evidence>
 <location_evidence>eighteen words maximum</location_evidence>
 <positive_evidence>thirty-five words maximum</positive_evidence>
+<green_flags>up to four evidence-backed flags separated by | using type::short label::concrete evidence; allowed types: ivy_league_spinout, top_university_spinout, ex_big_tech, repeat_founder, prior_exit, top_accelerator, enterprise_traction, government_validation, strategic_backing, deep_tech_ip; use none when unverified</green_flags>
 <negative_evidence>twenty-five words maximum; "none" if none</negative_evidence>
 <unknowns>twenty-five words maximum; "none" if none</unknowns>
 """
@@ -129,6 +130,7 @@ FIELDS = [
     "funding_evidence",
     "location_evidence",
     "positive_evidence",
+    "green_flags",
     "negative_evidence",
     "unknowns",
 ]
@@ -186,9 +188,9 @@ def company_payload(row: dict) -> str:
         "website_maturity_evidence": clean(row.get("maturity_evidence", ""))[:120],
     }
     return (
-        "Use one ownership-focused web search for the exact company name and domain. "
-        "Check acquired, acquisition, merged, subsidiary, parent company, public status, "
-        "funding, stage, and headquarters. Return only tags.\n"
+        "Search the exact company and domain for ownership, funding, stage, HQ, "
+        "founder work/education, spinout origin, accelerators, exits, patents, and "
+        "named enterprise or government validation. Use only confirmed facts. Return tags.\n"
         + json.dumps(data, ensure_ascii=False)
     )
 
@@ -245,6 +247,7 @@ def dry_assessment(row: dict) -> dict:
         "location_evidence": clean(row.get("location_evidence", "")),
         "diligence_sources": "",
         "positive_evidence": "Website gate passed",
+        "green_flags": [],
         "negative_evidence": "none",
         "unknowns": "External diligence not run",
         "diligence_version": DILIGENCE_VERSION,

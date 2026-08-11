@@ -813,6 +813,25 @@ tbody tr:hover {
   background: #f8f3f7;
   cursor: default;
 }
+.green-flag-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.green-flag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  width: max-content;
+  padding: 5px 8px;
+  border: 1px solid #bfe4d3;
+  border-radius: 999px;
+  color: #176847;
+  background: #eaf7f0;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: help;
+}
 .intake-panel {
   display: grid;
   grid-template-columns: 1.25fr 1fr;

@@ -6,7 +6,24 @@ from unittest.mock import patch
 import pandas as pd
 
 import claude_classifier
-from diligence_logic import apply_hard_guards, dimension_score, parse_assessment
+from diligence_logic import (
+    apply_hard_guards,
+    dimension_score,
+    parse_assessment,
+    parse_green_flags,
+)
+
+
+def test_green_flags_require_allowed_type_and_evidence():
+    flags = parse_green_flags(
+        "ex_big_tech::Ex-Meta founders::Two founders previously led Meta infrastructure teams | "
+        "made_up::Famous::Unsupported | repeat_founder::Repeat founder::"
+    )
+    assert flags == [{
+        "type": "ex_big_tech",
+        "label": "Ex-Meta founders",
+        "evidence": "Two founders previously led Meta infrastructure teams",
+    }]
 
 
 class ClaudeThresholdTests(unittest.TestCase):
