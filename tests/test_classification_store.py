@@ -12,6 +12,7 @@ from classification_store import (
     classification_source_label,
     connect_store,
     corpus_bucket_counts,
+    discard_uninvestable_classifications,
     hidden_domain_set,
     hide_domains,
     list_hidden_domains,
@@ -55,6 +56,32 @@ def test_tracking_is_persistent_and_idempotent(tmp_path):
     assert list_tracked_domains(path=database)[0]["reached_out_at"] == ""
     assert untrack_domains(["example.ai"], path=database) == 1
     assert tracked_domain_set(["example.ai"], path=database) == set()
+
+
+def test_discard_uninvestable_keeps_only_priority_and_human_truth(tmp_path):
+    database = tmp_path / "classifications.sqlite3"
+    upsert_classifications(
+        pd.DataFrame([
+            {"domain": "keep.ai", "routing_bucket": "priority"},
+            {"domain": "throw-away.ai", "routing_bucket": "review"},
+            {"domain": "human.ai", "routing_bucket": "review"},
+        ]),
+        path=database,
+    )
+    upsert_training_labels(
+        [{"domain": "human.ai", "label": "yes", "rating": 80}],
+        path=database,
+    )
+
+    removed = discard_uninvestable_classifications(
+        ["keep.ai", "throw-away.ai", "human.ai"], path=database
+    )
+
+    assert removed == 1
+    remaining = query_classifications_by_domains(
+        ["keep.ai", "throw-away.ai", "human.ai"], path=database
+    )
+    assert {row["domain"] for row in remaining} == {"keep.ai", "human.ai"}
 
 
 def test_master_bucket_queries_are_paged_and_source_labeled(tmp_path):

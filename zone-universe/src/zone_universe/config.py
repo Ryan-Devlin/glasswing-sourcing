@@ -78,7 +78,10 @@ def load_settings() -> Settings:
         ),
         batch_size=max(
             1,
-            min(5000, int(os.getenv("ZONE_UNIVERSE_BATCH_SIZE", "100"))),
+            # Large batches let the local name-quality gate discard cold
+            # zone entries quickly; only the small surviving subset reaches
+            # network preflight.
+            min(5000, int(os.getenv("ZONE_UNIVERSE_BATCH_SIZE", "500"))),
         ),
         preflight_enabled=os.getenv(
             "ZONE_UNIVERSE_PREFLIGHT_ENABLED",
@@ -88,7 +91,7 @@ def load_settings() -> Settings:
             1,
             min(
                 250,
-                int(os.getenv("ZONE_UNIVERSE_PREFLIGHT_CONCURRENCY", "100")),
+                int(os.getenv("ZONE_UNIVERSE_PREFLIGHT_CONCURRENCY", "200")),
             ),
         ),
         preflight_max_response_bytes=max(
@@ -123,8 +126,12 @@ def load_settings() -> Settings:
             ),
         ),
         minimum_free_gb=max(
-            2.0,
-            float(os.getenv("ZONE_UNIVERSE_MINIMUM_FREE_GB", "20")),
+            0.25,
+            # The production Railway volume is 5 GB. The former 20 GB
+            # default made the crawler permanently pause itself even when
+            # the volume was healthy. Keep a real reserve without requiring
+            # more free space than the mounted volume can physically hold.
+            float(os.getenv("ZONE_UNIVERSE_MINIMUM_FREE_GB", "0.5")),
         ),
         retain_raw_html=os.getenv(
             "ZONE_UNIVERSE_RETAIN_RAW_HTML",

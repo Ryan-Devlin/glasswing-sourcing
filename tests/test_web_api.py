@@ -331,6 +331,45 @@ def test_unknown_bucket_and_worker_are_rejected():
     assert client.post("/api/runtime/wat", json={"desired": True}).status_code == 404
 
 
+def test_zone_stats_report_retained_and_discarded_separately(monkeypatch):
+    class ZoneConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(web_api, "zone_connect", lambda *args, **kwargs: ZoneConnection())
+    monkeypatch.setattr(
+        web_api,
+        "zone_diagnostics",
+        lambda conn: {
+            "queued_domains": 1000,
+            "attempted": 300,
+            "low_priority_quarantined": 400,
+            "network_success": 40,
+            "network_failed": 20,
+            "preflight_rejected": 240,
+            "preflight_promising": 60,
+            "success": 5,
+            "searchable_pages": 5,
+        },
+    )
+    monkeypatch.setattr(
+        web_api,
+        "zone_worker_state",
+        lambda conn: {"crawler_status": "crawling_com", "crawler_phase": "preflight"},
+    )
+
+    result = client.get("/api/corpus/zone/stats").json()
+
+    assert result["pending"] == 300
+    assert result["processed"] == 700
+    assert result["retained"] == 5
+    assert result["discarded"] == 695
+    assert result["failed"] == 20
+
+
 def test_crawler_company_tables_are_source_scoped_and_paged(monkeypatch):
     monkeypatch.setattr(web_api, "source_bucket_counts", lambda prefixes: {"review": 240})
     captured = {}

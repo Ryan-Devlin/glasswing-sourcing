@@ -21,7 +21,11 @@ from runtime_control import (
 )
 
 from .config import PID_FILE, STOP_FILE, ZONEFILES, Settings, load_settings
-from .crawler import crawl_once, queue_candidate_registrations
+from .crawler import (
+    crawl_once,
+    discard_cached_pages,
+    queue_candidate_registrations,
+)
 from .database import connect, diagnostics, log_event, set_state
 from .rdap import (
     RegistrationRecord,
@@ -198,6 +202,51 @@ async def run() -> None:
     PID_FILE.parent.mkdir(parents=True, exist_ok=True)
     PID_FILE.write_text(str(os.getpid()), encoding="utf-8")
     conn = connect(settings.database)
+
+    # One-time/boot-time retention sweep: older worker versions kept every
+    # successful page regardless of its eventual investment classification.
+    # Repair that legacy corpus before new crawling resumes.
+    existing_pages = [
+        str(row["domain"])
+        for row in conn.execute("SELECT domain FROM pages").fetchall()
+    ]
+    if existing_pages:
+        from classification_store import (
+            classification_map,
+            discard_uninvestable_classifications,
+        )
+
+        classifications = classification_map(existing_pages)
+        stale_domains = [
+            domain
+            for domain in existing_pages
+            if classifications.get(domain) != "priority"
+        ]
+        pages_removed = discard_cached_pages(conn, stale_domains)
+        classifications_removed = discard_uninvestable_classifications(
+            stale_domains
+        )
+        set_state(
+            conn,
+            "last_retention_sweep",
+            {
+                "checked": len(existing_pages),
+                "retained_investable": len(existing_pages) - pages_removed,
+                "pages_removed": pages_removed,
+                "classifications_removed": classifications_removed,
+            },
+        )
+
+    # Historical per-domain failure TSVs duplicate shard counters and grow
+    # without bound. They contain no investable companies and are safe to
+    # retire under the discard-only retention policy.
+    failure_root = settings.database.parent / "failures"
+    retired_failure_bytes = 0
+    if failure_root.exists():
+        for failure_path in failure_root.glob("*.tsv"):
+            retired_failure_bytes += failure_path.stat().st_size
+            failure_path.unlink()
+    set_state(conn, "retired_failure_log_bytes", retired_failure_bytes)
 
     from .queue_migration import migrate_queue_files_from_object_storage
 

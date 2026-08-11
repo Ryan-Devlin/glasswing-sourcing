@@ -19,6 +19,10 @@ def test_react_app_has_every_primary_page_and_no_streamlit_dependency():
     assert "Array.isArray(result.data?.rows)" in source
     for metric in ("Domains available", "Waiting to scrape", "Searchable pages"):
         assert metric in source
+    for zone_metric in ("Investable retained", "Discarded", "Fetch failures"):
+        assert zone_metric in source
+    assert "Retention mode: investable only" in source
+    assert "controlCrawler" in source
     assert "function GlobalWorkerControls" in source
     assert "<GlobalWorkerControls />" in source
     assert "Resume all" in source

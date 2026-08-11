@@ -2245,6 +2245,53 @@ def delete_bucket_classifications(
     return len(to_delete)
 
 
+def discard_uninvestable_classifications(
+    domains: Iterable[str],
+    *,
+    path: Path | str = CLASSIFICATION_DB,
+) -> int:
+    """Discard machine-rejected crawl results while preserving human truth.
+
+    Zone crawling can inspect millions of names. Only ``priority`` companies
+    belong in the durable company corpus; negative machine output is useful
+    for the current batch counters but should not grow the primary store.
+    Explicit human decisions are always protected.
+    """
+    values = list(dict.fromkeys(
+        stable_domain(domain) for domain in domains if stable_domain(domain)
+    ))
+    if not values or (
+        not using_classification_postgres() and not Path(path).exists()
+    ):
+        return 0
+    removed = 0
+    with connect_store(path) as conn:
+        begin_immediate(conn)
+        for start in range(0, len(values), 700):
+            batch = values[start : start + 700]
+            marks = ",".join("?" for _ in batch)
+            params = batch + batch + batch
+            cursor = conn.execute(
+                f"DELETE FROM classifications WHERE domain IN ({marks}) "
+                "AND routing_bucket<>'priority' "
+                f"AND domain NOT IN (SELECT domain FROM manual_decisions WHERE domain IN ({marks})) "
+                f"AND domain NOT IN (SELECT domain FROM training_labels WHERE domain IN ({marks}))",
+                params,
+            )
+            removed += max(0, int(cursor.rowcount or 0))
+            conn.execute(
+                f"DELETE FROM automated_exclusions WHERE domain IN ({marks})",
+                batch,
+            )
+            conn.execute(
+                f"DELETE FROM classification_run_membership WHERE domain IN ({marks}) "
+                "AND domain NOT IN (SELECT domain FROM classifications)",
+                batch,
+            )
+        conn.commit()
+    return removed
+
+
 _CRAWLED_CORPUS_CACHE_SECONDS = 10.0
 _crawled_corpus_cache: dict[str, tuple[float, list[str]]] = {}
 

@@ -61,16 +61,10 @@ def test_rejected_preflight_advances_checkpoint_without_storing_html(
         )
 
     monkeypatch.setattr(crawler, "preflight_domain", rejected)
-    recorded = []
     monkeypatch.setattr(
         classification_store,
         "excluded_domain_set",
         lambda _domains: set(),
-    )
-    monkeypatch.setattr(
-        classification_store,
-        "record_automated_exclusions",
-        lambda records: recorded.extend(records) or len(records),
     )
     counts = asyncio.run(crawler.crawl_once(conn, settings, tld="com"))
 
@@ -83,8 +77,6 @@ def test_rejected_preflight_advances_checkpoint_without_storing_html(
     assert shard["preflight_response_bytes"] == 4096
     assert shard["byte_offset"] == shard_path.stat().st_size
     assert diagnostics(conn)["preflight_rejected"] == 1
-    assert recorded[0]["domain"] == "candidateai.com"
-    assert recorded[0]["glasswing_rating"] < 25
     conn.close()
 
 
@@ -109,7 +101,7 @@ def test_tombstoned_domain_skips_even_the_homepage_preflight(
     conn.close()
 
 
-def test_promising_preflight_is_the_only_path_to_html_storage(
+def test_successful_fetch_without_investable_classification_is_discarded(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -158,10 +150,66 @@ def test_promising_preflight_is_the_only_path_to_html_storage(
 
     assert counts["preflight_promising"] == 1
     assert counts["success"] == 1
-    assert conn.execute("SELECT count(*) FROM pages").fetchone()[0] == 1
+    assert conn.execute("SELECT count(*) FROM pages").fetchone()[0] == 0
     shard = conn.execute("SELECT * FROM shards").fetchone()
     assert shard["preflight_promising"] == 1
     assert shard["success"] == 1
+    conn.close()
+
+
+def test_investable_classification_is_retained(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    conn, settings, _ = prepared_database(tmp_path)
+    html = """
+    <html><title>Candidate AI</title><body>
+    Enterprise artificial intelligence infrastructure software platform.
+    </body></html>
+    """
+
+    async def promising(session, domain, selected_settings):
+        return CrawlOutcome(
+            domain=domain,
+            tld="com",
+            status="preflight_promising",
+            final_url=f"https://{domain}",
+            preflight_score=80,
+        )
+
+    async def full_crawl(session, domain, selected_settings, **kwargs):
+        return CrawlOutcome(
+            domain=domain,
+            tld="com",
+            status="success",
+            final_url=f"https://{domain}",
+            http_status=200,
+            html=html,
+            page=extract_page(html, f"https://{domain}"),
+        )
+
+    async def classified(domains, selected_settings):
+        return {
+            "classified": 1,
+            "scores": {"candidateai.com": 91},
+            "buckets": {"candidateai.com": "priority"},
+        }
+
+    monkeypatch.setattr(crawler, "preflight_domain", promising)
+    monkeypatch.setattr(crawler, "crawl_domain", full_crawl)
+    monkeypatch.setattr(crawler, "classify_cached_successes", classified)
+    monkeypatch.setattr(
+        classification_store,
+        "excluded_domain_set",
+        lambda _domains: set(),
+    )
+
+    counts = asyncio.run(crawler.crawl_once(conn, settings, tld="com"))
+
+    assert counts["success"] == 1
+    assert conn.execute("SELECT domain FROM pages").fetchone()[0] == (
+        "candidateai.com"
+    )
     conn.close()
 
 

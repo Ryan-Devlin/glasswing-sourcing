@@ -1682,7 +1682,9 @@ function SearchCorpusPage({ kind }) {
   const [active, setActive] = useState("");
   const [page, setPage] = useState(1);
   const [metricsTick, setMetricsTick] = useState(0);
+  const [controlBusy, setControlBusy] = useState(false);
   const metrics = useApi(`/api/corpus/${kind}/stats`, [kind, metricsTick]);
+  const runtime = useApi("/api/runtime", [metricsTick]);
   const result = useApi(
     active
       ? `/api/${kind}/search?q=${encodeURIComponent(active)}&page=${page}&page_size=100`
@@ -1700,7 +1702,7 @@ function SearchCorpusPage({ kind }) {
     Date.now() - crawlerUpdatedAt > 120000,
   );
   useEffect(() => {
-    if (!isAi || !metrics.data?.pending) return;
+    if (!metrics.data?.pending) return;
     const timer = setInterval(
       () => {
         if (document.visibilityState === "visible") {
@@ -1710,7 +1712,23 @@ function SearchCorpusPage({ kind }) {
       15000,
     );
     return () => clearInterval(timer);
-  }, [isAi, metrics.data?.pending]);
+  }, [metrics.data?.pending]);
+  const serviceKey = isAi ? "ai_crawler" : "zone_crawler";
+  const service = runtime.data?.services?.[serviceKey] || {};
+  const desiredRunning = Boolean(service.desired);
+  const controlCrawler = async (desired) => {
+    if (!admin) return requestLogin();
+    setControlBusy(true);
+    try {
+      await api(`/api/runtime/${serviceKey}`, {
+        method: "POST",
+        body: JSON.stringify({ desired }),
+      });
+      setMetricsTick((value) => value + 1);
+    } finally {
+      setControlBusy(false);
+    }
+  };
   const cols = [
     {
       key: "domain",
@@ -1746,27 +1764,67 @@ function SearchCorpusPage({ kind }) {
             : "Search retained website content without loading the zone corpus into the browser."}
         </p>
       </header>
+      <section className="crawler-command-bar">
+        <div>
+          <span className={`dot ${desiredRunning ? "" : "paused"}`} />
+          <div>
+            <strong>{desiredRunning ? "Crawler enabled" : "Crawler paused"}</strong>
+            <span>
+              {String(metrics.data?.crawler_phase || metrics.data?.crawler_status || "waiting for status").replaceAll("_", " ")}
+            </span>
+          </div>
+        </div>
+        <div className="crawler-command-actions">
+          <button
+            className="primary"
+            disabled={controlBusy || desiredRunning || runtime.loading}
+            onClick={() => controlCrawler(true)}
+          >
+            <Play size={15} /> Start
+          </button>
+          <button
+            disabled={controlBusy || !desiredRunning || runtime.loading}
+            onClick={() => controlCrawler(false)}
+          >
+            <Pause size={15} /> Pause
+          </button>
+          <button className="icon" title="Refresh crawler state" onClick={() => setMetricsTick((value) => value + 1)}>
+            <RefreshCw size={15} />
+          </button>
+        </div>
+      </section>
       {metrics.loading ? (
         <Loading />
       ) : metrics.error ? (
         <ErrorBox>Metrics unavailable: {metrics.error}</ErrorBox>
       ) : (
-        <div className="metrics corpus-metrics">
-          <Metric
-            label="Domains available"
-            value={fmt(metrics.data.available)}
-          />
-          <Metric label="Waiting to scrape" value={fmt(metrics.data.pending)} />
-          <Metric
-            label={isAi ? "Successfully scraped" : "Crawled"}
-            value={fmt(metrics.data.crawled)}
-          />
-          <Metric
-            label="Searchable pages"
-            value={fmt(metrics.data.searchable)}
-          />
-          <Metric label="Failed" value={fmt(metrics.data.failed)} />
+        <div className={`metrics corpus-metrics ${isAi ? "" : "retention-metrics"}`}>
+          {isAi ? (
+            <>
+              <Metric label="Domains available" value={fmt(metrics.data.available)} />
+              <Metric label="Waiting to scrape" value={fmt(metrics.data.pending)} />
+              <Metric label="Successfully scraped" value={fmt(metrics.data.crawled)} />
+              <Metric label="Searchable pages" value={fmt(metrics.data.searchable)} />
+              <Metric label="Failed" value={fmt(metrics.data.failed)} />
+            </>
+          ) : (
+            <>
+              <Metric label="Zone candidates" value={fmt(metrics.data.available)} />
+              <Metric label="Waiting to screen" value={fmt(metrics.data.pending)} />
+              <Metric label="Processed" value={fmt(metrics.data.processed)} />
+              <Metric label="Investable retained" value={fmt(metrics.data.retained)} />
+              <Metric label="Discarded" value={fmt(metrics.data.discarded)} />
+              <Metric label="Fetch failures" value={fmt(metrics.data.failed)} />
+            </>
+          )}
         </div>
+      )}
+      {!isAi && metrics.data && (
+        <section className="notice corpus-status retention-status">
+          <strong>Retention mode: investable only</strong>
+          <span>Pages are held temporarily for scoring, then discarded unless they enter Investable.</span>
+          <span>{fmt(metrics.data.promising)} passed the cheap homepage gate · {fmt(metrics.data.preflight_rejected)} rejected before full crawl</span>
+        </section>
       )}
       {isAi && metrics.data && (
         <section className={`notice corpus-status ${crawlerStale ? "stale" : ""}`}>

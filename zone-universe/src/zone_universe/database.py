@@ -618,6 +618,16 @@ def diagnostics(conn: sqlite3.Connection) -> dict[str, int]:
             "JOIN zones z ON z.tld=s.tld "
             "AND z.active_queue_version=s.queue_version"
         ),
+        "network_success": (
+            "SELECT coalesce(sum(success),0) FROM shards s "
+            "JOIN zones z ON z.tld=s.tld "
+            "AND z.active_queue_version=s.queue_version"
+        ),
+        "network_failed": (
+            "SELECT coalesce(sum(dns_error+timeout+blocked+http_error+empty+other_error),0) "
+            "FROM shards s JOIN zones z ON z.tld=s.tld "
+            "AND z.active_queue_version=s.queue_version"
+        ),
         "low_priority_quarantined": (
             "SELECT coalesce(sum(skipped_low_priority),0) FROM shards s "
             "JOIN zones z ON z.tld=s.tld "

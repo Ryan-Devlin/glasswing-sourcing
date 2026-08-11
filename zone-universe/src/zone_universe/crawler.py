@@ -743,6 +743,45 @@ def save_success(
         )
 
 
+def discard_cached_pages(conn, domains: list[str]) -> int:
+    """Remove temporary crawl content for companies that failed the gate."""
+    values = list(dict.fromkeys(domain for domain in domains if domain))
+    if not values:
+        return 0
+    removed = 0
+    for start in range(0, len(values), 700):
+        batch = values[start : start + 700]
+        marks = ",".join("?" for _ in batch)
+        if not isinstance(conn, PostgresConnection):
+            page_ids = [
+                int(row["id"])
+                for row in conn.execute(
+                    f"SELECT id FROM pages WHERE domain IN ({marks})", batch
+                ).fetchall()
+            ]
+            if page_ids:
+                id_marks = ",".join("?" for _ in page_ids)
+                conn.execute(
+                    f"DELETE FROM page_search WHERE page_id IN ({id_marks})",
+                    page_ids,
+                )
+        cursor = conn.execute(
+            f"DELETE FROM pages WHERE domain IN ({marks})", batch
+        )
+        removed += max(0, int(cursor.rowcount or 0))
+        conn.execute(
+            f"DELETE FROM crawl_retries WHERE domain IN ({marks})", batch
+        )
+        conn.execute(
+            f"DELETE FROM registration_queue WHERE domain IN ({marks})", batch
+        )
+        conn.execute(
+            f"DELETE FROM domain_registration WHERE domain IN ({marks})", batch
+        )
+    conn.commit()
+    return removed
+
+
 def append_failures(outcomes: list[CrawlOutcome]) -> None:
     failures = [
         outcome
@@ -962,6 +1001,7 @@ async def classify_cached_successes(
         "classified": len(classifications),
         "registration_queued": registration_queued,
         "scores": scores,
+        "buckets": classifications,
         **result,
     }
 
@@ -1131,36 +1171,9 @@ async def crawl_once(
             for outcome in preflight_outcomes
             if outcome.status != "preflight_promising"
         ]
-        if stopped_at_gate:
-            from classification_store import record_automated_exclusions
-
-            try:
-                await asyncio.to_thread(
-                    record_automated_exclusions,
-                    [
-                        {
-                            "domain": outcome.domain,
-                            "routing_bucket": "screened_out",
-                            "routing_reason": (
-                                outcome.preflight_reason
-                                or "homepage_preflight_rejected"
-                            ),
-                            "glasswing_rating": min(
-                                int(outcome.preflight_score or 0), 24
-                            ),
-                            "content_source": "zone_universe_preflight",
-                        }
-                        for outcome in stopped_at_gate
-                    ],
-                )
-            except Exception as exc:
-                # The crawl gate already prevented expensive storage. A
-                # tombstone write outage must not crash the whole shard.
-                set_state(
-                    conn,
-                    "last_storage_gate_error",
-                    f"{type(exc).__name__}: {exc}"[:500],
-                )
+        # Preflight rejects are intentionally counter-only. At zone scale,
+        # persisting one tombstone per bad domain simply rebuilds the zone
+        # file inside Postgres and defeats the entire cheap rejection gate.
         set_state(conn, "crawler_phase", "full_crawl_promising_sites")
 
         async def guarded_crawl(preflight: CrawlOutcome) -> CrawlOutcome:
@@ -1313,12 +1326,14 @@ async def crawl_once(
             ),
         )
     conn.commit()
-    append_failures(outcomes)
+    # Per-status shard counters are durable. Do not append millions of bad
+    # names to an unbounded TSV file merely to repeat those counters.
     successful_domains = [
         outcome.domain
         for outcome in outcomes
         if outcome.status == "success"
     ]
+    retention_decided = False
     try:
         handoff = await asyncio.to_thread(
             handoff_to_screening,
@@ -1330,12 +1345,36 @@ async def crawl_once(
             successful_domains,
             settings,
         )
+        buckets = classification.get("buckets", {})
+        retained_domains = [
+            domain
+            for domain in successful_domains
+            if buckets.get(domain) == "priority"
+        ]
+        discarded_domains = [
+            domain
+            for domain in successful_domains
+            if domain not in set(retained_domains)
+        ]
+        discarded_pages = discard_cached_pages(conn, discarded_domains)
+        from classification_store import discard_uninvestable_classifications
+
+        discarded_classifications = await asyncio.to_thread(
+            discard_uninvestable_classifications,
+            discarded_domains,
+        )
+        retention_decided = True
+        classification["retained_investable"] = len(retained_domains)
+        classification["discarded_pages"] = discarded_pages
+        classification["discarded_classifications"] = discarded_classifications
         set_state(conn, "last_python_classification", classification)
         if settings.retain_raw_html:
             scores = classification.get("scores", {})
             archived = 0
             for outcome in outcomes:
                 if outcome.status != "success":
+                    continue
+                if outcome.domain not in retained_domains:
                     continue
                 if scores.get(outcome.domain, 0) < settings.html_archive_minimum_score:
                     continue
@@ -1355,6 +1394,19 @@ async def crawl_once(
                 conn.commit()
             set_state(conn, "last_batch_html_archived", archived)
     except Exception as exc:
+        # A classification outage must not turn temporary crawl content into
+        # permanent storage. The shard/retry machinery can revisit it later.
+        if not retention_decided:
+            discard_cached_pages(conn, successful_domains)
+            try:
+                from classification_store import discard_uninvestable_classifications
+
+                await asyncio.to_thread(
+                    discard_uninvestable_classifications,
+                    successful_domains,
+                )
+            except Exception:
+                pass
         set_state(
             conn,
             "last_screening_error",

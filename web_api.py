@@ -1116,12 +1116,35 @@ def corpus_stats(kind: Literal["ai", "zone"]):
         }
     with zone_connect(ZONE_UNIVERSE_DB, read_only=True) as conn:
         details = zone_diagnostics(conn)
+        worker = zone_worker_state(conn)
+    retained = int(details.get("success", 0) or 0)
+    discarded = max(
+        0,
+        int(details.get("low_priority_quarantined", 0) or 0)
+        + int(details.get("preflight_rejected", 0) or 0)
+        + int(details.get("network_failed", 0) or 0)
+        + int(details.get("network_success", 0) or 0)
+        - retained,
+    )
     return {
         "available": details.get("queued_domains", 0),
-        "pending": max(0, details.get("queued_domains", 0) - details.get("attempted", 0)),
-        "crawled": details.get("success", 0),
-        "failed": max(0, details.get("attempted", 0) - details.get("success", 0)),
+        "pending": max(
+            0,
+            int(details.get("queued_domains", 0) or 0)
+            - int(details.get("attempted", 0) or 0)
+            - int(details.get("low_priority_quarantined", 0) or 0),
+        ),
+        "processed": int(details.get("attempted", 0) or 0)
+        + int(details.get("low_priority_quarantined", 0) or 0),
+        "crawled": retained,
+        "retained": retained,
+        "discarded": discarded,
+        "failed": details.get("network_failed", 0),
+        "preflight_rejected": details.get("preflight_rejected", 0),
+        "promising": details.get("preflight_promising", 0),
         "searchable": details.get("searchable_pages", 0),
+        "crawler_status": worker.get("crawler_status", "unknown"),
+        "crawler_phase": worker.get("crawler_phase", "unknown"),
     }
 
 
