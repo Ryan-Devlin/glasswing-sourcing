@@ -365,6 +365,20 @@ async def preflight_domain(
             )
             final_http = response.status
             bytes_read += response_bytes
+            if not same_site_url(str(response.url), f"https://{domain}"):
+                return CrawlOutcome(
+                    domain=domain,
+                    tld=tld,
+                    status="preflight_rejected",
+                    requested_url=requested,
+                    final_url=str(response.url),
+                    http_status=response.status,
+                    page=page,
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                    preflight_reason="redirected_to_unrelated_domain",
+                    preflight_score=0,
+                    response_bytes=bytes_read,
+                )
             decision = assess_homepage(domain, page)
             return CrawlOutcome(
                 domain=domain,

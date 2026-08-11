@@ -211,6 +211,7 @@ async def run() -> None:
         for row in conn.execute("SELECT domain FROM pages").fetchall()
     ]
     if existing_pages:
+        from ai_search.extract import same_site_url
         from classification_store import (
             discard_uninvestable_classifications,
             query_classifications_by_domains,
@@ -224,13 +225,19 @@ async def run() -> None:
             domain
             for domain in existing_pages
             if not (
-                str(classifications.get(domain, {}).get("routing_bucket", ""))
-                == "priority"
-                or (
+                same_site_url(
+                    str(classifications.get(domain, {}).get("final_url", "")),
+                    f"https://{domain}",
+                )
+                and (
                     str(classifications.get(domain, {}).get("routing_bucket", ""))
-                    == "review"
-                    and int(classifications.get(domain, {}).get("fit_score", 0) or 0)
-                    >= settings.html_archive_minimum_score
+                    == "priority"
+                    or (
+                        str(classifications.get(domain, {}).get("routing_bucket", ""))
+                        == "review"
+                        and int(classifications.get(domain, {}).get("fit_score", 0) or 0)
+                        >= settings.html_archive_minimum_score
+                    )
                 )
             )
         ]

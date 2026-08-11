@@ -133,6 +133,40 @@ def test_new_domain_must_clear_quality_gate_before_network(
     conn.close()
 
 
+def test_external_redirect_alias_is_rejected_before_classification(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _, settings, _ = prepared_database(tmp_path)
+    page = extract_page(
+        "<html><title>Strong AI</title><body>Enterprise artificial intelligence platform</body></html>",
+        "https://established.ai/",
+    )
+
+    class Response:
+        status = 200
+        url = "https://established.ai/"
+
+        def release(self):
+            return None
+
+    async def resolves(*_args, **_kwargs):
+        return True
+
+    async def redirected(*_args, **_kwargs):
+        return Response(), "", page, 2048
+
+    monkeypatch.setattr(crawler, "domain_resolves", resolves)
+    monkeypatch.setattr(crawler, "_fetch_homepage_preflight", redirected)
+
+    outcome = asyncio.run(
+        crawler.preflight_domain(None, "alias.app", settings)
+    )
+
+    assert outcome.status == "preflight_rejected"
+    assert outcome.preflight_reason == "redirected_to_unrelated_domain"
+
+
 def test_successful_fetch_without_investable_classification_is_discarded(
     tmp_path: Path,
     monkeypatch,
