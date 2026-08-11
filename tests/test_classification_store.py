@@ -957,6 +957,19 @@ def test_claude_queue_recovers_and_audit_is_append_only(tmp_path):
     assert rows[0]["target"] == "example.ai"
 
 
+def test_automatic_claude_enqueue_is_deduplicated(tmp_path):
+    database = tmp_path / "classifications.sqlite3"
+    assert classification_store.enqueue_new_claude_reviews(
+        ["high-score.app", "high-score.app"], path=database
+    ) == 1
+    assert classification_store.enqueue_new_claude_reviews(
+        ["high-score.app"], path=database
+    ) == 0
+    assert classification_store.claude_review_status(
+        "high-score.app", path=database
+    )["status"] == "queued"
+
+
 def test_claude_queue_recovers_false_selection_failure(tmp_path):
     database = tmp_path / "classifications.sqlite3"
     classification_store.enqueue_claude_review("praxl.app", path=database)

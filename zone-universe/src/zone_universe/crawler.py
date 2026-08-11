@@ -1008,10 +1008,19 @@ async def classify_cached_successes(
             errors="coerce",
         ).fillna(0).astype(int),
     ))
+    from classification_store import enqueue_new_claude_reviews
+    claude_queued = await asyncio.to_thread(
+        enqueue_new_claude_reviews,
+        [
+            domain for domain, score in scores.items()
+            if score > 75 and classifications.get(domain) in {"priority", "review"}
+        ],
+    )
     return {
         "classified": len(classifications),
         "registration_queued": registration_queued,
         "scores": scores,
+        "claude_queued": claude_queued,
         "buckets": classifications,
         **result,
     }

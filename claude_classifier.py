@@ -441,8 +441,9 @@ def prepare_input(
     if "content_source" in frame.columns:
         # Zone Universe's .com/.app zone crawl is orders of magnitude
         # larger than every other source combined (~170M candidate
-        # domains) -- explicit user direction: that dataset never goes to
-        # Claude, Python rule-based scoring is enough given the volume.
+        # domains), so it is excluded from generic bulk selection. The zone
+        # worker separately and explicitly queues only retained score >75
+        # candidates; those durable queue jobs carry qualified_for_llm=true.
         # content_source reflects where the page content was actually
         # fetched from (zone_universe's own cache), which only ever
         # matches for .com/.app domains zone_universe has crawled -- a

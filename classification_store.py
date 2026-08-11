@@ -1202,6 +1202,43 @@ def enqueue_claude_review(
     }
 
 
+def enqueue_new_claude_reviews(
+    domains: Iterable[str], *, path: Path | str = CLASSIFICATION_DB
+) -> int:
+    """Queue previously unseen automatic reviews without resetting any job."""
+    values = list(dict.fromkeys(
+        stable_domain(domain) for domain in domains if stable_domain(domain)
+    ))
+    if not values:
+        return 0
+    queued = 0
+    now = utc_now()
+    with connect_store(path) as conn:
+        for domain in values:
+            if conn.execute("SELECT 1 FROM claude_diligence WHERE domain=?", (domain,)).fetchone():
+                continue
+            cursor = conn.execute(
+                "INSERT INTO claude_review_queue(domain,status,requested_at,started_at,completed_at,error,override_budget) "
+                "VALUES (?, 'queued', ?, '', '', '', ?) ON CONFLICT(domain) DO NOTHING",
+                (domain, now, False),
+            )
+            queued += max(0, int(cursor.rowcount or 0))
+        conn.commit()
+    return queued
+
+
+def defer_claude_review(
+    domain: str, reason: str, *, path: Path | str = CLASSIFICATION_DB
+) -> None:
+    """Keep a paid review queued until a temporary budget gate clears."""
+    with connect_store(path) as conn:
+        conn.execute(
+            "UPDATE claude_review_queue SET status='queued',started_at='',completed_at='',error=? WHERE domain=?",
+            (clean(reason)[:1000], stable_domain(domain)),
+        )
+        conn.commit()
+
+
 def recover_claude_review_queue(*, path: Path | str = CLASSIFICATION_DB) -> int:
     with connect_store(path) as conn:
         cursor = conn.execute(

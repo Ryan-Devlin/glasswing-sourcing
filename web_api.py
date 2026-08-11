@@ -50,6 +50,7 @@ from classification_store import (
     claude_review_queue_rows,
     connect_store,
     enqueue_claude_review,
+    defer_claude_review,
     finish_claude_review,
     classification_bucket_counts,
     classification_record_for_domain,
@@ -838,21 +839,21 @@ def export_labels(
     return _csv_response(rows, f"glasswing-{label}-basket.csv")
 
 
-def _execute_queued_claude(target: str, *, override_budget: bool = False) -> None:
+def _execute_queued_claude(target: str, *, override_budget: bool = False) -> bool:
     if not os.getenv("ANTHROPIC_API_KEY", "").strip():
         finish_claude_review(target, error="Anthropic API key is not configured")
-        return
+        return True
     pipeline = connect_pipeline_db()
     try:
         if not override_budget and claude_allowance(pipeline) <= 0:
-            finish_claude_review(target, error="Claude daily/hourly budget is currently exhausted")
-            return
+            defer_claude_review(target, "Waiting for Claude daily/hourly budget")
+            return False
     finally:
         pipeline.close()
     record = classification_record_for_domain(target)
     if not record:
         finish_claude_review(target, error="Company not found")
-        return
+        return True
     import pandas as pd
 
     with tempfile.TemporaryDirectory(prefix="glasswing-claude-") as folder:
@@ -877,7 +878,7 @@ def _execute_queued_claude(target: str, *, override_budget: bool = False) -> Non
             )
         except subprocess.TimeoutExpired as exc:
             finish_claude_review(target, error="Claude review timed out")
-            return
+            return True
         attempted = report_path.exists()
         attempt_data = {}
         if attempted:
@@ -898,7 +899,7 @@ def _execute_queued_claude(target: str, *, override_budget: bool = False) -> Non
     if completed.returncode != 0:
         detail = (completed.stderr or completed.stdout or "Claude review failed")[-600:]
         finish_claude_review(target, error=detail)
-        return
+        return True
     result = claude_decisions_for_domains([target]).get(target)
     if not result:
         failure = str(
@@ -909,9 +910,10 @@ def _execute_queued_claude(target: str, *, override_budget: bool = False) -> Non
             target,
             error=detail or "Claude returned no valid diligence decision",
         )
-        return
+        return True
     finish_claude_review(target)
     record_admin_audit("claude_completed", target, f"{result.get('decision')} score {result.get('fit_score')}")
+    return True
 
 
 async def _claude_queue_worker() -> None:
@@ -919,11 +921,13 @@ async def _claude_queue_worker() -> None:
     while True:
         queued = await asyncio.to_thread(claim_claude_review)
         if queued:
-            await asyncio.to_thread(
+            completed = await asyncio.to_thread(
                 _execute_queued_claude,
                 str(queued["domain"]),
                 override_budget=bool(queued.get("override_budget")),
             )
+            if not completed:
+                await asyncio.sleep(60)
         else:
             await asyncio.sleep(3)
 
