@@ -894,7 +894,7 @@ function ClaudeTopPicks() {
   if (picks.error || !picks.data?.rows?.length) return null;
   const visiblePicks = picks.data.rows
     .filter((row) => !row.tracked)
-    .slice(0, 6);
+    .slice(0, 8);
   if (!visiblePicks.length) return null;
   return (
     <section className="top-picks">
