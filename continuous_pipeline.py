@@ -1441,12 +1441,27 @@ async def listener(
 
                     for domain in sorted(message_domains):
                         _register_started = time.monotonic()
-                        event = register_domain_event(
-                            conn,
-                            domain,
-                            allowed_extensions,
-                            run_id=active_run_id,
-                        )
+                        if using_postgres(PIPELINE_DATABASE_ENV_VAR):
+                            # CertStream registration is synchronous SQL.
+                            # Running it on the same asyncio loop as website
+                            # fetches starved every HTTP timeout/callback when
+                            # repeat certificates surged. The listener owns a
+                            # separate connection, so this blocking round trip
+                            # is safe to move off-loop.
+                            event = await asyncio.to_thread(
+                                register_domain_event,
+                                conn,
+                                domain,
+                                allowed_extensions,
+                                run_id=active_run_id,
+                            )
+                        else:
+                            event = register_domain_event(
+                                conn,
+                                domain,
+                                allowed_extensions,
+                                run_id=active_run_id,
+                            )
                         _register_elapsed = (
                             time.monotonic() - _register_started
                         )
@@ -1494,9 +1509,6 @@ async def listener(
                                 ),
                                 last_domain_received=domain,
                                 last_domain_extension=extension,
-                                queue_by_extension=(
-                                    extension_counts(conn)
-                                ),
                                 updated_at=utc_now(),
                             )
                         else:
@@ -2195,7 +2207,11 @@ async def async_main() -> None:
                 break
             await asyncio.sleep(0.5)
 
-    listener_task = asyncio.create_task(listener(conn, stop))
+    # Listener and screener must never share a Postgres connection: event
+    # registration runs in a background thread while the worker claims and
+    # updates batches concurrently.
+    listener_conn = connect_db()
+    listener_task = asyncio.create_task(listener(listener_conn, stop))
     worker_task = asyncio.create_task(worker_loop(conn, stop))
     watcher_task = asyncio.create_task(stop_file_watch())
 
@@ -2254,6 +2270,7 @@ async def async_main() -> None:
         updated_at=utc_now(),
         queue=queue_counts(conn),
     )
+    listener_conn.close()
     conn.close()
     STREAM_PID.unlink(missing_ok=True)
     STREAM_STOP.unlink(missing_ok=True)
