@@ -627,7 +627,9 @@ def claim_batch(
             SELECT domain, first_seen, last_seen_run_id FROM domains
             WHERE status='pending'
               AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
-            ORDER BY first_seen DESC
+            ORDER BY
+              CASE WHEN last_seen_run_id='ai_search_cache_reuse_v1' THEN 0 ELSE 1 END,
+              first_seen DESC
             LIMIT ?
             """,
             (now, candidate_limit),
