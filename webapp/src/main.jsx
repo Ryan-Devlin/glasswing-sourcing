@@ -1648,17 +1648,35 @@ function CertStreamPage() {
       {controlMessage && <p className="notice">{controlMessage}</p>}
       <div className="metrics">
         <Metric
-          label="New domains"
+          label="Domains discovered"
           value={fmt(s.new_domains_received || s.domains_received)}
         />
         <Metric label="Ignored repeats" value={fmt(s.repeat_events_ignored)} />
+        <Metric label="Screening attempts" value={fmt(s.processed)} />
+        <Metric label="Successfully scored" value={fmt(s.screened)} />
+        <Metric
+          label="Awaiting first attempt"
+          value={fmt(Math.max(
+            0,
+            Number(s.new_domains_received || s.domains_received || 0) -
+              Number(s.processed || 0),
+          ))}
+        />
+        <Metric
+          label="Queued for retry"
+          value={fmt(Math.max(0, Number(s.processed || 0) - Number(s.screened || 0)))}
+        />
         <Metric label="Claude calls" value={fmt(s.claude_calls)} />
-        <Metric label="Failed" value={fmt(s.failed_this_run)} />
         <Metric label="Reviewed by Claude" value={fmt(claude.data?.reviewed)} />
         <Metric label="Claude KEEP" value={fmt(claude.data?.kept)} />
         <Metric label="Claude REJECT" value={fmt(claude.data?.rejected)} />
         <Metric label="Awaiting new rubric" value={fmt(claude.data?.awaiting_rescore)} />
       </div>
+      <p className="notice">
+        Certificate discoveries are raw domains, not completed companies. Only successfully
+        scored websites enter Investable, Needs Review, or Hard Denied; unavailable sites stay
+        in the retry queue until they succeed or exhaust retries.
+      </p>
       {claude.data?.warning && (
         <p className="notice">Claude: {claude.data.warning}</p>
       )}
