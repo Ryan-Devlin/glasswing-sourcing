@@ -144,11 +144,30 @@ def _connection_pool(env_var: str, read_only: bool):
     with _POOLS_LOCK:
         pool = _POOLS.get(key)
         if pool is None:
+            # TCP keepalives below only detect a *dead* peer. Confirmed live:
+            # an ai-worker transaction sat `idle in transaction` for 46
+            # minutes holding RowExclusiveLock on ai_search.pages after an
+            # UPDATE ... search_vector, with the process still alive and
+            # answering keepalives but never sending another command. Every
+            # other writer queued behind it and screening stopped entirely.
+            # Only the server can break that, so give it permission to.
+            idle_timeout_ms = max(
+                0,
+                int(float(os.getenv(
+                    "GLASSWING_DB_IDLE_TX_TIMEOUT_SECONDS", "120"
+                )) * 1000),
+            )
+
             def configure(raw) -> None:
-                if read_only:
-                    with raw.cursor() as cursor:
+                with raw.cursor() as cursor:
+                    if idle_timeout_ms:
+                        cursor.execute(
+                            "SET idle_in_transaction_session_timeout = "
+                            f"{idle_timeout_ms}"
+                        )
+                    if read_only:
                         cursor.execute("SET default_transaction_read_only = on")
-                    raw.commit()
+                raw.commit()
 
             pool = ConnectionPool(
                 conninfo=url,

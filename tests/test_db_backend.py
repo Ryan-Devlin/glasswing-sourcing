@@ -218,3 +218,95 @@ def test_real_subsystem_schemas_are_fully_parseable():
             f"{module_name}: parsed {len(parsed)} names from "
             f"{len(creates)} CREATE statements"
         )
+
+
+class _RecordingRaw:
+    def __init__(self):
+        self.statements = []
+        self.commits = 0
+
+    class _Cur:
+        def __init__(self, outer):
+            self.outer = outer
+
+        def execute(self, sql, params=()):
+            self.outer.statements.append(sql)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def cursor(self):
+        return self._Cur(self)
+
+    def commit(self):
+        self.commits += 1
+
+
+def _build_pool_configure(monkeypatch, read_only, env=None):
+    """Capture the pool's `configure` callback without a real database."""
+    captured = {}
+
+    class FakePool:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    import sys
+    import types
+
+    fake_module = types.ModuleType("psycopg_pool")
+    fake_module.ConnectionPool = FakePool
+    monkeypatch.setitem(sys.modules, "psycopg_pool", fake_module)
+    monkeypatch.setenv("FAKE_DB_URL", "postgresql://u:p@h/d")
+    for key, value in (env or {}).items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(db_backend, "_POOLS", {})
+    db_backend._connection_pool("FAKE_DB_URL", read_only)
+    return captured
+
+
+def test_every_connection_bounds_idle_in_transaction_time(monkeypatch):
+    # A transaction abandoned mid-flight used to hold its locks forever and
+    # wedge every other writer; the server must be able to reclaim it.
+    captured = _build_pool_configure(monkeypatch, read_only=False)
+    raw = _RecordingRaw()
+    captured["configure"](raw)
+    assert any(
+        "idle_in_transaction_session_timeout = 120000" in s
+        for s in raw.statements
+    ), raw.statements
+    assert raw.commits == 1
+
+
+def test_idle_transaction_timeout_is_configurable_and_disablable(monkeypatch):
+    captured = _build_pool_configure(
+        monkeypatch, read_only=False,
+        env={"GLASSWING_DB_IDLE_TX_TIMEOUT_SECONDS": "45"},
+    )
+    raw = _RecordingRaw()
+    captured["configure"](raw)
+    assert any(
+        "idle_in_transaction_session_timeout = 45000" in s
+        for s in raw.statements
+    ), raw.statements
+
+    captured = _build_pool_configure(
+        monkeypatch, read_only=False,
+        env={"GLASSWING_DB_IDLE_TX_TIMEOUT_SECONDS": "0"},
+    )
+    raw = _RecordingRaw()
+    captured["configure"](raw)
+    assert not any(
+        "idle_in_transaction_session_timeout" in s for s in raw.statements
+    ), raw.statements
+
+
+def test_read_only_pool_still_sets_both_session_options(monkeypatch):
+    captured = _build_pool_configure(monkeypatch, read_only=True)
+    raw = _RecordingRaw()
+    captured["configure"](raw)
+    joined = " | ".join(raw.statements)
+    assert "idle_in_transaction_session_timeout" in joined
+    assert "default_transaction_read_only = on" in joined
