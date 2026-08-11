@@ -361,7 +361,7 @@ class RuleCalibrationTests(unittest.TestCase):
         self.assertTrue(detected)
         self.assertTrue(evidence)
 
-    def test_no_fit_without_disqualifier_is_review_not_denied(self):
+    def test_no_fit_without_disqualifier_is_discarded_not_denied(self):
         bucket, reason = route_company(
             is_parked=False,
             is_coming=False,
@@ -377,7 +377,7 @@ class RuleCalibrationTests(unittest.TestCase):
             potential_glasswing_fit=False,
             substantive_no_fit_evidence=True,
         )
-        self.assertEqual(bucket, "review")
+        self.assertEqual(bucket, "screened_out")
         self.assertEqual(reason, "substantive_site_no_glasswing_fit_signals")
 
     def test_strong_multidimensional_candidate_reaches_review(self):

@@ -613,7 +613,11 @@ def normalized_record(record: dict[str, object]) -> dict[str, object]:
         "final_url": clean(
             plain.get("final_url", "") or f"https://{domain}"
         ),
-        "description": clean(plain.get("meta_description", "")),
+        "description": clean(
+            plain.get("meta_description", "")
+            or plain.get("homepage_excerpt", "")
+            or plain.get("excerpt", "")
+        )[:1000],
         "excerpt": clean(plain.get("homepage_excerpt", ""))[:12000],
         "availability_status": availability,
         "crawl_status": clean(plain.get("crawl_status", "")),

@@ -2435,12 +2435,13 @@ def placeholder_assessment(
         )
 
     if (
-        "page not found" in lower
+        ("page not found" in lower or "site not found" in lower)
         and any(term in lower for term in (
             "doesn't exist",
             "does not exist",
             "has been moved",
             "404",
+            "site not found",
         ))
     ):
         return (
@@ -3323,7 +3324,7 @@ def route_company(
         return "review", "trusted_high_conviction_product_fit"
 
     if substantive_no_fit_evidence:
-        return "review", "substantive_site_no_glasswing_fit_signals"
+        return "screened_out", "substantive_site_no_glasswing_fit_signals"
 
     # A credible product, wedge, and moat/technical edge -- still routed to
     # human/Claude review rather than auto-declared Investable.
@@ -3339,9 +3340,10 @@ def route_company(
     if potential_glasswing_fit:
         return "review", "thesis_fit_missing_wedge_or_moat"
 
-    # A readable company without venture evidence is not a Hard Denial, but it
-    # still goes to Needs Review rather than a bucket no one looks at.
-    return "review", "insufficient_venture_quality_evidence"
+    # No factual disqualifier means this is not Hard Denied. But a page with
+    # no venture/product evidence is not a review candidate either; discard
+    # its content so the retained tables stay useful.
+    return "screened_out", "insufficient_venture_quality_evidence"
 
 
 def diligence_rank_score(
