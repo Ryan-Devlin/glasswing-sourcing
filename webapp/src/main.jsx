@@ -147,11 +147,20 @@ function useApi(path, deps = []) {
   const [state, set] = useState({ data: null, error: "", loading: true });
   useEffect(() => {
     let live = true;
+    // Refresh in place. Clearing or hiding previously rendered data here makes
+    // tall cards/tables collapse to a one-line loader, which changes the page
+    // height and forces the browser to move the user's scroll position.
     set((s) => ({ ...s, loading: true, error: "" }));
     api(path)
       .then((data) => live && set({ data, error: "", loading: false }))
       .catch(
-        (e) => live && set({ data: null, error: e.message, loading: false }),
+        (e) =>
+          live &&
+          set((current) => ({
+            ...current,
+            error: e.message,
+            loading: false,
+          })),
       );
     return () => {
       live = false;
@@ -647,7 +656,7 @@ function HomePage() {
             </span>
           )}
         </div>
-        {overview.error ? (
+        {overview.error && !overview.data ? (
           <ErrorBox>{overview.error}</ErrorBox>
         ) : !d ? (
           <Loading />
@@ -683,8 +692,8 @@ function GoodDeals() {
     "/api/classifications?bucket=investable&page=1&page_size=25&sort=Highest%20score",
     [refresh],
   );
-  if (deals.loading) return <Loading />;
-  if (deals.error) return <ErrorBox>{deals.error}</ErrorBox>;
+  if (deals.loading && !deals.data) return <Loading />;
+  if (deals.error && !deals.data) return <ErrorBox>{deals.error}</ErrorBox>;
   const rows = (deals.data?.rows || [])
     .filter((row) => !row.hidden && !row.tracked)
     .slice(0, 8);
@@ -779,8 +788,8 @@ function TrackingDeals() {
     return () => window.removeEventListener("tracking-changed", refreshTracking);
   }, []);
   const result = useApi("/api/tracking?limit=100", [refresh]);
-  if (result.loading) return <Loading />;
-  if (result.error) return <ErrorBox>{result.error}</ErrorBox>;
+  if (result.loading && !result.data) return <Loading />;
+  if (result.error && !result.data) return <ErrorBox>{result.error}</ErrorBox>;
   const allRows = result.data?.rows || [];
   const activeCount = allRows.filter((row) => (row.tracking_status || "tracking") === "tracking").length;
   const reachedOutCount = allRows.filter((row) => row.tracking_status === "reached_out").length;
@@ -890,8 +899,8 @@ function ClaudeTopPicks() {
     return () => window.removeEventListener("tracking-changed", refreshPicks);
   }, []);
   const picks = useApi("/api/claude/top?limit=20", [refresh]);
-  if (picks.loading) return <Loading />;
-  if (picks.error || !picks.data?.rows?.length) return null;
+  if (picks.loading && !picks.data) return <Loading />;
+  if ((picks.error && !picks.data) || !picks.data?.rows?.length) return null;
   const visiblePicks = picks.data.rows
     .filter((row) => !row.tracked)
     .slice(0, 8);
@@ -1022,9 +1031,9 @@ function LabelsPanel() {
           Export CSV
         </a>
       </div>
-      {result.loading ? (
+      {result.loading && !result.data ? (
         <Loading />
-      ) : result.error ? (
+      ) : result.error && !result.data ? (
         <ErrorBox>{result.error}</ErrorBox>
       ) : (
         <div className="table-wrap">
@@ -1181,9 +1190,9 @@ function CompaniesTable() {
           Export current bucket CSV
         </a>
       </div>
-      {result.loading ? (
+      {result.loading && !result.data ? (
         <Loading />
-      ) : result.error ? (
+      ) : result.error && !result.data ? (
         <ErrorBox>{result.error}</ErrorBox>
       ) : basket ? (
         <>
@@ -1259,8 +1268,9 @@ function RunFilters({ running }) {
   useEffect(() => {
     if (result.data) setForm(result.data);
   }, [result.data]);
-  if (result.loading || !form) return <Loading />;
-  if (result.error) return <ErrorBox>{result.error}</ErrorBox>;
+  if (!form) {
+    return result.error ? <ErrorBox>{result.error}</ErrorBox> : <Loading />;
+  }
   const extensions = [
     ".ai",
     ".app",
@@ -1566,9 +1576,9 @@ function CorpusCompanies({ kind }) {
           setPage(1);
         }}
       />
-      {result.loading ? (
+      {result.loading && !result.data ? (
         <Loading />
-      ) : result.error ? (
+      ) : result.error && !result.data ? (
         <ErrorBox>{result.error}</ErrorBox>
       ) : basket ? (
         <Table
@@ -1793,9 +1803,9 @@ function SearchCorpusPage({ kind }) {
           </button>
         </div>
       </section>
-      {metrics.loading ? (
+      {metrics.loading && !metrics.data ? (
         <Loading />
-      ) : metrics.error ? (
+      ) : metrics.error && !metrics.data ? (
         <ErrorBox>Metrics unavailable: {metrics.error}</ErrorBox>
       ) : (
         <div className={`metrics corpus-metrics ${isAi ? "" : "retention-metrics"}`}>
@@ -1937,9 +1947,9 @@ function SearchCorpusPage({ kind }) {
             <div className="empty">
               Enter a technology, market, product, or customer phrase.
             </div>
-          ) : result.loading ? (
+          ) : result.loading && !result.data ? (
             <Loading />
-          ) : result.error ? (
+          ) : result.error && !result.data ? (
             <ErrorBox>{result.error}</ErrorBox>
           ) : (
             <>
@@ -1963,7 +1973,7 @@ function HealthPage() {
   const [tick, setTick] = useState(0);
   const health = useApi(`/api/health?full=${full}&refresh=${tick}`, [full, tick]);
   if (health.loading && !health.data) return <Loading />;
-  if (health.error) return <ErrorBox>{health.error}</ErrorBox>;
+  if (health.error && !health.data) return <ErrorBox>{health.error}</ErrorBox>;
   const d = health.data;
   const services = d.runtime?.services || {};
   const control = async (service, desired) => {
@@ -2093,9 +2103,9 @@ function AdminActivity() {
           <p>Append-only history of operational and review actions.</p>
         </div>
       </div>
-      {activity.loading ? (
+      {activity.loading && !activity.data ? (
         <Loading />
-      ) : activity.error ? (
+      ) : activity.error && !activity.data ? (
         <ErrorBox>{activity.error}</ErrorBox>
       ) : (
         <Table
@@ -2166,9 +2176,9 @@ function ClaudeQueuePage() {
           Refresh
         </button>
       </div>
-      {queue.loading ? (
+      {queue.loading && !queue.data ? (
         <Loading />
-      ) : queue.error ? (
+      ) : queue.error && !queue.data ? (
         <ErrorBox>{queue.error}</ErrorBox>
       ) : (
         <Table

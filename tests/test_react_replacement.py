@@ -40,6 +40,11 @@ def test_react_app_has_every_primary_page_and_no_streamlit_dependency():
     # Fetch enough candidates to backfill the eight-card view after tracked
     # companies are moved out of the recommendation grid.
     assert "/api/claude/top?limit=20" in source
+    # Background action refreshes must retain mounted content so the document
+    # does not collapse and force the user's scroll position toward the top.
+    assert "deals.loading && !deals.data" in source
+    assert "result.loading && !result.data" in source
+    assert "set((current) => ({" in source
 
 
 def test_production_entrypoint_is_fastapi():
