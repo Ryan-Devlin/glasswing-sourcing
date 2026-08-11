@@ -66,7 +66,7 @@ _SCORING_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     # context switching. Keep this bounded and independently configurable.
     max_workers=max(
         4,
-        min(32, int(os.getenv("GLASSWING_SCORING_THREADS", "24"))),
+        min(16, int(os.getenv("GLASSWING_SCORING_THREADS", "8"))),
     ),
     thread_name_prefix="glasswing-scoring",
 )
@@ -3504,7 +3504,11 @@ async def process(
             )
 
     def _score_and_bucket_domain():
-        combined = clean(f"{page.title} {page.description} {page.text}")
+        # The live CertStream pass only needs enough homepage evidence to
+        # route a company. Scoring 40 x 45k-character pages concurrently is
+        # pure GIL contention and previously stopped the event loop itself.
+        scoring_text = page.text[:15000] if homepage_only else page.text
+        combined = clean(f"{page.title} {page.description} {scoring_text}")
         lower = combined.lower()
         _scoring_started = time.monotonic()
         scoring_copy = combined

@@ -109,6 +109,7 @@ CLAUDE_DAILY_LIMIT = 400
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
+
 def parse_bool(value: str, default: bool = False) -> bool:
     if value is None:
         return default
@@ -2024,8 +2025,13 @@ async def worker_loop(
                 int(failure_status.get("failed_this_run", 0) or 0)
                 + len(domains)
             )
+            processed = (
+                int(failure_status.get("processed", 0) or 0)
+                + len(domains)
+            )
             write_status(
                 failed_this_run=failed_this_run,
+                processed=processed,
                 current_batch=[],
                 stage=pipeline_idle_stage(),
                 last_error=(
