@@ -209,23 +209,31 @@ function useApi(path, deps = []) {
   }));
   useEffect(() => {
     let live = true;
+    let retryTimer = null;
     // Refresh in place. Clearing or hiding previously rendered data here makes
     // tall cards/tables collapse to a one-line loader, which changes the page
     // height and forces the browser to move the user's scroll position.
     set((s) => ({ ...s, loading: true, error: "" }));
-    api(path)
-      .then((data) => live && set({ data, error: "", loading: false }))
-      .catch(
-        (e) =>
-          live &&
+    const load = () => {
+      api(path)
+        .then((data) => live && set({ data, error: "", loading: false }))
+        .catch(() => {
+          if (!live) return;
+          // Railway swaps containers during deploys. Keep stale content when
+          // available, otherwise show a neutral loader, and retry until the
+          // replacement is healthy instead of pinning a permanent 502 card.
           set((current) => ({
             ...current,
-            error: e.message,
-            loading: false,
-          })),
-      );
+            error: "",
+            loading: !current.data,
+          }));
+          retryTimer = window.setTimeout(load, 3000);
+        });
+    };
+    load();
     return () => {
       live = false;
+      if (retryTimer) window.clearTimeout(retryTimer);
     };
   }, deps);
   return state;
@@ -685,6 +693,7 @@ function HomePage() {
   const [q, setQ] = useState("");
   const [rows, setRows] = useState([]);
   const [busy, setBusy] = useState(false);
+  const [searchError, setSearchError] = useState("");
   const d = overview.data;
   return (
     <>
@@ -704,8 +713,14 @@ function HomePage() {
           e.preventDefault();
           if (!q.trim()) return;
           setBusy(true);
-          setRows((await api(`/api/search?q=${encodeURIComponent(q)}`)).rows);
-          setBusy(false);
+          setSearchError("");
+          try {
+            setRows((await api(`/api/search?q=${encodeURIComponent(q)}`)).rows);
+          } catch {
+            setSearchError("Search was interrupted. Please try again.");
+          } finally {
+            setBusy(false);
+          }
         }}
       >
         <Search />
@@ -719,7 +734,7 @@ function HomePage() {
       {busy ? (
         <Loading />
       ) : (
-        rows.length > 0 && (
+        searchError ? <p className="notice">{searchError}</p> : rows.length > 0 && (
           <Table
             rows={rows}
             columns={[
