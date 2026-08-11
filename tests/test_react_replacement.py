@@ -32,7 +32,7 @@ def test_react_app_has_every_primary_page_and_no_streamlit_dependency():
         "Screening speed",
     ):
         assert zone_metric in source
-    assert "Deal-first mode · qualified-candidate storage only" in source
+    assert "Deal-first mode · qualified-candidate storage only" not in source
     assert "controlCrawler" in source
     assert "function GlobalWorkerControls" in source
     assert "<GlobalWorkerControls />" in source

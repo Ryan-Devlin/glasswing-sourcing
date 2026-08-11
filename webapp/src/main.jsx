@@ -2069,15 +2069,6 @@ function SearchCorpusPage({ kind }) {
           )}
         </div>
       )}
-      {!isAi && metrics.data && (
-        <section className="notice corpus-status retention-status">
-          <strong>Deal-first mode · qualified-candidate storage only</strong>
-          <span>{fmt(metrics.data.available)} source domains are ranked offline; only high-signal names receive network screening.</span>
-          <span>{Number(metrics.data.live_rate || 0).toFixed(1)}% reached a live site · {Number(metrics.data.relevance_rate || 0).toFixed(1)}% passed relevance · {Number(metrics.data.candidate_yield || 0).toFixed(3)}% became qualified candidates</span>
-          <span>{fmt(metrics.data.discarded)} discarded without retained content · {fmt(metrics.data.needs_review)} awaiting review · {fmt(metrics.data.investable)} approved Investable</span>
-          {metrics.data.last_deal_at && <span>Latest retained deal: {new Date(metrics.data.last_deal_at).toLocaleString()}</span>}
-        </section>
-      )}
       {isAi && metrics.data && (
         <section className={`notice corpus-status ${crawlerStale ? "stale" : ""}`}>
           <strong>
