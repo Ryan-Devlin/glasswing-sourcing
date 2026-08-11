@@ -671,13 +671,20 @@ function GoodDeals() {
   const [claudeOverride, setClaudeOverride] = useState(null);
   const [claudeBusy, setClaudeBusy] = useState("");
   const [message, setMessage] = useState("");
+  useEffect(() => {
+    const refreshDeals = () => setRefresh((value) => value + 1);
+    window.addEventListener("tracking-changed", refreshDeals);
+    return () => window.removeEventListener("tracking-changed", refreshDeals);
+  }, []);
   const deals = useApi(
     "/api/classifications?bucket=investable&page=1&page_size=25&sort=Highest%20score",
     [refresh],
   );
   if (deals.loading) return <Loading />;
   if (deals.error) return <ErrorBox>{deals.error}</ErrorBox>;
-  const rows = (deals.data?.rows || []).filter((row) => !row.hidden).slice(0, 8);
+  const rows = (deals.data?.rows || [])
+    .filter((row) => !row.hidden && !row.tracked)
+    .slice(0, 8);
   if (!rows.length) return null;
   const reject = async (row) => {
     if (!admin) return requestLogin();
@@ -717,7 +724,7 @@ function GoodDeals() {
         {rows.map((row) => (
           <article className="top-pick" key={row.domain}>
             <button className="card-dismiss" title="Reject to Hard Denied and NO" onClick={() => reject(row)}>Reject</button>
-            <TrackButton row={row} onChanged={() => setRefresh((value) => value + 1)} />
+            <TrackButton row={row} />
             <span className="deal-age" title={row.classified_at || row.updated_at}>{dealAgeLabel(row.classified_at || row.updated_at)}</span>
             <div className="top-pick-head">
               <span className="score-ring">{row.fit_score}<small>/100</small></span>
@@ -793,6 +800,7 @@ function TrackingDeals() {
                   if (!admin) return requestLogin();
                   await api(`/api/tracking/${encodeURIComponent(row.domain)}`, { method: "DELETE" });
                   setRefresh((value) => value + 1);
+                  window.dispatchEvent(new CustomEvent("tracking-changed"));
                 }}
               >
                 Untrack
@@ -822,9 +830,18 @@ function TrackingDeals() {
 function ClaudeTopPicks() {
   const { admin, requestLogin } = useAdmin();
   const [refresh, setRefresh] = useState(0);
-  const picks = useApi("/api/claude/top?limit=6", [refresh]);
+  useEffect(() => {
+    const refreshPicks = () => setRefresh((value) => value + 1);
+    window.addEventListener("tracking-changed", refreshPicks);
+    return () => window.removeEventListener("tracking-changed", refreshPicks);
+  }, []);
+  const picks = useApi("/api/claude/top?limit=20", [refresh]);
   if (picks.loading) return <Loading />;
   if (picks.error || !picks.data?.rows?.length) return null;
+  const visiblePicks = picks.data.rows
+    .filter((row) => !row.tracked)
+    .slice(0, 6);
+  if (!visiblePicks.length) return null;
   return (
     <section className="top-picks">
       <div className="section-title">
@@ -838,7 +855,7 @@ function ClaudeTopPicks() {
         </a>
       </div>
       <div className="top-pick-grid">
-        {picks.data.rows.map((row) => {
+        {visiblePicks.map((row) => {
           const reason = shortClaudeReason(
             row.reasoning || row.product_summary,
           );
@@ -856,7 +873,7 @@ function ClaudeTopPicks() {
                 });
                 setRefresh((value) => value + 1);
               }}>Reject</button>
-              <TrackButton row={row} onChanged={() => setRefresh((value) => value + 1)} />
+              <TrackButton row={row} />
               <div className="top-pick-head">
                 <span className="score-ring">
                   {row.fit_score}
