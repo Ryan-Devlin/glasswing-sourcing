@@ -2182,7 +2182,9 @@ function SearchCorpusPage({ kind }) {
                   {quickResult && !quickResult.error && (
                     <div className="upload-result">
                       <strong>{quickResult.message}</strong>
-                      <span>{quickResult.domain} will appear in its scored bucket when processing finishes.</span>
+                      <span>{quickResult.state === "searchable"
+                        ? `${quickResult.domain} can be found in the Search tab now.`
+                        : `${quickResult.domain} is in the worker queue and will become searchable after processing.`}</span>
                     </div>
                   )}
                 </div>

@@ -506,11 +506,38 @@ def global_search(q: str = Query(min_length=1, max_length=200)):
     ]
     ai = [_clean_search_row(row, ".AI crawler") for row in search_companies(AI_SEARCH_DB, q, limit=25)]
     zone = [_clean_search_row(row, f".{row.get('tld', '')} crawler") for row in search_pages(q, limit=25, database=ZONE_UNIVERSE_DB)]
+    registered = []
+    try:
+        with ai_connect(AI_SEARCH_DB, read_only=True) as conn:
+            pending_rows = conn.execute(
+                "SELECT domain,latest_crawl_status,last_seen_at,last_crawled_at "
+                "FROM domains WHERE lower(domain) LIKE ? "
+                "ORDER BY last_seen_at DESC LIMIT 25",
+                (f"%{q.strip().lower()}%",),
+            ).fetchall()
+        registered = [
+            {
+                "domain": str(row["domain"]),
+                "url": f"https://{row['domain']}",
+                "company": str(row["domain"]),
+                "description": (
+                    "Waiting for website scraping and scoring."
+                    if str(row["latest_crawl_status"] or "pending") != "success"
+                    else "Website is registered in Domain Intake."
+                ),
+                "score": "",
+                "source": f"Domain Intake · {str(row['latest_crawl_status'] or 'pending').replace('_', ' ')}",
+                "updated": str(row["last_crawled_at"] or row["last_seen_at"] or ""),
+            }
+            for row in pending_rows
+        ]
+    except Exception:
+        registered = []
     # A company can exist in all three stores. Prefer its canonical
     # classification record and merge corpus hits instead of showing the same
     # domain several times in the unified search view.
     merged: dict[str, dict] = {}
-    for row in company + ai + zone:
+    for row in company + ai + zone + registered:
         domain = stable_domain(row.get("domain", ""))
         key = domain or clean(row.get("url", "")).lower()
         if not key:
@@ -1381,7 +1408,7 @@ def zone_candidates(limit: int = Query(25, ge=1, le=50)):
     }
 
 
-def _queue_ai_domains(values: list[str], source: str) -> dict[str, int]:
+def _queue_ai_domains(values: list[str], source: str) -> dict[str, object]:
     from ai_search.database import add_domain
     from ai_search.database import connect as ai_connect
 
@@ -1390,10 +1417,35 @@ def _queue_ai_domains(values: list[str], source: str) -> dict[str, int]:
     if not domains:
         raise HTTPException(400, "Enter a valid domain or website URL")
     added = 0
+    requeued = 0
+    searchable = 0
+    states: dict[str, str] = {}
     with ai_connect(AI_SEARCH_DB) as conn:
         before = int(conn.execute("SELECT count(*) AS count FROM domains").fetchone()["count"])
         for domain in domains:
-            add_domain(conn, domain, source=source)
+            existing = conn.execute(
+                "SELECT latest_crawl_status,last_document_count FROM domains WHERE domain=?",
+                (domain,),
+            ).fetchone()
+            if existing is None:
+                add_domain(conn, domain, source=source)
+                states[domain] = "queued"
+            elif (
+                str(existing["latest_crawl_status"] or "") == "success"
+                and int(existing["last_document_count"] or 0) > 0
+            ):
+                add_domain(conn, domain, source=source)
+                searchable += 1
+                states[domain] = "searchable"
+            else:
+                conn.execute(
+                    "UPDATE domains SET active=1,latest_crawl_status='pending',"
+                    "last_crawled_at=NULL,next_crawl_at=NULL,crawl_failures=0,"
+                    "last_seen_at=?,discovery_source=? WHERE domain=?",
+                    (datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), source, domain),
+                )
+                requeued += 1
+                states[domain] = "requeued"
         conn.commit()
         after = int(conn.execute("SELECT count(*) AS count FROM domains").fetchone()["count"])
         added = max(0, after - before)
@@ -1402,6 +1454,9 @@ def _queue_ai_domains(values: list[str], source: str) -> dict[str, int]:
         "added": added,
         "duplicates": max(0, len(domains) - added),
         "domain": domains[0] if len(domains) == 1 else "",
+        "requeued": requeued,
+        "searchable": searchable,
+        "state": states.get(domains[0], "") if len(domains) == 1 else "",
     }
 
 
@@ -1417,8 +1472,10 @@ def intake_domain(payload: DomainIntakeRequest):
         **result,
         "message": (
             "Domain queued for scraping and scoring."
-            if result["added"]
-            else "Domain is already in the platform."
+            if result["state"] == "queued"
+            else "Domain requeued for scraping and scoring."
+            if result["state"] == "requeued"
+            else "Domain is already scraped and searchable."
         ),
     }
 
