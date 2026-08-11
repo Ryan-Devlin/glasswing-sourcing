@@ -1573,12 +1573,14 @@ def adaptive_screening_profile(
         # production worker to 6.9 GB RSS and made 97% of requests time out.
         # A smaller one-round batch keeps enough throughput for the live .ai
         # arrival rate without paying for allocator/thread churn all month.
-        # All-extension CertStream mode has to drain faster than certificates
-        # arrive. Use the configured production ceiling in one wave and keep
-        # the first-pass deadline deliberately short; inaccessible domains
-        # are durable and retried later, so they must not monopolize the hot
-        # acquisition path.
-        surge_workers = 40
+        # Production measurement (2026-08-11): 40 concurrent domains
+        # collapsed Railway's resolver/connection pool and made virtually
+        # every request time out. The exact same container completed a
+        # 10-domain wave in 5.3s (8 real pages, 2 immediate DNS failures),
+        # which is >100 attempts/minute and comfortably above the observed
+        # ~30/minute CertStream arrival rate. Max force means sustained
+        # throughput, not maximum simultaneous sockets.
+        surge_workers = 10
         return {
             "mode": "surge",
             "batch_size": surge_workers,
@@ -1587,7 +1589,7 @@ def adaptive_screening_profile(
             "homepage_only": True,
         }
     if pending >= 250:
-        catch_up_workers = min(32, max(16, base_workers))
+        catch_up_workers = min(8, max(6, base_workers))
         return {
             "mode": "catch_up",
             "batch_size": catch_up_workers,
@@ -1845,12 +1847,12 @@ async def worker_loop(
             # The outer deadline is a throughput invariant, not merely a
             # crash guard. A 240-second allowance meant one pathological
             # batch could accept six minutes of new certificates while
-            # completing nothing. With 40 domains per surge wave, a 45s
-            # ceiling provides >53 attempts/minute even in the worst case,
-            # above the observed live arrival rate. Normal mode keeps more
-            # room for its deliberate retry pass.
+            # completing nothing. The production-proven 10-domain wave
+            # normally finishes in ~5s; 20s leaves generous variance without
+            # allowing a poisoned wave to freeze intake. Normal mode keeps
+            # more room for its deliberate retry pass.
             outer_deadline_seconds = (
-                45.0 if profile["mode"] in {"surge", "catch_up"} else 120.0
+                20.0 if profile["mode"] in {"surge", "catch_up"} else 120.0
             )
             batch_started_wall = time.monotonic()
             try:

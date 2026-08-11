@@ -78,7 +78,7 @@ class ScreeningBatchTimeoutTests(unittest.TestCase):
         self.assertTrue(before.rstrip().endswith("asyncio.wait_for("))
         self.assertIn("timeout=outer_deadline_seconds", after.split("\n\n", 1)[0])
         self.assertIn(
-            '45.0 if profile["mode"] in {"surge", "catch_up"} else 120.0',
+            '20.0 if profile["mode"] in {"surge", "catch_up"} else 120.0',
             self.pipeline,
         )
 

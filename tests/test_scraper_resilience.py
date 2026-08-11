@@ -72,11 +72,11 @@ class ScraperResilienceTests(unittest.TestCase):
             500, base_batch=75, base_workers=28, base_timeout=12
         )
 
-        self.assertEqual(surge["batch_size"], 40)
-        self.assertEqual(surge["workers"], 40)
+        self.assertEqual(surge["batch_size"], 10)
+        self.assertEqual(surge["workers"], 10)
         self.assertLessEqual(surge["timeout"], 8)
-        self.assertEqual(catch_up["batch_size"], 28)
-        self.assertEqual(catch_up["workers"], 28)
+        self.assertEqual(catch_up["batch_size"], 8)
+        self.assertEqual(catch_up["workers"], 8)
         self.assertLessEqual(catch_up["timeout"], 10)
 
     def test_html_payload_default_is_bounded_for_many_parallel_sites(self):
