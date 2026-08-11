@@ -36,7 +36,7 @@ for source in (ROOT, AI_SRC, ZONE_SRC):
     if str(source) not in sys.path:
         sys.path.insert(0, str(source))
 
-from ai_search.og_bridge import search_companies, search_stats
+from ai_search.og_bridge import enqueue_for_screening, search_companies, search_stats
 from ai_search.database import (
     connect as ai_connect,
     diagnostics as ai_diagnostics,
@@ -1452,6 +1452,21 @@ def _queue_ai_domains(values: list[str], source: str) -> dict[str, object]:
                 requeued += 1
                 states[domain] = "requeued"
         conn.commit()
+    classified = {
+        str(row.get("domain", ""))
+        for row in query_classifications_by_domains(domains)
+    }
+    needs_scoring = [domain for domain in domains if domain not in classified]
+    scoring_result = (
+        enqueue_for_screening(
+            QUEUE_DB,
+            needs_scoring,
+            source_run_id="ai_search_cache_reuse_v1",
+            requeue_existing=True,
+        )
+        if needs_scoring
+        else {"queued": 0}
+    )
     return {
         "received": len(domains),
         "added": added,
@@ -1460,6 +1475,7 @@ def _queue_ai_domains(values: list[str], source: str) -> dict[str, object]:
         "requeued": requeued,
         "searchable": searchable,
         "state": states.get(domains[0], "") if len(domains) == 1 else "",
+        "scoring_queued": int(scoring_result.get("queued", 0) or 0),
     }
 
 

@@ -22,6 +22,7 @@ def test_react_app_has_every_primary_page_and_no_streamlit_dependency():
     assert '"/api/ai/domain"' in source
     assert "Run through platform" in source
     assert "requeued for scraping and scoring" in Path("web_api.py").read_text(encoding="utf-8")
+    assert "source_run_id=\"ai_search_cache_reuse_v1\"" in Path("web_api.py").read_text(encoding="utf-8")
     assert "can be found in the Search tab now" in source
     assert 'search: <GlobalSearchPage />' in source
     assert "Search everything" in source
