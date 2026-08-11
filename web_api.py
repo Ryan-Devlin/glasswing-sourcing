@@ -757,9 +757,60 @@ def certstream_status():
         }
     else:
         status = read_local_pipeline_status()
+    run_id = str(status.get("run_id", "") or "")
+    current_run_queue = {
+        "total": 0,
+        "awaiting_first_attempt": 0,
+        "processing": 0,
+        "retrying": 0,
+        "complete": 0,
+        "failed": 0,
+        "attempts": 0,
+    }
+    if run_id:
+        conn = None
+        try:
+            conn = connect_pipeline_db()
+            row = conn.execute(
+                """
+                SELECT
+                    count(*) AS total,
+                    sum(CASE WHEN status='pending' AND attempts=0 THEN 1 ELSE 0 END)
+                        AS awaiting_first_attempt,
+                    sum(CASE WHEN status='processing' THEN 1 ELSE 0 END)
+                        AS processing,
+                    sum(CASE WHEN status='pending' AND attempts>0 THEN 1 ELSE 0 END)
+                        AS retrying,
+                    sum(CASE WHEN status='complete' THEN 1 ELSE 0 END)
+                        AS complete,
+                    sum(CASE WHEN status='failed' THEN 1 ELSE 0 END)
+                        AS failed,
+                    sum(attempts) AS attempts
+                FROM domains
+                WHERE first_seen_run_id=?
+                """,
+                (run_id,),
+            ).fetchone()
+            if row:
+                current_run_queue = {
+                    key: int(row[key] or 0)
+                    for key in current_run_queue
+                }
+        except Exception:
+            # Worker status remains available during a transient queue read.
+            pass
+        finally:
+            if conn is not None:
+                conn.close()
+    retained_in_buckets = (
+        int(_bucket_counts_for_run(run_id).get("all", 0))
+        if run_id else 0
+    )
     desired = bool(read_control()["desired"].get("pipeline", False))
     return {
         **status,
+        "current_run_queue": current_run_queue,
+        "retained_in_buckets": retained_in_buckets,
         "desired_running": desired,
         "pause_requested": not desired,
     }

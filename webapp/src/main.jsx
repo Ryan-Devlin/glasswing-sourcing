@@ -1652,20 +1652,25 @@ function CertStreamPage() {
           value={fmt(s.new_domains_received || s.domains_received)}
         />
         <Metric label="Ignored repeats" value={fmt(s.repeat_events_ignored)} />
-        <Metric label="Screening attempts" value={fmt(s.processed)} />
-        <Metric label="Successfully scored" value={fmt(s.screened)} />
+        <Metric
+          label="Screening attempts"
+          value={fmt(s.current_run_queue?.attempts ?? s.processed)}
+        />
+        <Metric
+          label="Retained in buckets"
+          value={fmt(s.retained_in_buckets)}
+        />
         <Metric
           label="Awaiting first attempt"
-          value={fmt(Math.max(
-            0,
-            Number(s.new_domains_received || s.domains_received || 0) -
-              Number(s.processed || 0),
-          ))}
+          value={fmt(s.current_run_queue?.awaiting_first_attempt)}
         />
         <Metric
           label="Queued for retry"
-          value={fmt(Math.max(0, Number(s.processed || 0) - Number(s.screened || 0)))}
+          value={fmt(s.current_run_queue?.retrying)}
         />
+        <Metric label="Screening now" value={fmt(s.current_run_queue?.processing)} />
+        <Metric label="Screening complete" value={fmt(s.current_run_queue?.complete)} />
+        <Metric label="Retries exhausted" value={fmt(s.current_run_queue?.failed)} />
         <Metric label="Claude calls" value={fmt(s.claude_calls)} />
         <Metric label="Reviewed by Claude" value={fmt(claude.data?.reviewed)} />
         <Metric label="Claude KEEP" value={fmt(claude.data?.kept)} />
