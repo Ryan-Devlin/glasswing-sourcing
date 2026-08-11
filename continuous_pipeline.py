@@ -631,8 +631,8 @@ def claim_batch(
               AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
             ORDER BY
               CASE
-                WHEN last_seen_run_id IN ('manual_domain_intake','csv_upload') THEN 0
-                WHEN last_seen_run_id=? THEN 1
+                WHEN last_seen_run_id=? THEN 0
+                WHEN last_seen_run_id IN ('manual_domain_intake','csv_upload') THEN 1
                 ELSE 2
               END,
               first_seen DESC
@@ -659,9 +659,9 @@ def claim_batch(
         # by first_seen ascending.
         def queue_tier(row) -> tuple[int, int]:
             source = str(row["last_seen_run_id"] or "")
-            if source in {"manual_domain_intake", "csv_upload"}:
+            if preferred_run_id and source == preferred_run_id:
                 source_priority = 0
-            elif preferred_run_id and source == preferred_run_id:
+            elif source in {"manual_domain_intake", "csv_upload"}:
                 source_priority = 1
             else:
                 source_priority = 2
@@ -2179,6 +2179,14 @@ async def async_main() -> None:
         automatic_claude_calls=0,
         manual_claude_calls=0,
         last_error="",
+        current_batch=[],
+        last_batch_seconds=0,
+        average_batch_seconds=0,
+        processed_per_minute=0,
+        received_per_minute=0,
+        average_processed_per_minute=0,
+        average_received_per_minute=0,
+        queue_growth_per_minute=0,
         queue=queue_counts(conn),
     )
 

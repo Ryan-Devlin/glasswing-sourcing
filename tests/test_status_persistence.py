@@ -10,7 +10,7 @@ import continuous_pipeline
 
 
 class StatusPersistenceTests(unittest.TestCase):
-    def test_postgres_claim_prioritizes_manual_then_active_certstream_run(self):
+    def test_postgres_claim_prioritizes_active_certstream_run_then_manual(self):
         class Result:
             def fetchall(self):
                 return [
@@ -46,7 +46,7 @@ class StatusPersistenceTests(unittest.TestCase):
                 preferred_run_id="run-now",
             )
 
-        self.assertEqual(claimed, ["manual.com", "current.ai", "old-cached.ai"])
+        self.assertEqual(claimed, ["current.ai", "manual.com", "old-cached.ai"])
         self.assertEqual(conn.claimed, claimed)
         self.assertEqual(conn.params[1], "run-now")
 
