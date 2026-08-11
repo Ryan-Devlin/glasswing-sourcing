@@ -101,6 +101,14 @@ class GlasswingFitScoringTests(unittest.TestCase):
         self.assertTrue(is_wrapper)
         self.assertIn("ai employee", evidence)
 
+    def test_online_casino_is_an_explicit_hard_exclusion(self):
+        is_wrapper, evidence = commodity_wrapper_assessment(
+            "Bangladesh's best online casino and sports betting platform "
+            "with live games, bonuses, and fast payouts."
+        )
+        self.assertTrue(is_wrapper)
+        self.assertIn("online casino", evidence)
+
     def test_non_english_caps_strong_thesis_fit_at_five(self):
         adjusted, reasons = investment_eligibility_adjusted_score(
             79,
