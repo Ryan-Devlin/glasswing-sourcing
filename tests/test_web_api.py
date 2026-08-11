@@ -184,6 +184,51 @@ def test_human_label_endpoint_uses_protected_human_source(monkeypatch):
     assert movement["target_label"] == "no"
 
 
+def test_tracking_endpoints_persist_and_return_company_details(monkeypatch):
+    tracked = set()
+    monkeypatch.setattr(
+        web_api,
+        "classification_record_for_domain",
+        lambda domain: {"domain": domain} if domain == "example.ai" else None,
+    )
+    monkeypatch.setattr(
+        web_api,
+        "track_domains",
+        lambda domains: tracked.update(domains) or len(domains),
+    )
+    monkeypatch.setattr(
+        web_api,
+        "untrack_domains",
+        lambda domains: len([domain for domain in domains if domain in tracked]),
+    )
+    monkeypatch.setattr(
+        web_api,
+        "list_tracked_domains",
+        lambda limit=100: [
+            {"domain": domain, "tracked_at": "2026-08-11T12:00:00Z"}
+            for domain in tracked
+        ],
+    )
+    monkeypatch.setattr(
+        web_api,
+        "query_classifications_by_domains",
+        lambda domains: [
+            {"domain": domain, "company_name": "Example", "fit_score": 91}
+            for domain in domains
+        ],
+    )
+    monkeypatch.setattr(web_api, "_with_claude", lambda rows: rows)
+    monkeypatch.setattr(web_api, "record_admin_audit", lambda *args: None)
+
+    response = client.post("/api/tracking", json={"domain": "Example.ai"})
+    assert response.status_code == 200
+    assert response.json()["tracked"] is True
+    listing = client.get("/api/tracking").json()
+    assert listing["total"] == 1
+    assert listing["rows"][0]["domain"] == "example.ai"
+    assert listing["rows"][0]["tracked"] is True
+
+
 def test_worker_control_is_explicit_and_scoped(monkeypatch):
     captured = {}
     monkeypatch.setattr(

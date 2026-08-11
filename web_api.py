@@ -65,7 +65,11 @@ from classification_store import (
     reconcile_claude_routing,
     search_classifications,
     source_bucket_counts,
+    list_tracked_domains,
+    track_domains,
+    tracked_domain_set,
     top_claude_keeps,
+    untrack_domains,
     unhide_domains,
 )
 from common import (
@@ -205,6 +209,10 @@ class ClaudeReviewRequest(BaseModel):
 class HiddenUpdate(BaseModel):
     domains: list[str]
     hidden: bool = True
+
+
+class TrackingUpdate(BaseModel):
+    domain: str
 
 
 class LoginRequest(BaseModel):
@@ -476,8 +484,16 @@ def classifications(
         run_id=run_id,
     )
     hidden = hidden_domain_set([row["domain"] for row in rows])
+    tracked = tracked_domain_set([row["domain"] for row in rows])
     return {
-        "rows": _with_claude([{**row, "hidden": row["domain"] in hidden} for row in rows]),
+        "rows": _with_claude([
+            {
+                **row,
+                "hidden": row["domain"] in hidden,
+                "tracked": row["domain"] in tracked,
+            }
+            for row in rows
+        ]),
         "total": counts[bucket],
         "page": page,
         "page_size": page_size,
@@ -542,6 +558,42 @@ def set_hidden(update: HiddenUpdate):
     return {"ok": True, "changed": changed}
 
 
+@app.get("/api/tracking")
+def tracking(limit: int = Query(100, ge=1, le=500)):
+    tracked_rows = list_tracked_domains(limit=limit)
+    timestamps = {row["domain"]: row["tracked_at"] for row in tracked_rows}
+    records = query_classifications_by_domains(list(timestamps))
+    by_domain = {row["domain"]: row for row in records}
+    ordered = [
+        {**by_domain[domain], "tracked": True, "tracked_at": tracked_at}
+        for domain, tracked_at in timestamps.items()
+        if domain in by_domain
+    ]
+    return {"rows": _with_claude(ordered), "total": len(ordered)}
+
+
+@app.post("/api/tracking", dependencies=[Depends(_require_admin)])
+def set_tracking(update: TrackingUpdate):
+    domain = stable_domain(update.domain)
+    if not domain:
+        raise HTTPException(400, "Invalid domain")
+    if not classification_record_for_domain(domain):
+        raise HTTPException(404, "Company not found")
+    track_domains([domain])
+    record_admin_audit("company_tracked", domain)
+    return {"ok": True, "domain": domain, "tracked": True}
+
+
+@app.delete("/api/tracking/{domain}", dependencies=[Depends(_require_admin)])
+def delete_tracking(domain: str):
+    target = stable_domain(domain)
+    if not target:
+        raise HTTPException(400, "Invalid domain")
+    untrack_domains([target])
+    record_admin_audit("company_untracked", target)
+    return {"ok": True, "domain": target, "tracked": False}
+
+
 @app.get("/api/certstream/status")
 def certstream_status():
     if shared_pipeline_backend_available():
@@ -594,7 +646,11 @@ def claude_top_companies(limit: int = Query(6, ge=1, le=20)):
         min(limit * 3, 20), diligence_version=DILIGENCE_VERSION
     )
     hidden = hidden_domain_set([row["domain"] for row in rows])
-    return {"rows": [row for row in rows if row["domain"] not in hidden][:limit]}
+    visible = [row for row in rows if row["domain"] not in hidden][:limit]
+    tracked = tracked_domain_set([row["domain"] for row in visible])
+    return {
+        "rows": [{**row, "tracked": row["domain"] in tracked} for row in visible]
+    }
 
 
 @app.post("/api/claude/review/{domain}", dependencies=[Depends(_require_admin)])

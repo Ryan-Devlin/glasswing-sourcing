@@ -15,6 +15,7 @@ from classification_store import (
     hidden_domain_set,
     hide_domains,
     list_hidden_domains,
+    list_tracked_domains,
     query_classifications,
     query_classifications_by_domains,
     query_corpus_classifications,
@@ -27,8 +28,26 @@ from classification_store import (
     record_manual_move,
     import_private_sqlite_into_shared,
     unhide_domains,
+    track_domains,
+    tracked_domain_set,
+    untrack_domains,
     upsert_classifications,
 )
+
+
+def test_tracking_is_persistent_and_idempotent(tmp_path):
+    database = tmp_path / "classifications.sqlite3"
+    connect_store(database).close()
+
+    assert track_domains(["Example.ai", "example.ai"], path=database) == 1
+    assert tracked_domain_set(["example.ai", "other.ai"], path=database) == {
+        "example.ai"
+    }
+    assert [row["domain"] for row in list_tracked_domains(path=database)] == [
+        "example.ai"
+    ]
+    assert untrack_domains(["example.ai"], path=database) == 1
+    assert tracked_domain_set(["example.ai"], path=database) == set()
 
 
 def test_master_bucket_queries_are_paged_and_source_labeled(tmp_path):

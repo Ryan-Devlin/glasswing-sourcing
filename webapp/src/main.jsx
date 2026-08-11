@@ -173,6 +173,37 @@ function Loading() {
 function ErrorBox({ children }) {
   return <div className="error">{children}</div>;
 }
+
+function TrackButton({ row, onChanged }) {
+  const { admin, requestLogin } = useAdmin();
+  const [tracked, setTracked] = useState(Boolean(row.tracked));
+  const [busy, setBusy] = useState(false);
+  useEffect(() => setTracked(Boolean(row.tracked)), [row.domain, row.tracked]);
+  return (
+    <button
+      className="card-track"
+      disabled={tracked || busy}
+      title={tracked ? "Already tracking" : "Add to the shared Tracking view"}
+      onClick={async () => {
+        if (!admin) return requestLogin();
+        setBusy(true);
+        try {
+          await api("/api/tracking", {
+            method: "POST",
+            body: JSON.stringify({ domain: row.domain }),
+          });
+          setTracked(true);
+          onChanged?.();
+          window.dispatchEvent(new CustomEvent("tracking-changed"));
+        } finally {
+          setBusy(false);
+        }
+      }}
+    >
+      {busy ? "Saving…" : tracked ? "Tracking" : "Track"}
+    </button>
+  );
+}
 function ApiStatus() {
   const result = useApi("/api/healthz", []);
   const connected = !result.loading && !result.error;
@@ -558,6 +589,7 @@ function HomePage() {
         </p>
       </header>
       <GoodDeals />
+      <TrackingDeals />
       <ClaudeTopPicks />
       <form
         className="searchbar"
@@ -643,7 +675,7 @@ function GoodDeals() {
   );
   if (deals.loading) return <Loading />;
   if (deals.error) return <ErrorBox>{deals.error}</ErrorBox>;
-  const rows = (deals.data?.rows || []).filter((row) => !row.hidden).slice(0, 6);
+  const rows = (deals.data?.rows || []).filter((row) => !row.hidden).slice(0, 8);
   if (!rows.length) return null;
   const reject = async (row) => {
     if (!admin) return requestLogin();
@@ -683,6 +715,7 @@ function GoodDeals() {
         {rows.map((row) => (
           <article className="top-pick" key={row.domain}>
             <button className="card-dismiss" title="Reject to Hard Denied and NO" onClick={() => reject(row)}>Reject</button>
+            <TrackButton row={row} onChanged={() => setRefresh((value) => value + 1)} />
             <span className="deal-age" title={row.classified_at || row.updated_at}>{dealAgeLabel(row.classified_at || row.updated_at)}</span>
             <div className="top-pick-head">
               <span className="score-ring">{row.fit_score}<small>/100</small></span>
@@ -719,6 +752,66 @@ function GoodDeals() {
           onClose={() => setClaudeOverride(null)}
           onOverride={() => sendClaude(claudeOverride, true)}
         />
+      )}
+    </section>
+  );
+}
+
+function TrackingDeals() {
+  const { admin, requestLogin } = useAdmin();
+  const [refresh, setRefresh] = useState(0);
+  useEffect(() => {
+    const refreshTracking = () => setRefresh((value) => value + 1);
+    window.addEventListener("tracking-changed", refreshTracking);
+    return () => window.removeEventListener("tracking-changed", refreshTracking);
+  }, []);
+  const result = useApi("/api/tracking?limit=100", [refresh]);
+  if (result.loading) return <Loading />;
+  if (result.error) return <ErrorBox>{result.error}</ErrorBox>;
+  const rows = (result.data?.rows || []).slice(0, 8);
+  return (
+    <section className="top-picks tracking-view">
+      <div className="section-title">
+        <div>
+          <h2>Tracking</h2>
+          <p>Companies the team wants to follow, saved across sessions.</p>
+        </div>
+        <span className="pill">{fmt(result.data?.total || 0)} tracked</span>
+      </div>
+      {!rows.length ? (
+        <p className="empty-tracking">Click Track on a good deal to add it here.</p>
+      ) : (
+        <div className="top-pick-grid">
+          {rows.map((row) => (
+            <article className="top-pick" key={row.domain}>
+              <button
+                className="card-dismiss"
+                title="Remove from Tracking"
+                onClick={async () => {
+                  if (!admin) return requestLogin();
+                  await api(`/api/tracking/${encodeURIComponent(row.domain)}`, { method: "DELETE" });
+                  setRefresh((value) => value + 1);
+                }}
+              >
+                Untrack
+              </button>
+              <span className="deal-age" title={row.classified_at || row.updated_at}>
+                {dealAgeLabel(row.classified_at || row.updated_at)}
+              </span>
+              <div className="top-pick-head">
+                <span className="score-ring">{row.fit_score}<small>/100</small></span>
+                <span className="pill">{String(row.routing_bucket || "tracked").replaceAll("_", " ")}</span>
+              </div>
+              <h3>{row.company_name || row.domain}</h3>
+              <a href={row.final_url || `https://${row.domain}`} target="_blank">{row.domain}</a>
+              {row.claude_decision && (
+                <div className="deal-claude-review"><ClaudeReviewBadge row={row} prefix="Claude " /></div>
+              )}
+              <p className="clamp-text" title={row.description}>{row.description || row.routing_reason}</p>
+              <span className="top-pick-category">{String(row.thesis_pillar || "enterprise technology").replaceAll("_", " ")}</span>
+            </article>
+          ))}
+        </div>
       )}
     </section>
   );
@@ -761,6 +854,7 @@ function ClaudeTopPicks() {
                 });
                 setRefresh((value) => value + 1);
               }}>Reject</button>
+              <TrackButton row={row} onChanged={() => setRefresh((value) => value + 1)} />
               <div className="top-pick-head">
                 <span className="score-ring">
                   {row.fit_score}

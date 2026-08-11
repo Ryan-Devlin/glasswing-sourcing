@@ -226,6 +226,13 @@ def migrate(conn: sqlite3.Connection | PostgresConnection) -> None:
             hidden_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS tracked_domains (
+            domain TEXT PRIMARY KEY,
+            tracked_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_tracked_domains_recent
+            ON tracked_domains(tracked_at DESC, domain);
+
         CREATE TABLE IF NOT EXISTS automated_exclusions (
             domain TEXT PRIMARY KEY,
             bucket TEXT NOT NULL DEFAULT '',
@@ -1680,6 +1687,20 @@ def _missing_hidden_table(exc: Exception) -> bool:
     return False
 
 
+def _missing_relation(exc: Exception, table: str) -> bool:
+    """Identify a missing SQLite/Postgres table on read-only migrations."""
+    current: BaseException | None = exc
+    target = str(table).lower()
+    while current is not None:
+        if getattr(current, "sqlstate", "") == "42P01":
+            return target in str(current).lower()
+        message = str(current).lower()
+        if f"no such table: {target}" in message:
+            return True
+        current = current.__cause__
+    return False
+
+
 def hidden_domain_set(
     domains: Iterable[str],
     *,
@@ -1733,6 +1754,107 @@ def list_hidden_domains(
             ).fetchall()
     except Exception as exc:
         if _missing_hidden_table(exc):
+            return []
+        raise
+    return [dict(row) for row in rows]
+
+
+def track_domains(
+    domains: Iterable[str],
+    *,
+    path: Path | str = CLASSIFICATION_DB,
+) -> int:
+    """Add companies to the shared homepage tracking list."""
+    values = list(dict.fromkeys(
+        stable_domain(domain) for domain in domains if stable_domain(domain)
+    ))
+    if not values:
+        return 0
+    now = utc_now()
+    with connect_store(path) as conn:
+        conn.executemany(
+            """
+            INSERT INTO tracked_domains (domain, tracked_at) VALUES (?, ?)
+            ON CONFLICT(domain) DO NOTHING
+            """,
+            [(domain, now) for domain in values],
+        )
+        conn.commit()
+    return len(values)
+
+
+def untrack_domains(
+    domains: Iterable[str],
+    *,
+    path: Path | str = CLASSIFICATION_DB,
+) -> int:
+    """Remove companies from the shared homepage tracking list."""
+    values = list(dict.fromkeys(
+        stable_domain(domain) for domain in domains if stable_domain(domain)
+    ))
+    if not values:
+        return 0
+    removed = 0
+    with connect_store(path) as conn:
+        for start in range(0, len(values), 700):
+            batch = values[start : start + 700]
+            marks = ",".join("?" for _ in batch)
+            cursor = conn.execute(
+                f"DELETE FROM tracked_domains WHERE domain IN ({marks})",
+                batch,
+            )
+            removed += max(0, int(cursor.rowcount))
+        conn.commit()
+    return removed
+
+
+def tracked_domain_set(
+    domains: Iterable[str],
+    *,
+    path: Path | str = CLASSIFICATION_DB,
+) -> set[str]:
+    """Return the requested domains that are on the tracking list."""
+    values = list(dict.fromkeys(
+        stable_domain(domain) for domain in domains if stable_domain(domain)
+    ))
+    if not values or (
+        not using_classification_postgres() and not Path(path).exists()
+    ):
+        return set()
+    try:
+        with connect_store(path, read_only=True) as conn:
+            rows = []
+            for start in range(0, len(values), 700):
+                batch = values[start : start + 700]
+                marks = ",".join("?" for _ in batch)
+                rows.extend(conn.execute(
+                    f"SELECT domain FROM tracked_domains WHERE domain IN ({marks})",
+                    batch,
+                ).fetchall())
+    except Exception as exc:
+        if _missing_relation(exc, "tracked_domains"):
+            return set()
+        raise
+    return {str(row["domain"]) for row in rows}
+
+
+def list_tracked_domains(
+    *,
+    limit: int = 100,
+    path: Path | str = CLASSIFICATION_DB,
+) -> list[dict[str, str]]:
+    """Return tracked domains newest first."""
+    if not using_classification_postgres() and not Path(path).exists():
+        return []
+    try:
+        with connect_store(path, read_only=True) as conn:
+            rows = conn.execute(
+                "SELECT domain,tracked_at FROM tracked_domains "
+                "ORDER BY tracked_at DESC,domain LIMIT ?",
+                (max(1, min(int(limit), 1000)),),
+            ).fetchall()
+    except Exception as exc:
+        if _missing_relation(exc, "tracked_domains"):
             return []
         raise
     return [dict(row) for row in rows]
