@@ -386,6 +386,23 @@ header p {
   margin: 20px 0 28px;
   box-shadow: 0 4px 18px #173d3510;
 }
+.global-searchbar {
+  margin-bottom: 22px;
+}
+.search-welcome {
+  display: grid;
+  gap: 6px;
+  padding: 34px;
+  border: 1px dashed #d9c7ca;
+  border-radius: 14px;
+  color: #76676a;
+  background: #fffafa;
+  text-align: center;
+}
+.search-welcome strong {
+  color: #2d2022;
+  font-size: 18px;
+}
 .searchbar input {
   border: 0;
   outline: 0;

@@ -506,7 +506,30 @@ def global_search(q: str = Query(min_length=1, max_length=200)):
     ]
     ai = [_clean_search_row(row, ".AI crawler") for row in search_companies(AI_SEARCH_DB, q, limit=25)]
     zone = [_clean_search_row(row, f".{row.get('tld', '')} crawler") for row in search_pages(q, limit=25, database=ZONE_UNIVERSE_DB)]
-    return {"rows": company + ai + zone}
+    # A company can exist in all three stores. Prefer its canonical
+    # classification record and merge corpus hits instead of showing the same
+    # domain several times in the unified search view.
+    merged: dict[str, dict] = {}
+    for row in company + ai + zone:
+        domain = stable_domain(row.get("domain", ""))
+        key = domain or clean(row.get("url", "")).lower()
+        if not key:
+            continue
+        if key not in merged:
+            merged[key] = row
+            continue
+        existing = merged[key]
+        sources = list(dict.fromkeys(
+            part.strip()
+            for part in f"{existing.get('source', '')} · {row.get('source', '')}".split("·")
+            if part.strip()
+        ))
+        existing["source"] = " · ".join(sources)
+        if not existing.get("description") and row.get("description"):
+            existing["description"] = row["description"]
+        if not existing.get("score") and row.get("score"):
+            existing["score"] = row["score"]
+    return {"rows": list(merged.values()), "total": len(merged)}
 
 
 @app.get("/api/classifications")

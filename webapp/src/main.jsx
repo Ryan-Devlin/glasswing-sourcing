@@ -32,10 +32,11 @@ import "./styles.css";
 import "./polish.css";
 import glasswingLogo from "../../assets/glasswing_logo.svg";
 import glasswingMark from "../../assets/glasswing_mark.png";
-import { dealAgeLabel, formatCount as fmt, pageCount, plainSnippet } from "./domain";
+import { dealAgeLabel, formatCount as fmt, pageCount } from "./domain";
 
 const NAV = [
   ["home", "Home", Home],
+  ["search", "Search", Search],
   ["certstream", "CertStream Scraper", Activity],
   ["csv", "Domain Intake", Database],
   ["domains", "Domain Crawler (.com, .app)", Globe2],
@@ -690,71 +691,16 @@ function LabelModal({ target, onClose, onSaved }) {
 
 function HomePage() {
   const overview = useApi("/api/overview", []);
-  const [q, setQ] = useState("");
-  const [rows, setRows] = useState([]);
-  const [busy, setBusy] = useState(false);
-  const [searchError, setSearchError] = useState("");
   const d = overview.data;
   return (
     <>
       <header>
         <p className="eyebrow">Glasswing Ventures</p>
         <h1>Sourcing command center</h1>
-        <p>
-          Search every tracked company and crawler corpus without blocking the
-          page.
-        </p>
+        <p>Prioritize, track, and advance the strongest new deal flow.</p>
       </header>
       <TrackingDeals />
       <GoodDeals />
-      <form
-        className="searchbar"
-        onSubmit={async (e) => {
-          e.preventDefault();
-          if (!q.trim()) return;
-          setBusy(true);
-          setSearchError("");
-          try {
-            setRows((await api(`/api/search?q=${encodeURIComponent(q)}`)).rows);
-          } catch {
-            setSearchError("Search was interrupted. Please try again.");
-          } finally {
-            setBusy(false);
-          }
-        }}
-      >
-        <Search />
-        <input
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          placeholder="Search company, market, product, or domain"
-        />
-        <button>Search</button>
-      </form>
-      {busy ? (
-        <Loading />
-      ) : (
-        searchError ? <p className="notice">{searchError}</p> : rows.length > 0 && (
-          <Table
-            rows={rows}
-            columns={[
-              { key: "company", label: "Company" },
-              {
-                key: "domain",
-                label: "Domain",
-                render: (r) => (
-                  <a href={r.url} target="_blank">
-                    {r.domain}
-                  </a>
-                ),
-              },
-              { key: "source", label: "Source" },
-              { key: "score", label: "Score" },
-              { key: "description", label: "Description" },
-            ]}
-          />
-        )
-      )}
       <section>
         <div className="section-title">
           <h2>System overview</h2>
@@ -783,6 +729,72 @@ function HomePage() {
       <DeferredContent minHeight={420}>
         <CompaniesTable />
       </DeferredContent>
+    </>
+  );
+}
+
+function GlobalSearchPage() {
+  const [query, setQuery] = useState("");
+  const [rows, setRows] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [searched, setSearched] = useState(false);
+  const submit = async (event) => {
+    event.preventDefault();
+    if (!query.trim()) return;
+    setBusy(true);
+    setError("");
+    setSearched(true);
+    try {
+      const result = await api(`/api/search?q=${encodeURIComponent(query.trim())}`);
+      setRows(Array.isArray(result.rows) ? result.rows : []);
+    } catch {
+      setError("Search was interrupted. Please try again.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <>
+      <header>
+        <p className="eyebrow">Unified discovery</p>
+        <h1>Search everything</h1>
+        <p>Search every classified company and retained website across all sourcing databases.</p>
+      </header>
+      <form className="searchbar global-searchbar" onSubmit={submit}>
+        <Search />
+        <input
+          autoFocus
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="Company, domain, product, market, founder, or customer"
+          aria-label="Search all sourcing databases"
+        />
+        <button disabled={busy}>{busy ? "Searching…" : "Search"}</button>
+      </form>
+      {error ? <p className="notice">{error}</p> : busy ? <Loading /> : searched && !rows.length ? (
+        <div className="empty">No matching company or retained website found.</div>
+      ) : rows.length ? (
+        <section>
+          <div className="section-title">
+            <h2>Results</h2>
+            <span className="pill">{fmt(rows.length)} matches</span>
+          </div>
+          <Table rows={rows} columns={[
+            { key: "company", label: "Company" },
+            { key: "domain", label: "Domain", render: (row) => <a href={row.url} target="_blank" rel="noreferrer">{row.domain}</a> },
+            { key: "score", label: "Score" },
+            { key: "source", label: "Source", render: (row) => <span className="pill">{row.source}</span> },
+            { key: "description", label: "Description" },
+            { key: "updated", label: "Updated" },
+          ]} />
+        </section>
+      ) : (
+        <div className="search-welcome">
+          <strong>One search across the full sourcing platform</strong>
+          <span>Try a domain, company name, technology, market, product, or customer type.</span>
+        </div>
+      )}
     </>
   );
 }
@@ -1114,10 +1126,9 @@ function LabelsPanel() {
   const [label, setLabel] = useState("yes");
   const [refresh, setRefresh] = useState(0);
   const [page, setPage] = useState(1);
-  const [q, setQ] = useState("");
   const result = useApi(
-    `/api/labels?label=${label}&page=${page}&page_size=100&q=${encodeURIComponent(q)}`,
-    [label, page, q, refresh],
+    `/api/labels?label=${label}&page=${page}&page_size=100`,
+    [label, page, refresh],
   );
   const remove = async (domain) => {
     if (
@@ -1153,14 +1164,6 @@ function LabelsPanel() {
         />
       </div>
       <div className="inline-tools">
-        <input
-          value={q}
-          onChange={(e) => {
-            setQ(e.target.value);
-            setPage(1);
-          }}
-          placeholder="Search basket domains"
-        />
         <a className="button-link" href={`/api/export/labels/${label}`}>
           Export CSV
         </a>
@@ -2004,26 +2007,15 @@ function FormDPage() {
 function SearchCorpusPage({ kind }) {
   const { admin, requestLogin } = useAdmin();
   const isAi = kind === "ai";
-  const [view, setView] = useState("search");
-  const [q, setQ] = useState("");
-  const [active, setActive] = useState("");
-  const [page, setPage] = useState(1);
   const [metricsTick, setMetricsTick] = useState(0);
   const [controlBusy, setControlBusy] = useState(false);
   const metrics = useApi(`/api/corpus/${kind}/stats`, [kind, metricsTick]);
   const runtime = useApi("/api/runtime", [metricsTick]);
-  const result = useApi(
-    active
-      ? `/api/${kind}/search?q=${encodeURIComponent(active)}&page=${page}&page_size=100`
-      : "/api/healthz",
-    [active, page],
-  );
   const [upload, setUpload] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [quickDomain, setQuickDomain] = useState("");
   const [quickResult, setQuickResult] = useState(null);
   const [quickBusy, setQuickBusy] = useState(false);
-  const rows = Array.isArray(result.data?.rows) ? result.data.rows : [];
   const crawlerUpdatedAt = Date.parse(metrics.data?.updated_at || "");
   const crawlerStale = Boolean(
     isAi &&
@@ -2059,30 +2051,6 @@ function SearchCorpusPage({ kind }) {
       setControlBusy(false);
     }
   };
-  const cols = [
-    {
-      key: "domain",
-      label: "Domain",
-      render: (r) => (
-        <a href={r.final_url || `https://${r.domain}`} target="_blank">
-          {r.domain}
-        </a>
-      ),
-    },
-    { key: "title", label: "Title" },
-    { key: "description", label: "Description" },
-    {
-      key: "snippet",
-      label: "Match",
-      render: (r) => (
-        <span className="clamp-text" title={plainSnippet(r.snippet)}>
-          {plainSnippet(r.snippet)}
-        </span>
-      ),
-    },
-    { key: "word_count", label: "Words" },
-    { key: "crawled_at", label: "Crawled" },
-  ];
   return (
     <>
       <header>
@@ -2169,25 +2137,7 @@ function SearchCorpusPage({ kind }) {
           )}
         </section>
       )}
-      <div className="segmented">
-        <button
-          className={view === "search" ? "active" : ""}
-          onClick={() => setView("search")}
-        >
-          Search corpus
-        </button>
-        <button
-          className={view === "companies" ? "active" : ""}
-          onClick={() => setView("companies")}
-        >
-          Company buckets
-        </button>
-      </div>
-      {view === "companies" ? (
-        <CorpusCompanies kind={kind} />
-      ) : (
-        <>
-          {isAi && (
+      {isAi && (
             <section className="intake-panel">
               <div className="quick-intake">
                 <Globe2 size={24} />
@@ -2290,43 +2240,8 @@ function SearchCorpusPage({ kind }) {
               </div>
               </div>
             </section>
-          )}
-          <form
-            className="searchbar"
-            onSubmit={(e) => {
-              e.preventDefault();
-              setPage(1);
-              setActive(q.trim());
-            }}
-          >
-            <Search />
-            <input
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-              placeholder="Search indexed website content"
-            />
-            <button>Search</button>
-          </form>
-          {!active ? (
-            <div className="empty">
-              Enter a technology, market, product, or customer phrase.
-            </div>
-          ) : result.loading && !result.data ? (
-            <Loading />
-          ) : result.error && !result.data ? (
-            <ErrorBox>{result.error}</ErrorBox>
-          ) : (
-            <>
-              <Table rows={rows} columns={cols} />
-              <Pager
-                page={page}
-                setPage={setPage}
-                total={page * 100 + (rows.length === 100 ? 100 : 0)}
-              />
-            </>
-          )}
-        </>
       )}
+      <CorpusCompanies kind={kind} />
     </>
   );
 }
@@ -2836,6 +2751,7 @@ function App() {
   };
   const body = {
     home: <HomePage />,
+    search: <GlobalSearchPage />,
     certstream: <CertStreamPage />,
     formd: <FormDPage />,
     csv: <SearchCorpusPage kind="ai" />,

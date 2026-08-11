@@ -5,6 +5,7 @@ def test_react_app_has_every_primary_page_and_no_streamlit_dependency():
     source = Path("webapp/src/main.jsx").read_text(encoding="utf-8")
     for label in (
         "Home",
+        "Search",
         "CertStream Scraper",
         "Form D Deal Flow",
         "Domain Intake",
@@ -17,9 +18,15 @@ def test_react_app_has_every_primary_page_and_no_streamlit_dependency():
         assert bucket in source
     assert 'aria-label="Classification bucket"' not in source
     assert 'aria-label="Crawler bucket"' not in source
-    assert "Array.isArray(result.data?.rows)" in source
+    assert "Array.isArray(result.rows)" in source
     assert '"/api/ai/domain"' in source
     assert "Run through platform" in source
+    assert 'search: <GlobalSearchPage />' in source
+    assert "Search everything" in source
+    assert "Search corpus" not in source
+    assert "Search basket domains" not in source
+    assert "Search indexed website content" not in source
+    assert source.count("global-searchbar") == 1
     for metric in ("Domains available", "Waiting to scrape", "Searchable pages"):
         assert metric in source
     for zone_metric in ("Investable retained", "Discarded", "Fetch failures"):
