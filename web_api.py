@@ -1543,22 +1543,97 @@ def _queue_ai_domains(values: list[str], source: str) -> dict[str, object]:
 
 
 @app.post("/api/ai/domain", dependencies=[Depends(_require_admin)])
-def intake_domain(payload: DomainIntakeRequest):
-    result = _queue_ai_domains([payload.domain], "manual_domain_intake")
-    domain = result["domain"]
+async def intake_domain(payload: DomainIntakeRequest):
+    domain = stable_domain(payload.domain)
+    if not domain:
+        raise HTTPException(400, "Enter a valid domain or website URL")
+
+    # Manual intake is an interactive action, not bulk ingestion. Screen the
+    # website in this request and return its real result instead of merely
+    # dropping it behind the crawler backlog. The corpus copy is still queued
+    # separately so successful content becomes searchable across the app.
+    try:
+        queue_result = await asyncio.to_thread(
+            _queue_ai_domains, [domain], "manual_domain_intake"
+        )
+    except Exception as exc:
+        # A temporary corpus-pool issue must not prevent real-time scoring.
+        queue_result = {
+            "received": 1, "added": 0, "duplicates": 0,
+            "domain": domain, "state": "scoring", "scoring_queued": 0,
+            "corpus_warning": str(exc)[:200],
+        }
+
+    from filter import screen_records
+
+    try:
+        output, stats = await asyncio.wait_for(
+            screen_records(
+                [{
+                    "domain": domain,
+                    "registrable": domain,
+                    "certificate_name": domain,
+                    "source": "manual_domain_intake",
+                }],
+                workers=1,
+                timeout=12,
+                homepage_only=False,
+                retry_timeouts=False,
+                persist=True,
+            ),
+            timeout=30,
+        )
+    except asyncio.TimeoutError:
+        output = None
+        stats = {"timed_out_domains": [domain]}
+
+    row = output.iloc[0].to_dict() if output is not None and not output.empty else {}
+    def clean(value):
+        if value is None:
+            return ""
+        try:
+            if value != value:  # NaN
+                return ""
+        except Exception:
+            pass
+        if hasattr(value, "item"):
+            value = value.item()
+        return value
+
+    row = {str(key): clean(value) for key, value in row.items()}
+    score = int(float(row.get("glasswing_rating") or 0))
+    routing_bucket = str(row.get("routing_bucket") or "review")
+    bucket = {
+        "priority": "Investable",
+        "reject": "Hard Denied",
+    }.get(routing_bucket, "Needs Review")
+    reason = str(
+        row.get("routing_reason")
+        or row.get("fetch_error")
+        or ("Website did not respond within 30 seconds" if not row else "Screening completed")
+    )
     record_admin_audit(
-        "domain_submitted", domain,
-        "queued" if result["added"] else "already_known",
+        "domain_screened_realtime", domain,
+        f"score={score} bucket={routing_bucket}",
     )
     return {
-        **result,
-        "message": (
-            "Domain queued for scraping and scoring."
-            if result["state"] == "queued"
-            else "Domain requeued for scraping and scoring."
-            if result["state"] == "requeued"
-            else "Domain is already scraped and searchable."
+        **queue_result,
+        "domain": domain,
+        "status": "completed",
+        "message": "Screening complete",
+        "score": score,
+        "bucket": bucket,
+        "routing_bucket": routing_bucket,
+        "reason": reason.replace("_", " "),
+        "company_name": str(row.get("company_name") or row.get("page_title") or domain),
+        "description": str(
+            row.get("meta_description")
+            or row.get("homepage_excerpt")
+            or row.get("description")
+            or "No website description was available."
         ),
+        "category": str(row.get("thesis_pillar") or row.get("category") or ""),
+        "stats": stats,
     }
 
 

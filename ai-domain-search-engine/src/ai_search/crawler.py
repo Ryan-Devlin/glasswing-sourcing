@@ -424,11 +424,14 @@ async def crawl_pending(conn: Any, settings: Settings, limit: int) -> dict[str, 
                 # the single connection because it serializes writes itself.
                 if not using_postgres(AI_SEARCH_DATABASE_ENV_VAR):
                     return await crawl_domain(conn, session, row, settings)
-                row_conn = connect(settings.database)
+                # Pool acquisition is blocking. Running it on the event loop
+                # lets queued coroutines freeze the active network requests,
+                # exhaust the 10-second pool timeout, and stop the heartbeat.
+                row_conn = await asyncio.to_thread(connect, settings.database)
                 try:
                     return await crawl_domain(row_conn, session, row, settings)
                 finally:
-                    row_conn.close()
+                    await asyncio.to_thread(row_conn.close)
         for status in await asyncio.gather(*(guarded(row) for row in rows)):
             counts[status] = counts.get(status, 0) + 1
     return counts

@@ -824,6 +824,23 @@ tbody tr:hover {
   color: #087365;
   font-size: 15px;
 }
+.realtime-result {
+  gap: 8px;
+  padding: 14px;
+  border-radius: 10px;
+  background: #f7f2f1;
+}
+.realtime-result > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.realtime-result > div > strong {
+  color: var(--gw-red-dark);
+  font-family: "Play", sans-serif;
+  font-size: 24px;
+}
 .upload-error {
   color: #a52f22;
 }

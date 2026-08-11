@@ -2198,17 +2198,20 @@ function SearchCorpusPage({ kind }) {
                     />
                     <button className="primary" type="submit" disabled={quickBusy || !quickDomain.trim()}>
                       {quickBusy ? <RefreshCw className="spin" size={16} /> : <Play size={16} />}
-                      {quickBusy ? "Queuing…" : "Run through platform"}
+                      {quickBusy ? "Processing…" : "Run through platform"}
                     </button>
                   </form>
                   {!admin && <button onClick={requestLogin}>Admin login to submit</button>}
                   {quickResult?.error && <p className="upload-error">{quickResult.error}</p>}
                   {quickResult && !quickResult.error && (
-                    <div className="upload-result">
-                      <strong>{quickResult.message}</strong>
-                      <span>{quickResult.state === "searchable"
-                        ? `${quickResult.domain} can be found in the Search tab now.`
-                        : `${quickResult.domain} is in the worker queue and will become searchable after processing.`}</span>
+                    <div className="upload-result realtime-result">
+                      <div>
+                        <strong>{quickResult.score}/100</strong>
+                        <span className="pill">{quickResult.bucket}</span>
+                      </div>
+                      <strong>{quickResult.company_name || quickResult.domain}</strong>
+                      <span>{quickResult.reason}</span>
+                      <span>{quickResult.description}</span>
                     </div>
                   )}
                 </div>
