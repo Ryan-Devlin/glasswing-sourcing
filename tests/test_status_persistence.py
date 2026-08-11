@@ -10,6 +10,46 @@ import continuous_pipeline
 
 
 class StatusPersistenceTests(unittest.TestCase):
+    def test_postgres_claim_prioritizes_manual_then_active_certstream_run(self):
+        class Result:
+            def fetchall(self):
+                return [
+                    {"domain": "manual.com", "first_seen": "3", "last_seen_run_id": "manual_domain_intake"},
+                    {"domain": "current.ai", "first_seen": "2", "last_seen_run_id": "run-now"},
+                    {"domain": "old-cached.ai", "first_seen": "1", "last_seen_run_id": "ai_search_cache_reuse_v1"},
+                ]
+
+        class Connection:
+            def __init__(self):
+                self.claimed = []
+
+            def execute(self, sql, params=()):
+                self.params = params
+                return Result()
+
+            def executemany(self, _sql, rows):
+                self.claimed = [row[0] for row in rows]
+
+            def commit(self):
+                pass
+
+        conn = Connection()
+        with patch.object(continuous_pipeline, "using_postgres", return_value=True), patch.object(
+            continuous_pipeline,
+            "_corpus_priority_for_domains",
+            return_value={"old-cached.ai": 0, "current.ai": 2},
+        ):
+            claimed = continuous_pipeline.claim_batch(
+                conn,
+                size=3,
+                allowed_extensions={".ai"},
+                preferred_run_id="run-now",
+            )
+
+        self.assertEqual(claimed, ["manual.com", "current.ai", "old-cached.ai"])
+        self.assertEqual(conn.claimed, claimed)
+        self.assertEqual(conn.params[1], "run-now")
+
     def test_listener_connectivity_does_not_clobber_active_screening_stage(self):
         with tempfile.TemporaryDirectory() as directory:
             status = Path(directory) / "continuous_status.json"
@@ -362,7 +402,7 @@ class StatusPersistenceTests(unittest.TestCase):
                 conn.execute(
                     "INSERT INTO domains(domain, first_seen, last_seen, last_seen_run_id) "
                     "VALUES ('manual-intake.com', '2026-08-08T00:00:00Z', "
-                    "'2026-08-08T00:00:00Z', 'ai_search_cache_reuse_v1')"
+                    "'2026-08-08T00:00:00Z', 'manual_domain_intake')"
                 )
                 conn.commit()
 

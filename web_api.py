@@ -1529,7 +1529,7 @@ def _queue_ai_domains(values: list[str], source: str) -> dict[str, object]:
         enqueue_for_screening(
             QUEUE_DB,
             needs_scoring,
-            source_run_id="ai_search_cache_reuse_v1",
+            source_run_id=source,
             requeue_existing=True,
         )
         if needs_scoring

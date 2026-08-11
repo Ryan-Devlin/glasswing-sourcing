@@ -614,6 +614,7 @@ def claim_batch(
     conn: sqlite3.Connection,
     size: int,
     allowed_extensions: set[str] | None = None,
+    preferred_run_id: str = "",
 ) -> list[str]:
     now = utc_now()
     if using_postgres(PIPELINE_DATABASE_ENV_VAR):
@@ -629,11 +630,15 @@ def claim_batch(
             WHERE status='pending'
               AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
             ORDER BY
-              CASE WHEN last_seen_run_id='ai_search_cache_reuse_v1' THEN 0 ELSE 1 END,
+              CASE
+                WHEN last_seen_run_id IN ('manual_domain_intake','csv_upload') THEN 0
+                WHEN last_seen_run_id=? THEN 1
+                ELSE 2
+              END,
               first_seen DESC
             LIMIT ?
             """,
-            (now, candidate_limit),
+            (now, preferred_run_id, candidate_limit),
         ).fetchall()
         if allowed_extensions:
             rows = [
@@ -641,7 +646,7 @@ def claim_batch(
                 if (
                     domain_extension(str(row["domain"])) in allowed_extensions
                     or str(row["last_seen_run_id"] or "")
-                    == "ai_search_cache_reuse_v1"
+                    in {"manual_domain_intake", "csv_upload"}
                 )
             ]
         priority = _corpus_priority_for_domains([row["domain"] for row in rows])
@@ -652,7 +657,17 @@ def claim_batch(
         # first from the query above; sort on priority alone (stable sort
         # preserves that ordering within each tier) instead of re-sorting
         # by first_seen ascending.
-        ordered = sorted(rows, key=lambda row: priority.get(row["domain"], 2))
+        def queue_tier(row) -> tuple[int, int]:
+            source = str(row["last_seen_run_id"] or "")
+            if source in {"manual_domain_intake", "csv_upload"}:
+                source_priority = 0
+            elif preferred_run_id and source == preferred_run_id:
+                source_priority = 1
+            else:
+                source_priority = 2
+            return source_priority, priority.get(row["domain"], 2)
+
+        ordered = sorted(rows, key=queue_tier)
         domains = [row["domain"] for row in ordered[:size]]
         if not domains:
             return []
@@ -757,7 +772,7 @@ def claim_batch(
             str(row["domain"])
             for row in conn.execute(
                 f"SELECT domain FROM domains WHERE domain IN ({placeholders}) "
-                "AND last_seen_run_id='ai_search_cache_reuse_v1'",
+                "AND last_seen_run_id IN ('manual_domain_intake','csv_upload')",
                 row_domains,
             ).fetchall()
         }
@@ -1798,6 +1813,7 @@ async def worker_loop(
             conn,
             int(profile["batch_size"]),
             allowed_extensions=active_extensions,
+            preferred_run_id=active_run_id,
         )
         if not domains:
             status = read_status()
