@@ -367,6 +367,7 @@ def test_zone_stats_report_retained_and_discarded_separately(monkeypatch):
             "crawler_status": "crawling_com",
             "crawler_phase": "preflight",
             "last_batch_domains_per_second": "42.5",
+            "rolling_domains_per_second": "30.25",
         },
     )
 
@@ -380,7 +381,8 @@ def test_zone_stats_report_retained_and_discarded_separately(monkeypatch):
     assert result["live"] == 300
     assert result["live_rate"] == 100.0
     assert result["relevance_rate"] == 20.0
-    assert result["batch_rate"] == 42.5
+    assert result["batch_rate"] == 30.25
+    assert result["instantaneous_batch_rate"] == 42.5
     assert result["investable"] == 4
     assert result["needs_review"] == 1
 

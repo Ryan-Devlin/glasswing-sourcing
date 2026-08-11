@@ -29,7 +29,7 @@ def test_react_app_has_every_primary_page_and_no_streamlit_dependency():
         "Relevant companies",
         "Investable deals",
         "Qualified candidates",
-        "Screening speed",
+            "Average screening speed",
     ):
         assert zone_metric in source
     assert "Deal-first mode · qualified-candidate storage only" not in source

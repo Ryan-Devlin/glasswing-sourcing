@@ -1438,12 +1438,25 @@ async def crawl_once(
             f"{type(exc).__name__}: {exc}"[:500],
         )
     elapsed = max(time.monotonic() - batch_started, 0.001)
+    instantaneous_rate = len(outcomes) / elapsed
+    try:
+        previous_row = conn.execute(
+            "SELECT value FROM worker_state WHERE key='rolling_domains_per_second'"
+        ).fetchone()
+        previous_rate = float(previous_row["value"]) if previous_row else instantaneous_rate
+    except (TypeError, ValueError, KeyError):
+        previous_rate = instantaneous_rate
+    # EWMA over roughly the latest several batches. DNS failures, retries,
+    # and cache-heavy batches have very different costs; exposing only the
+    # latest batch made healthy throughput look erratic in the dashboard.
+    rolling_rate = (0.2 * instantaneous_rate) + (0.8 * previous_rate)
     set_state(conn, "last_batch_seconds", f"{elapsed:.3f}")
     set_state(
         conn,
         "last_batch_domains_per_second",
-        f"{len(outcomes) / elapsed:.2f}",
+        f"{instantaneous_rate:.2f}",
     )
+    set_state(conn, "rolling_domains_per_second", f"{rolling_rate:.2f}")
     set_state(conn, "last_batch_retry_count", len(retry_domains))
     set_state(conn, "last_batch", counts)
     set_state(conn, "last_batch_tld", tld)

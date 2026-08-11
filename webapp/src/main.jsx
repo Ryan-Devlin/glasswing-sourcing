@@ -2064,7 +2064,7 @@ function SearchCorpusPage({ kind }) {
               <Metric label="Relevant companies" value={fmt(metrics.data.promising)} />
               <Metric label="Qualified candidates" value={fmt(metrics.data.retained)} />
               <Metric label="Investable deals" value={fmt(metrics.data.investable)} />
-              <Metric label="Screening speed" value={`${fmt(metrics.data.batch_rate || 0)}/sec`} />
+              <Metric label="Average screening speed" value={`${fmt(metrics.data.batch_rate || 0)}/sec`} />
             </>
           )}
         </div>

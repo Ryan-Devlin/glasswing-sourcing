@@ -1227,10 +1227,14 @@ def corpus_stats(kind: Literal["ai", "zone"]):
         recent_batch = {}
     try:
         batch_rate = round(
+            float(worker.get("rolling_domains_per_second", worker.get("last_batch_domains_per_second", 0)) or 0), 2
+        )
+        instantaneous_batch_rate = round(
             float(worker.get("last_batch_domains_per_second", 0) or 0), 2
         )
     except (TypeError, ValueError):
         batch_rate = 0
+        instantaneous_batch_rate = 0
     return {
         "available": details.get("queued_domains", 0),
         "pending": max(
@@ -1256,6 +1260,7 @@ def corpus_stats(kind: Literal["ai", "zone"]):
         "candidate_yield": round((retained / processed * 100) if processed else 0, 4),
         "investable_yield": round((investable / processed * 100) if processed else 0, 4),
         "batch_rate": batch_rate,
+        "instantaneous_batch_rate": instantaneous_batch_rate,
         "recent_batch": recent_batch,
         "updated_at": heartbeat,
         "last_deal_at": latest_deal_at,
