@@ -516,3 +516,73 @@ class StatusPersistenceTests(unittest.TestCase):
         self.assertTrue(first["is_new_domain"])
         self.assertTrue(second["is_repeat_event"])
         self.assertEqual(row["seen_count"], 2)
+
+
+class ClaudeAttemptThrottleTests(unittest.TestCase):
+    """Diligence must not pay a whole-corpus dump per screening batch.
+
+    Confirmed live: maybe_run_claude ran after every batch, and in Postgres
+    mode each run loads all ~99k classification rows (with record_json) into a
+    DataFrame to pick at most 10 domains. That pushed the worker to 1.76 GB
+    RSS, past its own 1.2 GB recycle threshold, and cut screening from
+    ~170/min to ~15/min. The hourly/daily call limits are the real spend
+    governor, so a timer costs nothing.
+    """
+
+    def setUp(self):
+        continuous_pipeline._last_claude_attempt = 0.0
+
+    def tearDown(self):
+        continuous_pipeline._last_claude_attempt = 0.0
+
+    def test_second_attempt_inside_the_interval_does_no_work(self):
+        calls = []
+
+        def fake_connect_db():
+            calls.append(1)
+            raise AssertionError("must not open a connection while throttled")
+
+        with patch.object(continuous_pipeline, "CLAUDE_ATTEMPT_INTERVAL_SECONDS", 60), \
+             patch.object(continuous_pipeline, "connect_db", fake_connect_db), \
+             patch.object(continuous_pipeline.time, "monotonic", return_value=1000.0):
+            # First attempt is allowed through, so it reaches connect_db and
+            # raises; that proves it was not throttled.
+            with self.assertRaises(AssertionError):
+                continuous_pipeline.maybe_run_claude(Path("batch.csv"))
+            # Second attempt in the same instant must short-circuit instead.
+            self.assertEqual(
+                continuous_pipeline.maybe_run_claude(Path("batch.csv")), 0
+            )
+        self.assertEqual(len(calls), 1)
+
+    def test_attempt_runs_again_once_the_interval_elapses(self):
+        attempts = []
+
+        def fake_connect_db():
+            attempts.append(1)
+            raise AssertionError("reached the real work")
+
+        with patch.object(continuous_pipeline, "CLAUDE_ATTEMPT_INTERVAL_SECONDS", 60), \
+             patch.object(continuous_pipeline, "connect_db", fake_connect_db):
+            with patch.object(continuous_pipeline.time, "monotonic", return_value=1000.0):
+                with self.assertRaises(AssertionError):
+                    continuous_pipeline.maybe_run_claude(Path("batch.csv"))
+            with patch.object(continuous_pipeline.time, "monotonic", return_value=1061.0):
+                with self.assertRaises(AssertionError):
+                    continuous_pipeline.maybe_run_claude(Path("batch.csv"))
+        self.assertEqual(len(attempts), 2)
+
+    def test_throttle_can_be_disabled(self):
+        attempts = []
+
+        def fake_connect_db():
+            attempts.append(1)
+            raise AssertionError("reached the real work")
+
+        with patch.object(continuous_pipeline, "CLAUDE_ATTEMPT_INTERVAL_SECONDS", 0), \
+             patch.object(continuous_pipeline, "connect_db", fake_connect_db), \
+             patch.object(continuous_pipeline.time, "monotonic", return_value=1000.0):
+            for _ in range(3):
+                with self.assertRaises(AssertionError):
+                    continuous_pipeline.maybe_run_claude(Path("batch.csv"))
+        self.assertEqual(len(attempts), 3)

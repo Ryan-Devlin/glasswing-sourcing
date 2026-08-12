@@ -105,6 +105,20 @@ CLAUDE_EXCEPTIONAL_SCORE = 90
 CLAUDE_BATCH_MAX = 10
 CLAUDE_HOURLY_LIMIT = 100
 CLAUDE_DAILY_LIMIT = 400
+# Diligence used to be attempted after every screening batch. In Postgres mode
+# each attempt loads the entire classifications table (99k rows, each carrying
+# a full record_json payload) into a DataFrame and writes it to CSV just to
+# choose at most CLAUDE_BATCH_MAX domains. Confirmed live: that drove the
+# worker to 1.76 GB RSS -- past its own 1.2 GB recycle threshold -- and cut
+# screening from ~170/min to ~15/min, because a ~7s batch of 24 domains paid
+# for a whole-corpus dump. The real governor on spend is the hourly/daily
+# limit above, not how often this is attempted, so attempting it on a timer
+# costs nothing: 10 calls per attempt once a minute still far exceeds the
+# 100/hour cap.
+CLAUDE_ATTEMPT_INTERVAL_SECONDS = max(
+    0.0, float(os.getenv("CLAUDE_ATTEMPT_INTERVAL_SECONDS", "60"))
+)
+_last_claude_attempt = 0.0
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -1180,6 +1194,15 @@ def diligenced_domains() -> set[str]:
 
 def maybe_run_claude(batch_path: Path) -> int:
     """Run optional Claude diligence without blocking Python screening."""
+    global _last_claude_attempt
+    now_monotonic = time.monotonic()
+    if (
+        CLAUDE_ATTEMPT_INTERVAL_SECONDS
+        and _last_claude_attempt
+        and now_monotonic - _last_claude_attempt < CLAUDE_ATTEMPT_INTERVAL_SECONDS
+    ):
+        return 0
+    _last_claude_attempt = now_monotonic
     conn = connect_db()
     try:
         allowance = claude_allowance(conn)
