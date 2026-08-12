@@ -726,3 +726,21 @@ class LiveFilterChangeTests(unittest.TestCase):
         )[0]
         after_refresh = loop.split("refreshed_extensions != active_extensions", 1)[1]
         self.assertIn("allowed_extensions=active_extensions", after_refresh)
+
+    def test_refresh_never_narrows_extensions_from_a_default_fallback(self):
+        """A config read missing the key must not shrink the live set.
+
+        selected_extensions() falls back to a bare [".ai"], so applying every
+        refresh unconditionally would let one incomplete shared-config read
+        silently drop every other extension the user had selected -- a hazard
+        that did not exist when this was read once at startup.
+        """
+        source = Path("continuous_pipeline.py").read_text(encoding="utf-8")
+        helper = source.split("def read_tunables(", 1)[1].split("\n    config =", 1)[0]
+        self.assertIn('current.get("selected_extensions")', helper)
+        # Must not fall back to the helper whose default is a bare [".ai"].
+        self.assertNotIn("            selected_extensions(),", helper)
+        # An empty/absent value yields an empty set, and the caller only applies
+        # a truthy refresh.
+        loop = source.split("async def worker_loop(", 1)[1]
+        self.assertIn("if refreshed_extensions and refreshed_extensions != active_extensions", loop)

@@ -1884,9 +1884,20 @@ async def worker_loop(
         one shared-config read per cache window.
         """
         current = load_run_config()
+        # Only treat extensions as refreshed when the config actually specifies
+        # them. selected_extensions() falls back to a bare [".ai"] default, so
+        # a transient or incomplete config read would otherwise *narrow* the
+        # live set from whatever the user chose down to .ai alone -- a risk that
+        # did not exist while this was read once at startup.
+        configured = current.get("selected_extensions")
+        if isinstance(configured, str):
+            configured = configured.split(",")
+        refreshed = (
+            normalize_extensions(list(configured)) if configured else set()
+        )
         return (
             current,
-            selected_extensions(),
+            refreshed,
             max(1, min(500, int(current.get(
                 "screening_batch_size",
                 os.getenv("STREAM_BATCH_SIZE", "200"),
