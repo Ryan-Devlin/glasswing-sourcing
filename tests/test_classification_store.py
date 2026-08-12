@@ -997,3 +997,49 @@ def test_top_claude_keeps_returns_only_highest_decisive_approvals(tmp_path):
     ], path=database)
     rows = classification_store.top_claude_keeps(path=database)
     assert [row["domain"] for row in rows] == ["best.ai", "lower.ai"]
+
+
+def test_domain_lookup_returns_original_classified_at_not_just_updated_at(tmp_path):
+    """The UI dates a deal by `classified_at || updated_at`.
+
+    Confirmed live: tracked cards for deals discovered weeks earlier all read
+    "Today" because this query returned only updated_at, which every re-screen
+    refreshes. classified_at is deliberately never overwritten on conflict, so
+    it is the only trustworthy discovery date -- it has to be selected.
+    """
+    database = tmp_path / "classifications.sqlite3"
+    discovered = "2026-07-01T12:00:00Z"
+    upsert_classifications(
+        pd.DataFrame([
+            {
+                "domain": "old-deal.ai",
+                "company_name": "Old Deal",
+                "routing_bucket": "priority",
+                "fit_score": 74,
+                "observed_at": discovered,
+            }
+        ]),
+        path=database,
+    )
+    first = query_classifications_by_domains(["old-deal.ai"], path=database)
+    assert first[0]["classified_at"] == discovered
+
+    # A later re-screen must move updated_at but never classified_at.
+    upsert_classifications(
+        pd.DataFrame([
+            {
+                "domain": "old-deal.ai",
+                "company_name": "Old Deal",
+                "routing_bucket": "priority",
+                "fit_score": 74,
+                "observed_at": "2026-08-11T23:00:00Z",
+            }
+        ]),
+        path=database,
+    )
+
+    rows = query_classifications_by_domains(["old-deal.ai"], path=database)
+    assert len(rows) == 1
+    assert "classified_at" in rows[0], "UI cannot date the deal without this"
+    assert rows[0]["classified_at"] == discovered, "discovery date was overwritten"
+    assert rows[0]["updated_at"] > discovered

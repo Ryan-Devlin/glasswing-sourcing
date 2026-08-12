@@ -1422,9 +1422,15 @@ def query_classifications_by_domains(
             batch = normalized[start:start + 800]
             marks = ",".join("?" for _ in batch)
             rows.extend(conn.execute(
+                # classified_at must be selected, not just updated_at: the UI
+                # dates a deal by `classified_at || updated_at`, and
+                # updated_at is refreshed by every re-screen, so omitting
+                # classified_at made every tracked deal read "Today" no
+                # matter how long ago it was actually discovered.
                 "SELECT domain,company_name,final_url,description,"
                 "routing_bucket,routing_reason,fit_score,priority_score,"
-                "thesis_pillar,content_source,manual_override,manual_override_target,updated_at "
+                "thesis_pillar,content_source,manual_override,"
+                "manual_override_target,classified_at,updated_at "
                 f"FROM classifications WHERE domain IN ({marks})",
                 batch,
             ).fetchall())
