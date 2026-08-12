@@ -115,10 +115,22 @@ CLAUDE_DAILY_LIMIT = 400
 # limit above, not how often this is attempted, so attempting it on a timer
 # costs nothing: 10 calls per attempt once a minute still far exceeds the
 # 100/hour cap.
+#
+# 60s was not enough: the attempt itself costs roughly that long, because
+# claude_classifier's eligibility gate is max(stored score, a LIVE rescore of
+# each row's stored website copy), so it re-runs score_text() over the whole
+# corpus. At a 60s interval that ran back-to-back and screening never got the
+# worker. 300s keeps full diligence throughput -- 10 calls per attempt x 12
+# attempts/hour = 120, still above the 100/hour cap -- at a fraction of the
+# duty cycle.
 CLAUDE_ATTEMPT_INTERVAL_SECONDS = max(
-    0.0, float(os.getenv("CLAUDE_ATTEMPT_INTERVAL_SECONDS", "60"))
+    0.0, float(os.getenv("CLAUDE_ATTEMPT_INTERVAL_SECONDS", "300"))
 )
 _last_claude_attempt = 0.0
+# Screening must never wait on a diligence attempt. Keep a reference to the
+# in-flight task so it is not garbage collected mid-run and so a slow attempt
+# can never overlap itself.
+_claude_task: "asyncio.Task | None" = None
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -1327,6 +1339,53 @@ def maybe_run_claude(batch_path: Path) -> int:
     finally:
         conn.close()
 
+
+async def _claude_attempt_and_record() -> None:
+    """Run one diligence attempt off the screening critical path."""
+    claude_calls = await asyncio.to_thread(maybe_run_claude, Path("unused.csv"))
+    if not claude_calls:
+        return
+    status = read_status()
+    automatic_total = int(
+        status.get("automatic_claude_calls", 0) or 0
+    ) + claude_calls
+    manual_total = int(status.get("manual_claude_calls", 0) or 0)
+    write_status(
+        automatic_claude_calls=automatic_total,
+        manual_claude_calls=manual_total,
+        claude_calls=automatic_total + manual_total,
+        updated_at=utc_now(),
+    )
+
+
+def start_claude_attempt() -> None:
+    """Kick off a diligence attempt without making screening wait for it.
+
+    Screening used to `await` this between batches. Because one attempt
+    re-scores the whole corpus (see CLAUDE_ATTEMPT_INTERVAL_SECONDS), that
+    handed the worker to diligence and starved intake -- confirmed live at
+    ~7 domains/minute screened against ~100/minute arriving. Diligence is
+    rate-limited work with no deadline; screening is not, so it gets the
+    worker and this runs alongside it.
+    """
+    global _claude_task
+    if _claude_task is not None and not _claude_task.done():
+        return
+    if _claude_task is not None and _claude_task.done():
+        # Surface a crashed attempt instead of losing it to an unretrieved
+        # task exception.
+        exc = _claude_task.exception() if not _claude_task.cancelled() else None
+        if exc is not None:
+            write_status(
+                claude_warning=(
+                    "Claude diligence attempt failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )[:500],
+                updated_at=utc_now(),
+            )
+    _claude_task = asyncio.create_task(_claude_attempt_and_record())
+
+
 async def listener(
     conn: sqlite3.Connection,
     stop: asyncio.Event,
@@ -2109,21 +2168,8 @@ async def worker_loop(
             previous_processed = processed
             previous_rate_time = now
 
-            claude_calls = await asyncio.to_thread(
-                maybe_run_claude,
-                batch_path,
-            )
-            status = read_status()
-            automatic_total = int(
-                status.get("automatic_claude_calls", 0) or 0
-            ) + claude_calls
-            manual_total = int(
-                status.get("manual_claude_calls", 0) or 0
-            )
+            start_claude_attempt()
             write_status(
-                automatic_claude_calls=automatic_total,
-                manual_claude_calls=manual_total,
-                claude_calls=automatic_total + manual_total,
                 queue=queue_counts(conn),
                 queue_by_extension=extension_counts(conn),
                 stage=pipeline_idle_stage(),

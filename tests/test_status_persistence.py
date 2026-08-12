@@ -1,3 +1,4 @@
+import asyncio
 import json
 import sqlite3
 import tempfile
@@ -586,3 +587,103 @@ class ClaudeAttemptThrottleTests(unittest.TestCase):
                 with self.assertRaises(AssertionError):
                     continuous_pipeline.maybe_run_claude(Path("batch.csv"))
         self.assertEqual(len(attempts), 3)
+
+
+class ClaudeAttemptDecouplingTests(unittest.TestCase):
+    """Screening must not wait on a diligence attempt.
+
+    Confirmed live: the loop awaited maybe_run_claude between batches. One
+    attempt re-scores the whole corpus (claude_classifier's gate is
+    max(stored score, live rescore of every row's website copy)), so it cost
+    ~60s and 1.7 GB, and screening ran at ~7 domains/min against ~100/min
+    arriving with the pending queue growing 67k -> 120k.
+    """
+
+    def setUp(self):
+        continuous_pipeline._claude_task = None
+
+    def tearDown(self):
+        continuous_pipeline._claude_task = None
+
+    def test_worker_loop_does_not_await_the_diligence_attempt(self):
+        source = Path("continuous_pipeline.py").read_text(encoding="utf-8")
+        self.assertIn("start_claude_attempt()", source)
+        self.assertNotIn("await asyncio.to_thread(\n                maybe_run_claude", source)
+
+    def test_attempt_runs_in_the_background_and_does_not_block(self):
+        started = []
+        finished = []
+
+        async def scenario():
+            async def slow_attempt():
+                started.append(True)
+                await asyncio.sleep(0.2)
+                finished.append(True)
+
+            with patch.object(
+                continuous_pipeline, "_claude_attempt_and_record", slow_attempt
+            ):
+                continuous_pipeline.start_claude_attempt()
+                # Control returns immediately; the attempt is still running.
+                self.assertEqual(finished, [])
+                self.assertIsNotNone(continuous_pipeline._claude_task)
+                await continuous_pipeline._claude_task
+
+        asyncio.run(scenario())
+        self.assertEqual(started, [True])
+        self.assertEqual(finished, [True])
+
+    def test_a_slow_attempt_never_overlaps_itself(self):
+        runs = []
+
+        async def scenario():
+            async def slow_attempt():
+                runs.append(True)
+                await asyncio.sleep(0.2)
+
+            with patch.object(
+                continuous_pipeline, "_claude_attempt_and_record", slow_attempt
+            ):
+                continuous_pipeline.start_claude_attempt()
+                for _ in range(5):
+                    continuous_pipeline.start_claude_attempt()
+                await continuous_pipeline._claude_task
+
+        asyncio.run(scenario())
+        self.assertEqual(len(runs), 1, "a second attempt started while one was live")
+
+    def test_a_crashed_attempt_is_surfaced_not_swallowed(self):
+        warnings = []
+
+        async def scenario():
+            async def boom():
+                raise RuntimeError("diligence exploded")
+
+            async def benign():
+                return None
+
+            with patch.object(
+                continuous_pipeline,
+                "write_status",
+                side_effect=lambda **kw: warnings.append(kw),
+            ):
+                with patch.object(
+                    continuous_pipeline, "_claude_attempt_and_record", boom
+                ):
+                    continuous_pipeline.start_claude_attempt()
+                    task = continuous_pipeline._claude_task
+                    with self.assertRaises(RuntimeError):
+                        await task
+                # The next attempt reports the previous failure rather than
+                # letting it vanish as an unretrieved task exception.
+                with patch.object(
+                    continuous_pipeline, "_claude_attempt_and_record", benign
+                ):
+                    continuous_pipeline.start_claude_attempt()
+                    await continuous_pipeline._claude_task
+
+        asyncio.run(scenario())
+        self.assertTrue(
+            any("diligence exploded" in str(w.get("claude_warning", "")) for w in warnings),
+            warnings,
+        )
