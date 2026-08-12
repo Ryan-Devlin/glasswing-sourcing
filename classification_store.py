@@ -1552,8 +1552,16 @@ def automated_exclusion_reason_counts(
                 + " GROUP BY reason ORDER BY total DESC",
                 params,
             ).fetchall()
-    except (sqlite3.OperationalError, PostgresError):
-        return {}
+    except Exception as exc:
+        # Only a genuinely absent table means "nothing discarded". Anything
+        # else -- a pool timeout, a connection failure -- must surface rather
+        # than be reported as a confident zero. psycopg_pool's PoolTimeout
+        # subclasses psycopg.Error, so a broad except here silently turned an
+        # unreachable database into "0 domains discarded", which is exactly the
+        # kind of reassuring lie this page exists to eliminate.
+        if _missing_relation(exc, "automated_exclusions"):
+            return {}
+        raise
     return {str(row["reason"]): int(row["total"]) for row in rows}
 
 
@@ -1591,8 +1599,10 @@ def query_automated_exclusions(
                 + " ORDER BY excluded_at DESC, domain LIMIT ? OFFSET ?",
                 params,
             ).fetchall()
-    except (sqlite3.OperationalError, PostgresError):
-        return []
+    except Exception as exc:
+        if _missing_relation(exc, "automated_exclusions"):
+            return []
+        raise
     return [dict(row) for row in rows]
 
 

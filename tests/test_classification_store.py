@@ -1106,3 +1106,33 @@ def test_exclusion_audit_is_safe_before_the_table_exists(tmp_path):
     missing = tmp_path / "not-created-yet.sqlite3"
     assert classification_store.automated_exclusion_reason_counts(path=missing) == {}
     assert classification_store.query_automated_exclusions(path=missing) == []
+
+
+def test_exclusion_audit_surfaces_real_failures_instead_of_reporting_zero(tmp_path):
+    """A broken database must not read as "nothing was discarded".
+
+    psycopg_pool's PoolTimeout subclasses psycopg.Error, so catching that
+    broadly turned an unreachable database into a confident "0 discarded" --
+    the exact reassuring lie this page exists to eliminate. Only a genuinely
+    missing table counts as empty.
+    """
+    import psycopg_pool
+
+    database = tmp_path / "classifications.sqlite3"
+    classification_store.record_automated_exclusions(
+        [{"domain": "x.ai", "routing_reason": "insufficient_venture_quality_evidence"}],
+        path=database,
+    )
+
+    def exploding_connect(*_args, **_kwargs):
+        raise psycopg_pool.PoolTimeout("couldn't get a connection after 10.00 sec")
+
+    original = classification_store.connect_store
+    classification_store.connect_store = exploding_connect
+    try:
+        with pytest.raises(psycopg_pool.PoolTimeout):
+            classification_store.automated_exclusion_reason_counts(path=database)
+        with pytest.raises(psycopg_pool.PoolTimeout):
+            classification_store.query_automated_exclusions(path=database)
+    finally:
+        classification_store.connect_store = original
