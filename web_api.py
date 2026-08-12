@@ -356,8 +356,19 @@ def _safe_corpus_rows(rows: list[dict]) -> list[dict]:
     return safe
 
 
+# Only these sources are trusted human truth. Claude decisions are signals, so
+# a Claude-reviewed company still needs a human call and its action buttons must
+# stay live. Confirmed live: training_labels held 1,664 claude-sourced rows
+# against 150 human ones, and 1,647 claude-labelled domains had no human
+# decision at all -- reading that table unfiltered locked every one of them as
+# though somebody had already decided. classifications.manual_override is not a
+# reliable stand-in either: 47 rows carry it while only 34 human decisions
+# exist, so 13 were set by automation.
+HUMAN_LABEL_SOURCES = ("human", "glasswing_portfolio")
+
+
 def _manual_decision_state(domains: list[str]) -> dict[str, dict]:
-    """Which of these domains a human has already bucketed, and how."""
+    """Which of these domains a *human* has already bucketed, and how."""
     wanted = [stable_domain(domain) for domain in domains if stable_domain(domain)]
     if not wanted:
         return {}
@@ -367,21 +378,21 @@ def _manual_decision_state(domains: list[str]) -> dict[str, dict]:
             for start in range(0, len(wanted), 500):
                 batch = wanted[start:start + 500]
                 marks = ",".join("?" for _ in batch)
+                # An explicit human bucket movement is the canonical record.
                 for row in conn.execute(
-                    "SELECT domain,manual_override,manual_override_target "
-                    f"FROM classifications WHERE domain IN ({marks})",
+                    "SELECT domain,target_label FROM manual_decisions "
+                    f"WHERE domain IN ({marks})",
                     batch,
                 ).fetchall():
                     state[str(row["domain"])] = {
-                        "manual_override": int(row["manual_override"] or 0),
-                        "manual_override_target": str(
-                            row["manual_override_target"] or ""
-                        ),
+                        "manual_override": 1,
+                        "manual_override_target": str(row["target_label"] or ""),
                     }
+                source_marks = ",".join("?" for _ in HUMAN_LABEL_SOURCES)
                 for row in conn.execute(
                     "SELECT domain,label FROM training_labels "
-                    f"WHERE domain IN ({marks})",
-                    batch,
+                    f"WHERE source IN ({source_marks}) AND domain IN ({marks})",
+                    [*HUMAN_LABEL_SOURCES, *batch],
                 ).fetchall():
                     state.setdefault(str(row["domain"]), {})["label"] = str(
                         row["label"] or ""
@@ -616,13 +627,17 @@ def global_search(q: str = Query(min_length=1, max_length=200)):
     # a human already bucketed the domain, and whether Claude has reviewed or
     # queued it. Without this the buttons render enabled on a company that was
     # already decided, and acting on one would silently overwrite that call.
-    decided = _manual_decision_state([row.get("domain", "") for row in rows])
+    domains = [row.get("domain", "") for row in rows]
+    decided = _manual_decision_state(domains)
+    tracked = tracked_domain_set(domains)
     for row in rows:
-        state = decided.get(stable_domain(row.get("domain", "")), {})
+        domain = stable_domain(row.get("domain", ""))
+        state = decided.get(domain, {})
         row["manual_override"] = state.get("manual_override", 0)
         row["manual_override_target"] = state.get("manual_override_target", "")
         row["label"] = state.get("label", "")
         row["fit_score"] = row.get("fit_score", row.get("score", 0))
+        row["tracked"] = domain in tracked
     return {"rows": _with_claude(rows), "total": len(merged)}
 
 

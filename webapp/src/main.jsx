@@ -880,6 +880,11 @@ function GlobalSearchPage() {
               { key: "source", label: "Source", render: (row) => <span className="pill">{row.source}</span> },
               { key: "description", label: "Description" },
               { key: "updated", label: "Updated" },
+              {
+                key: "track",
+                label: "Track",
+                render: (row) => <TrackButton row={row} onChanged={refresh} />,
+              },
             ]}
           />
         </section>

@@ -690,3 +690,45 @@ def test_unreadable_pages_are_never_persisted_to_a_bucket():
     assert "& ~unreadable" in section
     # ...and from what gets purged, so a bad fetch cannot delete a good record.
     assert "& ~unreadable\n    )" in section
+
+
+def test_only_human_sources_count_as_an_existing_decision():
+    """Claude decisions are signals, never human truth.
+
+    Confirmed live: training_labels held 1,664 claude-sourced rows against 150
+    human ones, and 1,647 claude-labelled domains had no human decision. Reading
+    that table unfiltered greyed out the Yes/No/Reject actions on all of them,
+    so a Claude-reviewed company could never receive the human call it still
+    needed.
+    """
+    assert web_api.HUMAN_LABEL_SOURCES == ("human", "glasswing_portfolio")
+    source = web_api.__file__
+    from pathlib import Path
+
+    body = Path(source).read_text(encoding="utf-8")
+    fn = body.split("def _manual_decision_state(", 1)[1].split("\ndef ", 1)[0]
+    # The canonical human record drives manual_override, not the automation-set
+    # column on classifications.
+    assert "FROM manual_decisions" in fn
+    assert "manual_override" in fn
+    assert "source IN (" in fn
+    # Must not read the classifications override column, which automation sets.
+    assert "manual_override,manual_override_target " not in fn
+
+
+def test_search_rows_expose_tracking_state():
+    from pathlib import Path
+
+    body = Path(web_api.__file__).read_text(encoding="utf-8")
+    search = body.split("def global_search(", 1)[1].split("\n@app.", 1)[0]
+    assert "tracked_domain_set(" in search
+    assert '"tracked"' in search
+
+
+def test_search_page_offers_a_track_action():
+    from pathlib import Path
+
+    source = Path("webapp/src/main.jsx").read_text(encoding="utf-8")
+    page = source.split("function GlobalSearchPage()", 1)[1].split("\nfunction ", 1)[0]
+    assert "<TrackButton" in page
+    assert 'label: "Track"' in page
