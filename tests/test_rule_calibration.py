@@ -1,5 +1,7 @@
 import json
 import unittest
+
+import filter as screening_filter
 from pathlib import Path
 
 from filter import (
@@ -665,3 +667,57 @@ class InaccessiblePageRoutingTests(unittest.TestCase):
         # The fix must not sweep real, reachable companies into ghost.
         bucket, _ = self._route(page_status=200, score=55)
         self.assertNotEqual(bucket, "ghost")
+
+
+class BlockedSiteRetryTests(unittest.TestCase):
+    """"We were blocked" must never mean "not a company".
+
+    Confirmed live: of ~5,400 domains discarded in 90 minutes, ~450 were HTTP
+    errors and 403 was the single largest code -- a Cloudflare/WAF challenge
+    aimed at our own scraper. Certificates are issued before a site goes live,
+    so these skew toward the freshest startups in the feed. Tombstoning them as
+    automated exclusions stopped them ever being crawled again.
+    """
+
+    def test_blocked_and_server_error_statuses_are_retryable(self):
+        for status in (401, 402, 403, 407, 408, 409, 425, 429,
+                       500, 502, 503, 520, 521, 522, 523, 526, 530, 599):
+            with self.subTest(status=status):
+                self.assertTrue(
+                    screening_filter.is_retryable_inaccessible_reason(
+                        f"inaccessible_http_{status}"
+                    ),
+                    f"{status} should be retried, not permanently excluded",
+                )
+
+    def test_genuinely_absent_pages_are_not_retryable(self):
+        # 404/410 mean the server answered clearly: nothing is there.
+        for status in (404, 410, 400, 451):
+            with self.subTest(status=status):
+                self.assertFalse(
+                    screening_filter.is_retryable_inaccessible_reason(
+                        f"inaccessible_http_{status}"
+                    )
+                )
+
+    def test_non_http_reasons_are_never_treated_as_retryable(self):
+        for reason in (
+            "",
+            None,
+            "parked_or_for_sale",
+            "agency_or_consultancy",
+            "ghost_or_inaccessible_site",
+            "inaccessible_site",
+            "inaccessible_http_",
+            "inaccessible_http_abc",
+        ):
+            with self.subTest(reason=reason):
+                self.assertFalse(
+                    screening_filter.is_retryable_inaccessible_reason(reason)
+                )
+
+    def test_worker_requeues_blocked_domains_instead_of_closing_them_out(self):
+        source = Path("continuous_pipeline.py").read_text(encoding="utf-8")
+        self.assertIn('screening_stats.get("retry_domains", [])', source)
+        # A retried domain must not also be counted as successfully screened.
+        self.assertIn("and domain not in retry_domains", source)

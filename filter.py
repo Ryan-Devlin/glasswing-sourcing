@@ -3399,6 +3399,31 @@ def diligence_rank_score(
     return max(0, int(score))
 
 
+# HTTP statuses that mean "we could not read this site", never "this is not a
+# company". 403 is the single most common failure in live CertStream traffic --
+# that is a Cloudflare/WAF challenge aimed at our scraper, not a verdict on the
+# business. 401/407 are auth walls, 408/429 are rate limiting, and every 5xx
+# (including Cloudflare's own 520-530 origin errors) is a server-side fault on
+# a site that is very often mid-deploy. Certificates are issued *before* a site
+# goes live, so these are disproportionately the freshest startups in the feed.
+# Treat them as unknown and retry with backoff instead of tombstoning them as
+# permanently excluded.
+RETRYABLE_FETCH_STATUSES = frozenset({401, 402, 403, 407, 408, 409, 425, 429})
+
+
+def is_retryable_inaccessible_reason(reason: object) -> bool:
+    """Whether a routing reason means "unreadable now", not "not a company"."""
+    text = str(reason or "")
+    prefix = "inaccessible_http_"
+    if not text.startswith(prefix):
+        return False
+    try:
+        status = int(text[len(prefix):])
+    except ValueError:
+        return False
+    return status in RETRYABLE_FETCH_STATUSES or 500 <= status <= 599
+
+
 HARD_DENIAL_REASONS = {
     "parked_or_for_sale",
     "generic_hosting_or_registrar_placeholder",
@@ -4541,8 +4566,23 @@ def persist_screening_output(output: pd.DataFrame) -> dict[str, int]:
     )
     denied_mask = output["routing_bucket"].eq("reject")
     manual_denied = output[denied_mask & manually_protected].copy()
-    disposable = automated_discard_mask(output) & ~manually_protected
+    # A site we were blocked from reading must not be tombstoned as a permanent
+    # automated exclusion -- that stops it ever being crawled again. Hold it
+    # back from the purge and report it so the queue can retry it with backoff.
+    retryable_inaccessible = output.get(
+        "routing_reason", pd.Series("", index=output.index)
+    ).map(is_retryable_inaccessible_reason)
+    disposable = (
+        automated_discard_mask(output)
+        & ~manually_protected
+        & ~retryable_inaccessible
+    )
     automated_discarded = output[disposable].copy()
+    retry_domains = [
+        stable_domain(domain)
+        for domain in output.loc[retryable_inaccessible, "domain"].tolist()
+        if stable_domain(domain)
+    ]
     persistable_output = output.loc[
         ~output.index.isin(automated_discarded.index)
     ].copy()
@@ -4677,6 +4717,8 @@ def persist_screening_output(output: pd.DataFrame) -> dict[str, int]:
         ).sum()),
         "ghost": int(output["routing_bucket"].eq("ghost").sum()),
         "storage_discarded": len(automated_discarded),
+        "retry_domains": retry_domains,
+        "blocked_or_erroring": len(retry_domains),
         "shortlist_master": len(shortlist_master),
         "approved_master": len(approved_master),
         "denied_master": len(denied_master),

@@ -2086,8 +2086,18 @@ async def worker_loop(
             timed_out_domains = set(
                 screening_stats.get("timed_out_domains", [])
             )
+            # A WAF challenge, auth wall, rate limit, or 5xx means we never
+            # got to see the site -- that is not a verdict on the company, so
+            # it belongs back in the retry queue rather than being closed out
+            # as successfully screened. 403 alone is the most common failure in
+            # live CertStream traffic.
+            retry_domains = set(
+                screening_stats.get("retry_domains", [])
+            ) - timed_out_domains
             succeeded_domains = [
-                domain for domain in domains if domain not in timed_out_domains
+                domain for domain in domains
+                if domain not in timed_out_domains
+                and domain not in retry_domains
             ]
             if succeeded_domains:
                 mark_success(conn, succeeded_domains)
@@ -2096,6 +2106,13 @@ async def worker_loop(
                     conn,
                     [domain for domain in domains if domain in timed_out_domains],
                     "TimeoutError: fetch timed out",
+                    max_attempts,
+                )
+            if retry_domains:
+                mark_failure(
+                    conn,
+                    [domain for domain in domains if domain in retry_domains],
+                    "Unreadable: blocked or server error, retrying",
                     max_attempts,
                 )
 
