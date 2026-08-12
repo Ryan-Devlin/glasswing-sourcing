@@ -758,19 +758,24 @@ function HomePage() {
 }
 
 function GlobalSearchPage() {
+  const { admin, requestLogin } = useAdmin();
   const [query, setQuery] = useState("");
   const [rows, setRows] = useState([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [searched, setSearched] = useState(false);
-  const submit = async (event) => {
-    event.preventDefault();
-    if (!query.trim()) return;
+  const [toast, setToast] = useState("");
+  const [label, setLabel] = useState(null);
+  const [claudeBusy, setClaudeBusy] = useState("");
+  const [claudeOverride, setClaudeOverride] = useState(null);
+  const lastQuery = useRef("");
+
+  const runSearch = async (text) => {
     setBusy(true);
     setError("");
     setSearched(true);
     try {
-      const result = await api(`/api/search?q=${encodeURIComponent(query.trim())}`);
+      const result = await api(`/api/search?q=${encodeURIComponent(text)}`);
       setRows(Array.isArray(result.rows) ? result.rows : []);
     } catch {
       setError("Search was interrupted. Please try again.");
@@ -778,6 +783,64 @@ function GlobalSearchPage() {
       setBusy(false);
     }
   };
+  const submit = async (event) => {
+    event.preventDefault();
+    if (!query.trim()) return;
+    lastQuery.current = query.trim();
+    await runSearch(lastQuery.current);
+  };
+  // Re-run the last search after an action so the row reflects its new state
+  // (bucketed rows grey out) instead of going stale until the next search.
+  const refresh = () => lastQuery.current && runSearch(lastQuery.current);
+  const flash = (text, ms = 2500) => {
+    setToast(text);
+    setTimeout(() => setToast(""), ms);
+  };
+
+  const save = (row, chosen) => setLabel({ domain: row.domain, label: chosen });
+  const reject = async (row) => {
+    if (!admin) return requestLogin();
+    await api("/api/labels", {
+      method: "POST",
+      body: JSON.stringify({
+        domain: row.domain,
+        label: "no",
+        rating: Number(row.fit_score || row.score || 0),
+        reason: "manual_reject",
+      }),
+    });
+    flash(`${row.domain} moved to Hard Denied and NO`);
+    refresh();
+  };
+  const sendClaude = async (row, overrideDailyLimit = false) => {
+    if (!admin) return requestLogin();
+    setClaudeBusy(row.domain);
+    try {
+      const response = await requestClaudeReview(row.domain, overrideDailyLimit);
+      if (overrideDailyLimit) setClaudeOverride(null);
+      if (response.status === "already_reviewed") {
+        flash(`${row.domain} was already reviewed by Claude`);
+      } else {
+        setToast(`${row.domain} queued for Claude`);
+        const decision = await waitForClaude(row.domain, (status) =>
+          setToast(
+            `${row.domain}: ${status === "reviewing" ? "Claude is reviewing…" : "queued for Claude"}`,
+          ),
+        );
+        flash(
+          `${row.domain}: Claude ${decision.decision} · score ${decision.fit_score}`,
+          5000,
+        );
+      }
+      refresh();
+    } catch (err) {
+      if (err.status === 429) setClaudeOverride(row);
+      else flash(`Claude could not review ${row.domain}: ${err.message}`, 5000);
+    } finally {
+      setClaudeBusy("");
+    }
+  };
+
   return (
     <>
       <header>
@@ -804,20 +867,46 @@ function GlobalSearchPage() {
             <h2>Results</h2>
             <span className="pill">{fmt(rows.length)} matches</span>
           </div>
-          <Table rows={rows} columns={[
-            { key: "company", label: "Company" },
-            { key: "domain", label: "Domain", render: (row) => <a href={row.url} target="_blank" rel="noreferrer">{row.domain}</a> },
-            { key: "score", label: "Score" },
-            { key: "source", label: "Source", render: (row) => <span className="pill">{row.source}</span> },
-            { key: "description", label: "Description" },
-            { key: "updated", label: "Updated" },
-          ]} />
+          <Table
+            rows={rows}
+            claudeBusy={claudeBusy}
+            onLabel={admin ? save : (_, chosen) => requestLogin(chosen)}
+            onReject={admin ? reject : requestLogin}
+            onClaude={admin ? sendClaude : requestLogin}
+            columns={[
+              { key: "company", label: "Company" },
+              { key: "domain", label: "Domain", render: (row) => <a href={row.url} target="_blank" rel="noreferrer">{row.domain}</a> },
+              { key: "score", label: "Score" },
+              { key: "source", label: "Source", render: (row) => <span className="pill">{row.source}</span> },
+              { key: "description", label: "Description" },
+              { key: "updated", label: "Updated" },
+            ]}
+          />
         </section>
       ) : (
         <div className="search-welcome">
           <strong>One search across the full sourcing platform</strong>
           <span>Try a domain, company name, technology, market, product, or customer type.</span>
         </div>
+      )}
+      <Toast>{toast}</Toast>
+      {label && (
+        <LabelModal
+          target={label}
+          onClose={() => setLabel(null)}
+          onSaved={() => {
+            flash(`${label.domain} saved to ${label.label.toUpperCase()}`);
+            setLabel(null);
+            refresh();
+          }}
+        />
+      )}
+      {claudeOverride && (
+        <ClaudeOverrideModal
+          domain={claudeOverride.domain}
+          onClose={() => setClaudeOverride(null)}
+          onOverride={() => sendClaude(claudeOverride, true)}
+        />
       )}
     </>
   );

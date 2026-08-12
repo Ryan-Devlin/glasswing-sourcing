@@ -113,3 +113,40 @@ def test_compiled_react_assets_exist():
     assert Path("webapp/dist/index.html").exists()
     assert any(Path("webapp/dist/assets").glob("*.js"))
     assert any(Path("webapp/dist/assets").glob("*.css"))
+
+
+def test_search_results_carry_the_same_review_actions():
+    """Search must be actionable, not just a lookup.
+
+    The Table component already renders Yes/No/Reject/Send-to-Claude whenever
+    the handlers are supplied, so the search page wires the same ones the
+    review tables use rather than duplicating that UI.
+    """
+    source = Path("webapp/src/main.jsx").read_text(encoding="utf-8")
+    page = source.split("function GlobalSearchPage()", 1)[1].split(
+        "\nfunction ", 1
+    )[0]
+    for handler in ("onLabel=", "onReject=", "onClaude="):
+        assert handler in page, handler
+    # Admin gating must match the review tables: no silent no-op for guests.
+    assert "admin ?" in page
+    assert "requestLogin" in page
+    # Acting on a row has to refresh it, or the row keeps showing stale state.
+    assert "const refresh = () =>" in page
+    # The modals the handlers depend on must be mounted on this page too.
+    assert "<LabelModal" in page
+    assert "<ClaudeOverrideModal" in page
+
+
+def test_search_rows_include_the_state_the_action_buttons_read():
+    """Buttons key off bucket/label/Claude state, so the API must supply it.
+
+    Without this the actions render enabled on an already-decided company and
+    acting on one would silently overwrite a human call.
+    """
+    api_source = Path("web_api.py").read_text(encoding="utf-8")
+    search = api_source.split("def global_search(", 1)[1].split("\n@app.", 1)[0]
+    assert "_manual_decision_state(" in search
+    assert "_with_claude(" in search
+    for field in ("manual_override", "manual_override_target", "label", "fit_score"):
+        assert field in search, field

@@ -356,6 +356,43 @@ def _safe_corpus_rows(rows: list[dict]) -> list[dict]:
     return safe
 
 
+def _manual_decision_state(domains: list[str]) -> dict[str, dict]:
+    """Which of these domains a human has already bucketed, and how."""
+    wanted = [stable_domain(domain) for domain in domains if stable_domain(domain)]
+    if not wanted:
+        return {}
+    state: dict[str, dict] = {}
+    try:
+        with connect_store(read_only=True) as conn:
+            for start in range(0, len(wanted), 500):
+                batch = wanted[start:start + 500]
+                marks = ",".join("?" for _ in batch)
+                for row in conn.execute(
+                    "SELECT domain,manual_override,manual_override_target "
+                    f"FROM classifications WHERE domain IN ({marks})",
+                    batch,
+                ).fetchall():
+                    state[str(row["domain"])] = {
+                        "manual_override": int(row["manual_override"] or 0),
+                        "manual_override_target": str(
+                            row["manual_override_target"] or ""
+                        ),
+                    }
+                for row in conn.execute(
+                    "SELECT domain,label FROM training_labels "
+                    f"WHERE domain IN ({marks})",
+                    batch,
+                ).fetchall():
+                    state.setdefault(str(row["domain"]), {})["label"] = str(
+                        row["label"] or ""
+                    )
+    except Exception:
+        # Search must still return results if this enrichment is unavailable;
+        # the buttons then fall back to their enabled state.
+        return state
+    return state
+
+
 def _with_claude(rows: list[dict]) -> list[dict]:
     decisions: dict[str, dict] = {}
     queue_statuses: dict[str, str] = {}
@@ -573,7 +610,20 @@ def global_search(q: str = Query(min_length=1, max_length=200)):
             existing["description"] = row["description"]
         if not existing.get("score") and row.get("score"):
             existing["score"] = row["score"]
-    return {"rows": list(merged.values()), "total": len(merged)}
+    rows = list(merged.values())
+    # Search results carry the same Yes/No/Reject/Send-to-Claude actions as the
+    # review tables, so they need the same state those buttons key off: whether
+    # a human already bucketed the domain, and whether Claude has reviewed or
+    # queued it. Without this the buttons render enabled on a company that was
+    # already decided, and acting on one would silently overwrite that call.
+    decided = _manual_decision_state([row.get("domain", "") for row in rows])
+    for row in rows:
+        state = decided.get(stable_domain(row.get("domain", "")), {})
+        row["manual_override"] = state.get("manual_override", 0)
+        row["manual_override_target"] = state.get("manual_override_target", "")
+        row["label"] = state.get("label", "")
+        row["fit_score"] = row.get("fit_score", row.get("score", 0))
+    return {"rows": _with_claude(rows), "total": len(merged)}
 
 
 @app.get("/api/classifications")
