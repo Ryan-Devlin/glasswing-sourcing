@@ -744,3 +744,21 @@ class LiveFilterChangeTests(unittest.TestCase):
         # a truthy refresh.
         loop = source.split("async def worker_loop(", 1)[1]
         self.assertIn("if refreshed_extensions and refreshed_extensions != active_extensions", loop)
+
+    def test_idle_loop_closes_its_read_only_transaction(self):
+        """A quiet stretch must not hold a transaction open.
+
+        psycopg runs with autocommit off, so the queue/extension count SELECTs
+        at the top of each tick open a transaction that nothing commits. Across
+        idle ticks that one transaction stayed open long enough for
+        idle_in_transaction_session_timeout to terminate the worker's own
+        connection -- surfacing as "terminating connection due to
+        idle-in-transaction timeout" and then an SSL connection closed
+        unexpectedly on the next use.
+        """
+        source = Path("continuous_pipeline.py").read_text(encoding="utf-8")
+        loop = source.split("async def worker_loop(", 1)[1]
+        idle_branch = loop.split("if not domains:", 1)[1].split(
+            "await asyncio.sleep(poll_seconds)", 1
+        )[0]
+        self.assertIn("conn.rollback()", idle_branch)

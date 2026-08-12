@@ -167,10 +167,16 @@ def _connection_pool(env_var: str, read_only: bool):
             # answering keepalives but never sending another command. Every
             # other writer queued behind it and screening stopped entirely.
             # Only the server can break that, so give it permission to.
+            # 120s was far too aggressive: this codebase keeps long-lived
+            # connections whose read-only SELECTs open a transaction that is
+            # never committed, so any quiet stretch got the worker's own
+            # connection terminated mid-run. The abandoned transaction this
+            # guard exists to kill sat idle for 46 minutes, so a much longer
+            # ceiling still catches it with a large margin for legitimate work.
             idle_timeout_ms = max(
                 0,
                 int(float(os.getenv(
-                    "GLASSWING_DB_IDLE_TX_TIMEOUT_SECONDS", "120"
+                    "GLASSWING_DB_IDLE_TX_TIMEOUT_SECONDS", "900"
                 )) * 1000),
             )
 

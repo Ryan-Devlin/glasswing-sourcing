@@ -2059,6 +2059,15 @@ async def worker_loop(
             previous_received = received
             previous_processed = processed
             previous_rate_time = now
+            # Close the read-only transaction the queue/extension counts above
+            # opened. psycopg runs with autocommit off, so a stretch with
+            # nothing claimable would otherwise hold one transaction open
+            # across many idle ticks -- long enough for
+            # idle_in_transaction_session_timeout to terminate the worker's own
+            # connection (confirmed live: "terminating connection due to
+            # idle-in-transaction timeout", which then surfaced as an SSL
+            # connection closed unexpectedly on the next use).
+            conn.rollback()
             await asyncio.sleep(poll_seconds)
             continue
 

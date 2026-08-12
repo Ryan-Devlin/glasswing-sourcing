@@ -274,7 +274,7 @@ def test_every_connection_bounds_idle_in_transaction_time(monkeypatch):
     raw = _RecordingRaw()
     captured["configure"](raw)
     assert any(
-        "idle_in_transaction_session_timeout = 120000" in s
+        "idle_in_transaction_session_timeout = 900000" in s
         for s in raw.statements
     ), raw.statements
     assert raw.commits == 1
