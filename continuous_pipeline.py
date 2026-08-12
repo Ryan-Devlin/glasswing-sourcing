@@ -1870,6 +1870,37 @@ async def worker_loop(
     conn: sqlite3.Connection,
     stop: asyncio.Event,
 ) -> None:
+    def read_tunables() -> tuple[dict, set[str], int, int, float]:
+        """Re-read the dashboard run config, including selected extensions.
+
+        This task is created once per container lifetime, so reading the
+        config only at startup meant a saved filter change never reached the
+        running worker. The CertStream listener already re-reads extensions on
+        a short interval for exactly this reason; screening did not, so adding
+        an extension made intake start accepting those domains while screening
+        never claimed them -- they simply accumulated in `pending` (confirmed
+        live: 16,765 .app and 8,037 .dev rows queued while only .ai/.io/.tech
+        were selected). load_run_config() is TTL-cached, so this costs at most
+        one shared-config read per cache window.
+        """
+        current = load_run_config()
+        return (
+            current,
+            selected_extensions(),
+            max(1, min(500, int(current.get(
+                "screening_batch_size",
+                os.getenv("STREAM_BATCH_SIZE", "200"),
+            )))),
+            max(1, min(40, int(current.get(
+                "scraper_workers",
+                os.getenv("STREAM_SCRAPER_WORKERS", "50"),
+            )))),
+            max(4.0, min(45.0, float(current.get(
+                "scrape_timeout",
+                os.getenv("STREAM_SCRAPE_TIMEOUT", "6"),
+            )))),
+        )
+
     config = load_run_config()
     active_extensions = selected_extensions()
     worker_status = read_status()
@@ -1929,7 +1960,26 @@ async def worker_loop(
     total_fetch_failures = 0
     total_rows_screened = 0
 
+    tunables_refresh_seconds = 5.0
+    tunables_refreshed_at = time.monotonic()
+
     while not stop.is_set():
+        now_monotonic = time.monotonic()
+        if now_monotonic - tunables_refreshed_at >= tunables_refresh_seconds:
+            tunables_refreshed_at = now_monotonic
+            (
+                config,
+                refreshed_extensions,
+                base_batch_size,
+                base_workers,
+                base_timeout,
+            ) = read_tunables()
+            if refreshed_extensions and refreshed_extensions != active_extensions:
+                active_extensions = refreshed_extensions
+                write_status(
+                    selected_extensions=sorted(active_extensions),
+                    updated_at=utc_now(),
+                )
         if RUNTIME_MODE != "local" and not read_control()["desired"].get(
             "pipeline", True
         ):

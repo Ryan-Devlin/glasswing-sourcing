@@ -1521,6 +1521,390 @@ def excluded_domain_set(
     return found - protected_training_domains()
 
 
+def claude_decisions_for_domains(
+    domains: Iterable[str], *, path: Path | str = CLASSIFICATION_DB
+) -> dict[str, dict[str, object]]:
+    """Return compact Claude review fields for one displayed table page."""
+    normalized = list(dict.fromkeys(stable_domain(value) for value in domains if stable_domain(value)))
+    if not normalized or (not using_classification_postgres() and not Path(path).exists()):
+        return {}
+    marks = ",".join("?" for _ in normalized)
+    with connect_store(path, read_only=True) as conn:
+        rows = conn.execute(
+            "SELECT domain,decision,fit_score,reasoning,concerns,diligence_version,result_json,updated_at "
+            f"FROM claude_diligence WHERE domain IN ({marks})",
+            normalized,
+        ).fetchall()
+    result = {}
+    for row in rows:
+        plain = dict(row)
+        try:
+            detail = json.loads(str(plain.pop("result_json", "{}") or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            detail = {}
+        result[str(row["domain"])] = {**plain, **detail}
+    return result
+
+
+def classification_record_for_domain(
+    domain: str, *, path: Path | str = CLASSIFICATION_DB
+) -> dict[str, object] | None:
+    """Return one complete stored screening record for manual diligence."""
+    target = stable_domain(domain)
+    if not target or (not using_classification_postgres() and not Path(path).exists()):
+        return None
+    with connect_store(path, read_only=True) as conn:
+        row = conn.execute("SELECT * FROM classifications WHERE domain=?", (target,)).fetchone()
+    if not row:
+        return None
+    plain = dict(row)
+    try:
+        stored = json.loads(str(plain.get("record_json") or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        stored = {}
+    return {**stored, **plain, "domain": target}
+
+
+def enqueue_claude_review(
+    domain: str,
+    *,
+    override_budget: bool = False,
+    path: Path | str = CLASSIFICATION_DB,
+) -> dict[str, object]:
+    target = stable_domain(domain)
+    if not target:
+        raise ValueError("Invalid domain")
+    now = utc_now()
+    with connect_store(path) as conn:
+        conn.execute(
+            "INSERT INTO claude_review_queue(domain,status,requested_at,started_at,completed_at,error,override_budget) "
+            "VALUES (?, 'queued', ?, '', '', '', ?) ON CONFLICT(domain) DO UPDATE SET "
+            "status='queued',requested_at=excluded.requested_at,started_at='',completed_at='',error='',"
+            "override_budget=excluded.override_budget",
+            (target, now, bool(override_budget)),
+        )
+        conn.commit()
+    return {
+        "domain": target, "status": "queued", "requested_at": now,
+        "override_budget": bool(override_budget),
+    }
+
+
+def enqueue_new_claude_reviews(
+    domains: Iterable[str], *, path: Path | str = CLASSIFICATION_DB
+) -> int:
+    """Queue previously unseen automatic reviews without resetting any job."""
+    values = list(dict.fromkeys(
+        stable_domain(domain) for domain in domains if stable_domain(domain)
+    ))
+    if not values:
+        return 0
+    queued = 0
+    now = utc_now()
+    with connect_store(path) as conn:
+        for domain in values:
+            if conn.execute("SELECT 1 FROM claude_diligence WHERE domain=?", (domain,)).fetchone():
+                continue
+            cursor = conn.execute(
+                "INSERT INTO claude_review_queue(domain,status,requested_at,started_at,completed_at,error,override_budget) "
+                "VALUES (?, 'queued', ?, '', '', '', ?) ON CONFLICT(domain) DO NOTHING",
+                (domain, now, False),
+            )
+            queued += max(0, int(cursor.rowcount or 0))
+        conn.commit()
+    return queued
+
+
+def defer_claude_review(
+    domain: str, reason: str, *, path: Path | str = CLASSIFICATION_DB
+) -> None:
+    """Keep a paid review queued until a temporary budget gate clears."""
+    with connect_store(path) as conn:
+        conn.execute(
+            "UPDATE claude_review_queue SET status='queued',started_at='',completed_at='',error=? WHERE domain=?",
+            (clean(reason)[:1000], stable_domain(domain)),
+        )
+        conn.commit()
+
+
+def recover_claude_review_queue(*, path: Path | str = CLASSIFICATION_DB) -> int:
+    with connect_store(path) as conn:
+        cursor = conn.execute(
+            "UPDATE claude_review_queue SET status='queued',started_at='',error='' WHERE status='reviewing'"
+        )
+        recovered = max(0, int(cursor.rowcount or 0))
+        false_failures = conn.execute(
+            "UPDATE claude_review_queue SET status='queued',started_at='',completed_at='',error='' "
+            "WHERE status='failed' AND error LIKE ?",
+            ("%No companies selected for paid external diligence%",),
+        )
+        recovered += max(0, int(false_failures.rowcount or 0))
+        conn.commit()
+        return recovered
+
+
+def claim_claude_review(*, path: Path | str = CLASSIFICATION_DB) -> dict[str, object] | None:
+    with connect_store(path) as conn:
+        begin_immediate(conn)
+        row = conn.execute(
+            "SELECT domain,requested_at,override_budget FROM claude_review_queue WHERE status='queued' "
+            "ORDER BY requested_at LIMIT 1"
+        ).fetchone()
+        if not row:
+            conn.commit()
+            return None
+        now = utc_now()
+        conn.execute(
+            "UPDATE claude_review_queue SET status='reviewing',started_at=?,error='' "
+            "WHERE domain=? AND status='queued'",
+            (now, row["domain"]),
+        )
+        conn.commit()
+        return {
+            "domain": str(row["domain"]), "status": "reviewing",
+            "started_at": now, "override_budget": bool(row["override_budget"]),
+        }
+
+
+def finish_claude_review(domain: str, *, error: str = "", path: Path | str = CLASSIFICATION_DB) -> None:
+    with connect_store(path) as conn:
+        conn.execute(
+            "UPDATE claude_review_queue SET status=?,completed_at=?,error=? WHERE domain=?",
+            ("failed" if error else "completed", utc_now(), clean(error)[:1000], stable_domain(domain)),
+        )
+        conn.commit()
+
+
+def claude_review_status(domain: str, *, path: Path | str = CLASSIFICATION_DB) -> dict[str, object] | None:
+    with connect_store(path, read_only=True) as conn:
+        row = conn.execute(
+            "SELECT domain,status,requested_at,started_at,completed_at,error,override_budget "
+            "FROM claude_review_queue WHERE domain=?",
+            (stable_domain(domain),),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def record_admin_audit(action: str, target: str = "", detail: str = "", *, path: Path | str = CLASSIFICATION_DB) -> None:
+    with connect_store(path) as conn:
+        conn.execute(
+            "INSERT INTO admin_audit_log(action,target,detail,created_at) VALUES (?,?,?,?)",
+            (clean(action), clean(target), clean(detail)[:1000], utc_now()),
+        )
+        conn.commit()
+
+
+def admin_audit_rows(limit: int = 100, *, path: Path | str = CLASSIFICATION_DB) -> list[dict[str, object]]:
+    with connect_store(path, read_only=True) as conn:
+        rows = conn.execute(
+            "SELECT action,target,detail,created_at FROM admin_audit_log "
+            "ORDER BY created_at DESC LIMIT ?",
+            (max(1, min(int(limit), 500)),),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def query_training_labels(
+    label: str, *, search: str = "", run_id: str = "",
+    limit: int = 100, offset: int = 0,
+    path: Path | str = CLASSIFICATION_DB,
+) -> tuple[list[dict[str, object]], int]:
+    target = clean(label).lower()
+    if target not in {"yes", "no"}:
+        return [], 0
+    clauses = ["label=?"]
+    params: list[object] = [target]
+    if clean(search):
+        clauses.append("lower(domain) LIKE ?")
+        params.append(f"%{clean(search).lower()}%")
+    if clean(run_id):
+        clauses.append(
+            "EXISTS (SELECT 1 FROM classifications c "
+            "JOIN classification_run_membership m ON m.domain=c.domain "
+            "WHERE c.domain=training_labels.domain AND m.run_id=?)"
+        )
+        params.append(clean(run_id))
+    where = " AND ".join(clauses)
+    with connect_store(path, read_only=True) as conn:
+        total = int(conn.execute(f"SELECT count(*) AS total FROM training_labels WHERE {where}", params).fetchone()["total"])
+        rows = conn.execute(
+            "SELECT domain,label,rating,source,reason,labeled_at FROM training_labels "
+            f"WHERE {where} ORDER BY labeled_at DESC,domain LIMIT ? OFFSET ?",
+            params + [max(1, min(int(limit), 500)), max(0, int(offset))],
+        ).fetchall()
+    return [dict(row) for row in rows], total
+
+
+def claude_review_queue_rows(limit: int = 200, *, path: Path | str = CLASSIFICATION_DB) -> list[dict[str, object]]:
+    with connect_store(path, read_only=True) as conn:
+        rows = conn.execute(
+            "SELECT q.domain,q.status,q.requested_at,q.started_at,q.completed_at,q.error,"
+            "d.decision,d.fit_score,d.reasoning,d.concerns,d.diligence_version,d.result_json "
+            "FROM claude_review_queue q "
+            "LEFT JOIN claude_diligence d ON d.domain=q.domain "
+            "ORDER BY q.requested_at DESC LIMIT ?",
+            (max(1, min(int(limit), 500)),),
+        ).fetchall()
+    result = []
+    for row in rows:
+        plain = dict(row)
+        try:
+            detail = json.loads(str(plain.pop("result_json", "{}") or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            detail = {}
+        result.append({**plain, **detail})
+    return result
+
+
+def top_claude_keeps(
+    limit: int = 6,
+    *,
+    diligence_version: str = "",
+    path: Path | str = CLASSIFICATION_DB,
+) -> list[dict[str, object]]:
+    """Highest-conviction decisive Claude approvals for the homepage."""
+    with connect_store(path, read_only=True) as conn:
+        rows = conn.execute(
+            "SELECT d.domain,d.fit_score,d.reasoning,d.product_summary,d.result_json,d.updated_at,"
+            "c.company_name,c.final_url,c.description,c.thesis_pillar,c.classified_at "
+            "FROM claude_diligence d LEFT JOIN classifications c ON c.domain=d.domain "
+            "WHERE d.decision='KEEP' "
+            + ("AND d.diligence_version=? " if clean(diligence_version) else "")
+            + "ORDER BY d.fit_score DESC,d.updated_at DESC LIMIT ?",
+            ([clean(diligence_version)] if clean(diligence_version) else [])
+            + [max(1, min(int(limit), 20))],
+        ).fetchall()
+    result = []
+    for row in rows:
+        plain = dict(row)
+        try:
+            detail = json.loads(str(plain.pop("result_json", "{}") or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            detail = {}
+        result.append({**plain, **detail})
+    return result
+
+
+def query_classifications_by_domains(
+    domains: Iterable[str],
+    *,
+    path: Path | str = CLASSIFICATION_DB,
+) -> list[dict[str, object]]:
+    """Fetch lightweight display records for an explicit domain page."""
+    normalized = list(dict.fromkeys(
+        stable_domain(domain)
+        for domain in domains
+        if stable_domain(domain)
+    ))
+    if not normalized or (
+        not using_classification_postgres() and not Path(path).exists()
+    ):
+        return []
+    rows = []
+    with connect_store(path, read_only=True) as conn:
+        for start in range(0, len(normalized), 800):
+            batch = normalized[start:start + 800]
+            marks = ",".join("?" for _ in batch)
+            rows.extend(conn.execute(
+                # classified_at must be selected, not just updated_at: the UI
+                # dates a deal by `classified_at || updated_at`, and
+                # updated_at is refreshed by every re-screen, so omitting
+                # classified_at made every tracked deal read "Today" no
+                # matter how long ago it was actually discovered.
+                "SELECT domain,company_name,final_url,description,"
+                "routing_bucket,routing_reason,fit_score,priority_score,"
+                "thesis_pillar,content_source,manual_override,"
+                "manual_override_target,classified_at,updated_at "
+                f"FROM classifications WHERE domain IN ({marks})",
+                batch,
+            ).fetchall())
+    return [dict(row) for row in rows]
+
+
+def record_automated_exclusions(
+    records: Iterable[dict[str, object]],
+    *,
+    path: Path | str = CLASSIFICATION_DB,
+) -> int:
+    """Keep only the tiny facts required to avoid recrawling deleted junk."""
+    now = utc_now()
+    normalized: dict[str, tuple[object, ...]] = {}
+    for record in records:
+        domain = stable_domain(record.get("domain", ""))
+        if not domain:
+            continue
+        normalized[domain] = (
+            domain,
+            clean(record.get("routing_bucket", record.get("bucket", ""))),
+            clean(record.get("routing_reason", record.get("reason", ""))),
+            max(0, min(100, _integer(record.get(
+                "glasswing_rating",
+                record.get("diligence_rank_score", record.get("rule_score", 0)),
+            )))),
+            clean(record.get("content_source", "")),
+            now,
+        )
+    if not normalized:
+        return 0
+    with connect_store(path) as conn:
+        begin_immediate(conn)
+        conn.executemany(
+            """
+            INSERT INTO automated_exclusions(
+                domain,bucket,reason,glasswing_rating,content_source,excluded_at
+            ) VALUES (?,?,?,?,?,?)
+            ON CONFLICT(domain) DO UPDATE SET
+                bucket=excluded.bucket,
+                reason=excluded.reason,
+                glasswing_rating=excluded.glasswing_rating,
+                content_source=excluded.content_source,
+                excluded_at=excluded.excluded_at
+            """,
+            list(normalized.values()),
+        )
+        conn.commit()
+    return len(normalized)
+
+
+def excluded_domain_set(
+    domains: Iterable[str],
+    *,
+    path: Path | str = CLASSIFICATION_DB,
+) -> set[str]:
+    """Return automated tombstones, except domains later labeled by a human."""
+    normalized = list(dict.fromkeys(
+        stable_domain(domain)
+        for domain in domains
+        if stable_domain(domain)
+    ))
+    if not normalized or (
+        not using_classification_postgres() and not Path(path).exists()
+    ):
+        return set()
+    found: set[str] = set()
+    try:
+        with connect_store(path, read_only=True) as conn:
+            for start in range(0, len(normalized), 800):
+                batch = normalized[start:start + 800]
+                marks = ",".join("?" for _ in batch)
+                found.update(
+                    stable_domain(row["domain"])
+                    for row in conn.execute(
+                        "SELECT domain FROM automated_exclusions "
+                        f"WHERE domain IN ({marks})",
+                        batch,
+                    ).fetchall()
+                )
+    except (sqlite3.OperationalError, PostgresError):
+        # Safe during a rolling deployment before the migration has run.
+        return set()
+    if not found:
+        return set()
+    from training_truth import protected_training_domains
+
+    return found - protected_training_domains()
+
+
 def automated_exclusion_reason_counts(
     *,
     since_hours: int = 0,

@@ -687,3 +687,42 @@ class ClaudeAttemptDecouplingTests(unittest.TestCase):
             any("diligence exploded" in str(w.get("claude_warning", "")) for w in warnings),
             warnings,
         )
+
+
+class LiveFilterChangeTests(unittest.TestCase):
+    """A saved filter change must reach the already-running screening loop.
+
+    The CertStream listener re-reads selected extensions on a short interval;
+    worker_loop did not, so it kept claiming only the extensions present when
+    the container started. Adding an extension made intake accept those domains
+    while screening never claimed them -- confirmed live as 16,765 .app and
+    8,037 .dev rows sitting in `pending` while only .ai/.io/.tech were selected.
+    """
+
+    def test_worker_loop_rereads_extensions_and_tunables(self):
+        source = Path("continuous_pipeline.py").read_text(encoding="utf-8")
+        loop = source.split("async def worker_loop(", 1)[1].split(
+            "\nasync def ", 1
+        )[0]
+        # Re-read helper exists and is actually called inside the loop.
+        self.assertIn("def read_tunables(", loop)
+        self.assertIn("read_tunables()", loop.split("while not stop.is_set():", 1)[1])
+        self.assertIn("refreshed_extensions != active_extensions", loop)
+
+    def test_extension_refresh_is_bounded_not_every_tick(self):
+        # The loop ticks several times a second; re-reading shared config every
+        # tick would add a Postgres round trip to the hot path.
+        source = Path("continuous_pipeline.py").read_text(encoding="utf-8")
+        loop = source.split("async def worker_loop(", 1)[1].split(
+            "\nasync def ", 1
+        )[0]
+        self.assertIn("tunables_refresh_seconds", loop)
+        self.assertIn("tunables_refreshed_at", loop)
+
+    def test_claimed_batch_uses_the_refreshed_extension_set(self):
+        source = Path("continuous_pipeline.py").read_text(encoding="utf-8")
+        loop = source.split("async def worker_loop(", 1)[1].split(
+            "\nasync def ", 1
+        )[0]
+        after_refresh = loop.split("refreshed_extensions != active_extensions", 1)[1]
+        self.assertIn("allowed_extensions=active_extensions", after_refresh)

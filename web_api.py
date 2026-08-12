@@ -57,9 +57,7 @@ from classification_store import (
     classification_record_for_domain,
     classification_source_label,
     hidden_domain_set,
-    automated_exclusion_reason_counts,
     hide_domains,
-    query_automated_exclusions,
     query_classifications,
     query_classifications_by_domains,
     query_source_classifications,
@@ -1462,38 +1460,6 @@ def corpus_companies(
         sort=sort,
     )
     return {"rows": _with_claude(rows), "total": total, "page": page, "page_size": page_size}
-
-
-@app.get("/api/discards")
-def discarded_domains(
-    reason: str = "",
-    since_hours: int = Query(24, ge=0, le=8760),
-    page: int = Query(1, ge=1),
-    page_size: int = Query(100, ge=25, le=500),
-):
-    """What the automated rules threw away, and why.
-
-    The rule scorer discards the large majority of readable sites, and this
-    project's own standard is that "Python classifications are suggestions, not
-    labels". Without this the decision was invisible: the rows were tombstoned
-    and never shown anywhere, so there was no way to tell an over-aggressive
-    threshold from a genuinely junk-heavy feed.
-    """
-    counts = automated_exclusion_reason_counts(since_hours=since_hours)
-    rows = query_automated_exclusions(
-        reason=reason,
-        since_hours=since_hours,
-        limit=page_size,
-        offset=(page - 1) * page_size,
-    )
-    return {
-        "rows": rows,
-        "reason_counts": counts,
-        "total": int(counts.get(reason, 0)) if reason else sum(counts.values()),
-        "page": page,
-        "page_size": page_size,
-        "since_hours": since_hours,
-    }
 
 
 @app.get("/api/corpus/zone/candidates")
