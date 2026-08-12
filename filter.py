@@ -4566,16 +4566,26 @@ def persist_screening_output(output: pd.DataFrame) -> dict[str, int]:
     )
     denied_mask = output["routing_bucket"].eq("reject")
     manual_denied = output[denied_mask & manually_protected].copy()
-    # A site we were blocked from reading must not be tombstoned as a permanent
-    # automated exclusion -- that stops it ever being crawled again. Hold it
-    # back from the purge and report it so the queue can retry it with backoff.
+    # An error page is not a company and must never end up in a bucket -- not
+    # Needs Review, not Ghost, not anything. A site we could not read tells us
+    # nothing, so it produces no classification row at all: it is not
+    # persisted (so it can never be bucketed or counted as a retained
+    # candidate) and not tombstoned (so a domain that is merely blocked or
+    # mid-deploy is not written off forever, and an existing good record for it
+    # is never deleted by a single bad fetch).
+    #
+    # Retry state lives in the pipeline queue instead, which is where it
+    # belongs: blocked/5xx domains are requeued with backoff, and anything
+    # still unreadable is closed out by the queue's own attempt limit rather
+    # than by deleting classification data.
+    unreadable = output["routing_bucket"].eq("ghost")
     retryable_inaccessible = output.get(
         "routing_reason", pd.Series("", index=output.index)
     ).map(is_retryable_inaccessible_reason)
     disposable = (
         automated_discard_mask(output)
         & ~manually_protected
-        & ~retryable_inaccessible
+        & ~unreadable
     )
     automated_discarded = output[disposable].copy()
     retry_domains = [
@@ -4585,6 +4595,7 @@ def persist_screening_output(output: pd.DataFrame) -> dict[str, int]:
     ]
     persistable_output = output.loc[
         ~output.index.isin(automated_discarded.index)
+        & ~unreadable
     ].copy()
     if count_classifications() == 0:
         bootstrap_from_csv()

@@ -364,7 +364,17 @@ def test_certstream_status_reconciles_completed_domains_with_retained_candidates
         lambda: {"running": True, "stage": "screening", "run_id": "run-1"},
     )
     monkeypatch.setattr(web_api, "connect_pipeline_db", QueueConnection)
-    monkeypatch.setattr(web_api, "_bucket_counts_for_run", lambda _run_id: {"all": 3})
+    # "all" deliberately exceeds investable+review here: it also covers hard
+    # denials and unreadable error pages, neither of which is a retained
+    # candidate. Confirmed live: a run reporting 13 retained was really 7 ghost
+    # rows plus 6 rejects, i.e. zero real candidates.
+    monkeypatch.setattr(
+        web_api,
+        "_bucket_counts_for_run",
+        lambda _run_id: {
+            "all": 13, "investable": 1, "review": 2, "denied": 6, "unreadable": 7,
+        },
+    )
     monkeypatch.setattr(web_api, "read_control", lambda: {"desired": {"pipeline": True}})
 
     response = client.get("/api/certstream/status")
@@ -641,3 +651,42 @@ def test_review_view_never_surfaces_unreadable_sites():
 def test_review_view_still_contains_the_real_candidate_buckets():
     for bucket in ("review", "coming_soon", "insufficient", "screened_out", "comp"):
         assert bucket in web_api.BUCKETS["review"], bucket
+
+
+def test_run_bucket_counts_exclude_unreadable_sites_from_review():
+    """"review" is derived as a remainder, so ghost must be subtracted too.
+
+    Confirmed live: a run whose only classified rows were 7 ghosts and 6
+    rejects reported 13 "candidates retained".
+    """
+    import web_api as api
+
+    def fake_counts(run_id=""):
+        return {"priority": 2, "review": 5, "reject": 6, "ghost": 7}
+
+    original = api.classification_bucket_counts
+    api.classification_bucket_counts = fake_counts
+    try:
+        counts = api._bucket_counts_for_run("run-x")
+    finally:
+        api.classification_bucket_counts = original
+
+    assert counts["investable"] == 2
+    assert counts["denied"] == 6
+    assert counts["unreadable"] == 7
+    # 20 total - 2 investable - 6 denied - 7 unreadable = 5
+    assert counts["review"] == 5, "ghost rows leaked into the review count"
+
+
+def test_unreadable_pages_are_never_persisted_to_a_bucket():
+    """An error page must never end up in any bucket, and must not delete data."""
+    from pathlib import Path
+
+    source = Path("filter.py").read_text(encoding="utf-8")
+    section = source.split("def persist_screening_output", 1)[1].split(
+        "upsert_classifications(persistable_output)", 1
+    )[0]
+    # Excluded from what gets written...
+    assert "& ~unreadable" in section
+    # ...and from what gets purged, so a bad fetch cannot delete a good record.
+    assert "& ~unreadable\n    )" in section

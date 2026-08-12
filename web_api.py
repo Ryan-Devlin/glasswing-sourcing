@@ -311,11 +311,16 @@ def _bucket_counts_for_run(run_id: str) -> dict[str, int]:
     total = sum(raw.values())
     investable = int(raw.get("priority", 0))
     denied = int(raw.get("reject", 0))
+    # An unreadable site is not a review candidate, so it must not be swept in
+    # by deriving "review" as a remainder. New runs no longer persist ghost
+    # rows at all, but historical runs still contain them.
+    unreadable = int(raw.get("ghost", 0))
     return {
         "all": total,
         "investable": investable,
-        "review": max(0, total - investable - denied),
+        "review": max(0, total - investable - denied - unreadable),
         "denied": denied,
+        "unreadable": unreadable,
     }
 
 
@@ -814,8 +819,16 @@ def certstream_status():
         finally:
             if conn is not None:
                 conn.close()
+    # Count only buckets a human would actually look at. This used to use the
+    # "all" total, which folds in hard denials and unreadable error pages --
+    # confirmed live: a run reporting 13 "candidates retained" was 7 ghost rows
+    # plus 6 rejects, i.e. zero real candidates. Overstating retention hid the
+    # fact that nothing was surviving screening.
     retained_in_buckets = (
-        int(_bucket_counts_for_run(run_id).get("all", 0))
+        sum(
+            int(_bucket_counts_for_run(run_id).get(name, 0))
+            for name in ("investable", "review")
+        )
         if run_id else 0
     )
     # A completed domain is not necessarily a retained company. Most certificate
