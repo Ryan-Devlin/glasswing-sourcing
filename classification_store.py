@@ -12,7 +12,7 @@ import os
 import sqlite3
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -1519,6 +1519,81 @@ def excluded_domain_set(
     from training_truth import protected_training_domains
 
     return found - protected_training_domains()
+
+
+def automated_exclusion_reason_counts(
+    *,
+    since_hours: int = 0,
+    path: Path | str = CLASSIFICATION_DB,
+) -> dict[str, int]:
+    """How many domains each automated rule has discarded.
+
+    The scorer that produces these is explicitly documented as untrustworthy on
+    its own ("Python classifications are suggestions, not labels"), yet it
+    discards the large majority of readable sites. Surfacing the shape of that
+    decision is what makes it auditable instead of invisible.
+    """
+    if not using_classification_postgres() and not Path(path).exists():
+        return {}
+    clauses = ""
+    params: list[object] = []
+    if since_hours > 0:
+        clauses = " WHERE excluded_at >= ?"
+        params.append(
+            (
+                datetime.now(timezone.utc) - timedelta(hours=int(since_hours))
+            ).isoformat().replace("+00:00", "Z")
+        )
+    try:
+        with connect_store(path, read_only=True) as conn:
+            rows = conn.execute(
+                "SELECT reason, COUNT(*) AS total FROM automated_exclusions"
+                + clauses
+                + " GROUP BY reason ORDER BY total DESC",
+                params,
+            ).fetchall()
+    except (sqlite3.OperationalError, PostgresError):
+        return {}
+    return {str(row["reason"]): int(row["total"]) for row in rows}
+
+
+def query_automated_exclusions(
+    *,
+    reason: str = "",
+    since_hours: int = 0,
+    limit: int = 100,
+    offset: int = 0,
+    path: Path | str = CLASSIFICATION_DB,
+) -> list[dict[str, object]]:
+    """Page through what the automated rules have thrown away."""
+    if not using_classification_postgres() and not Path(path).exists():
+        return []
+    clauses: list[str] = []
+    params: list[object] = []
+    if reason:
+        clauses.append("reason = ?")
+        params.append(clean(reason))
+    if since_hours > 0:
+        clauses.append("excluded_at >= ?")
+        params.append(
+            (
+                datetime.now(timezone.utc) - timedelta(hours=int(since_hours))
+            ).isoformat().replace("+00:00", "Z")
+        )
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.extend([max(1, min(int(limit), 500)), max(0, int(offset))])
+    try:
+        with connect_store(path, read_only=True) as conn:
+            rows = conn.execute(
+                "SELECT domain, bucket, reason, glasswing_rating, "
+                "content_source, excluded_at FROM automated_exclusions"
+                + where
+                + " ORDER BY excluded_at DESC, domain LIMIT ? OFFSET ?",
+                params,
+            ).fetchall()
+    except (sqlite3.OperationalError, PostgresError):
+        return []
+    return [dict(row) for row in rows]
 
 
 def upsert_training_labels(

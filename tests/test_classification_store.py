@@ -1043,3 +1043,66 @@ def test_domain_lookup_returns_original_classified_at_not_just_updated_at(tmp_pa
     assert "classified_at" in rows[0], "UI cannot date the deal without this"
     assert rows[0]["classified_at"] == discovered, "discovery date was overwritten"
     assert rows[0]["updated_at"] > discovered
+
+
+def test_automated_exclusions_are_auditable(tmp_path):
+    """Discarded domains must be inspectable, not just silently tombstoned.
+
+    The rule scorer discards the large majority of readable sites, and the
+    project standard is that Python classifications are suggestions rather than
+    labels -- so the decision has to be reviewable.
+    """
+    database = tmp_path / "classifications.sqlite3"
+    classification_store.record_automated_exclusions(
+        [
+            {
+                "domain": "thin-a.ai",
+                "routing_bucket": "screened_out",
+                "routing_reason": "insufficient_venture_quality_evidence",
+                "glasswing_rating": 12,
+                "content_source": "certstream",
+            },
+            {
+                "domain": "thin-b.ai",
+                "routing_bucket": "screened_out",
+                "routing_reason": "insufficient_venture_quality_evidence",
+                "glasswing_rating": 8,
+            },
+            {
+                "domain": "offthesis.ai",
+                "routing_bucket": "screened_out",
+                "routing_reason": "substantive_site_no_glasswing_fit_signals",
+                "glasswing_rating": 41,
+            },
+        ],
+        path=database,
+    )
+
+    counts = classification_store.automated_exclusion_reason_counts(path=database)
+    assert counts["insufficient_venture_quality_evidence"] == 2
+    assert counts["substantive_site_no_glasswing_fit_signals"] == 1
+
+    everything = classification_store.query_automated_exclusions(path=database)
+    assert {row["domain"] for row in everything} == {
+        "thin-a.ai", "thin-b.ai", "offthesis.ai"
+    }
+    # The score the rule acted on must come back, so a threshold can be judged.
+    by_domain = {row["domain"]: row for row in everything}
+    assert by_domain["offthesis.ai"]["glasswing_rating"] == 41
+    assert by_domain["thin-a.ai"]["content_source"] == "certstream"
+
+    filtered = classification_store.query_automated_exclusions(
+        reason="substantive_site_no_glasswing_fit_signals", path=database
+    )
+    assert [row["domain"] for row in filtered] == ["offthesis.ai"]
+
+    paged = classification_store.query_automated_exclusions(
+        limit=25, offset=0, path=database
+    )
+    assert len(paged) == 3
+
+
+def test_exclusion_audit_is_safe_before_the_table_exists(tmp_path):
+    missing = tmp_path / "not-created-yet.sqlite3"
+    assert classification_store.automated_exclusion_reason_counts(path=missing) == {}
+    assert classification_store.query_automated_exclusions(path=missing) == []

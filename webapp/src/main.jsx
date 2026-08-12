@@ -38,6 +38,7 @@ const NAV = [
   ["home", "Home", Home],
   ["search", "Search", Search],
   ["certstream", "CertStream Scraper", Activity],
+  ["discards", "Discarded by rules", Trash2],
   ["csv", "Domain Intake", Database],
   ["domains", "Domain Crawler (.com, .app)", Globe2],
   ["health", "System Health", HeartPulse],
@@ -1871,6 +1872,153 @@ function CorpusCompanies({ kind }) {
   );
 }
 
+const DISCARD_WINDOWS = [
+  ["1", "Last hour"],
+  ["24", "Last 24h"],
+  ["168", "Last 7d"],
+  ["0", "All time"],
+];
+
+function DiscardAudit() {
+  const [reason, setReason] = useState("");
+  const [sinceHours, setSinceHours] = useState("24");
+  const [page, setPage] = useState(1);
+  const pageSize = 100;
+  const result = useApi(
+    `/api/discards?since_hours=${sinceHours}&page=${page}&page_size=${pageSize}` +
+      (reason ? `&reason=${encodeURIComponent(reason)}` : ""),
+    [reason, sinceHours, page],
+  );
+  const data = result.data || {};
+  const rows = data.rows || [];
+  const counts = data.reason_counts || {};
+  const ordered = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  const grandTotal = ordered.reduce((sum, [, n]) => sum + n, 0);
+
+  return (
+    <section>
+      <div className="table-toolbar table-heading">
+        <div>
+          <h2>Discarded by the rules</h2>
+          <p>
+            Everything the automated scorer threw away, and why. Scores are the
+            value the rule actually acted on — use this to judge whether a
+            threshold is too aggressive before changing it.
+          </p>
+        </div>
+        <div className="bucket-tabs" role="tablist" aria-label="Time window">
+          {DISCARD_WINDOWS.map(([value, label]) => (
+            <button
+              key={value}
+              role="tab"
+              aria-selected={sinceHours === value}
+              className={sinceHours === value ? "active" : ""}
+              onClick={() => {
+                setSinceHours(value);
+                setPage(1);
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="metrics">
+        <Metric label="Discarded total" value={fmt(grandTotal)} />
+        {ordered.slice(0, 4).map(([name, n]) => (
+          <Metric
+            key={name}
+            label={`${name.replace(/_/g, " ")}${
+              grandTotal ? ` · ${Math.round((100 * n) / grandTotal)}%` : ""
+            }`}
+            value={fmt(n)}
+          />
+        ))}
+      </div>
+
+      {ordered.length > 0 && (
+        <div className="bucket-tabs" role="tablist" aria-label="Discard reason">
+          <button
+            role="tab"
+            aria-selected={reason === ""}
+            className={reason === "" ? "active" : ""}
+            onClick={() => {
+              setReason("");
+              setPage(1);
+            }}
+          >
+            All reasons
+          </button>
+          {ordered.map(([name, n]) => (
+            <button
+              key={name}
+              role="tab"
+              aria-selected={reason === name}
+              className={reason === name ? "active" : ""}
+              onClick={() => {
+                setReason(name);
+                setPage(1);
+              }}
+            >
+              {name.replace(/_/g, " ")} ({fmt(n)})
+            </button>
+          ))}
+        </div>
+      )}
+
+      {result.loading && <p className="notice">Loading…</p>}
+      {result.error && <p className="notice">{String(result.error)}</p>}
+      {!result.loading && rows.length === 0 && (
+        <p className="notice">Nothing discarded in this window.</p>
+      )}
+
+      {rows.length > 0 && (
+        <>
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Domain</th>
+                <th>Score</th>
+                <th>Reason</th>
+                <th>Source</th>
+                <th>Discarded</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row) => (
+                <tr key={row.domain}>
+                  <td>
+                    <a
+                      href={`https://${row.domain}`}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      {row.domain}
+                    </a>
+                  </td>
+                  <td>{row.glasswing_rating}</td>
+                  <td>{String(row.reason || "").replace(/_/g, " ")}</td>
+                  <td>{row.content_source || "—"}</td>
+                  <td title={row.excluded_at}>
+                    {dealAgeLabel(row.excluded_at)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <Pager
+            page={page}
+            setPage={setPage}
+            total={data.total || 0}
+            pageSize={pageSize}
+          />
+        </>
+      )}
+    </section>
+  );
+}
+
 function CrawlerDiscoveries() {
   const { admin, requestLogin } = useAdmin();
   const [refresh, setRefresh] = useState(0);
@@ -2830,6 +2978,7 @@ function App() {
     home: <HomePage />,
     search: <GlobalSearchPage />,
     certstream: <CertStreamPage />,
+    discards: <DiscardAudit />,
     formd: <FormDPage />,
     csv: <SearchCorpusPage kind="ai" />,
     domains: <SearchCorpusPage kind="zone" />,

@@ -34,8 +34,11 @@ def test_react_app_has_every_primary_page_and_no_streamlit_dependency():
     for metric in ("Domains available", "Waiting to scrape", "Searchable pages"):
         assert metric in source
     for zone_metric in ("Investable retained", "Discarded", "Fetch failures"):
-        # Legacy corpus counters were replaced with deal-funnel metrics.
-        assert zone_metric not in source
+        # Legacy corpus counters were replaced with deal-funnel metrics. Match
+        # the metric declaration rather than the bare word -- "Discarded" is a
+        # substring of legitimate copy elsewhere (e.g. the "Discarded by rules"
+        # audit page), and a loose check fails on unrelated additions.
+        assert f'label="{zone_metric}"' not in source
     for zone_metric in (
         "Domains screened",
         "Live websites",
