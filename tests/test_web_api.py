@@ -732,3 +732,34 @@ def test_search_page_offers_a_track_action():
     page = source.split("function GlobalSearchPage()", 1)[1].split("\nfunction ", 1)[0]
     assert "<TrackButton" in page
     assert 'label: "Track"' in page
+    # .card-track is absolutely positioned for a deal-card corner, so reusing it
+    # in a table cell put the button outside its cell and the Track column
+    # rendered empty. The table needs the inline variant.
+    assert 'className="track-inline"' in page
+    css = Path("webapp/src/polish.css").read_text(encoding="utf-8")
+    assert ".track-inline {" in css
+    assert "position: absolute" not in css.split(".track-inline {", 1)[1].split("}", 1)[0]
+
+
+def test_track_button_style_is_overridable():
+    from pathlib import Path
+
+    source = Path("webapp/src/main.jsx").read_text(encoding="utf-8")
+    fn = source.split("function TrackButton(", 1)[1].split("\nfunction ", 1)[0]
+    assert 'className = "card-track"' in fn, "card usage must keep its default"
+    assert "className={className}" in fn
+
+
+def test_search_shows_the_claude_recommendation():
+    """A Claude verdict must be visible, not just implied by a disabled button.
+
+    The actions cell only rendered "Reviewed", so the actual KEEP/REJECT call
+    and its score were invisible on the search page.
+    """
+    from pathlib import Path
+
+    source = Path("webapp/src/main.jsx").read_text(encoding="utf-8")
+    page = source.split("function GlobalSearchPage()", 1)[1].split("\nfunction ", 1)[0]
+    assert 'label: "Claude review"' in page
+    assert "<ClaudeReviewBadge" in page
+    assert "claudePending(row)" in page

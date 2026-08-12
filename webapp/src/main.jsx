@@ -310,14 +310,14 @@ function ErrorBox({ children }) {
   return <div className="error">{children}</div>;
 }
 
-function TrackButton({ row, onChanged }) {
+function TrackButton({ row, onChanged, className = "card-track" }) {
   const { admin, requestLogin } = useAdmin();
   const [tracked, setTracked] = useState(Boolean(row.tracked));
   const [busy, setBusy] = useState(false);
   useEffect(() => setTracked(Boolean(row.tracked)), [row.domain, row.tracked]);
   return (
     <button
-      className="card-track"
+      className={className}
       disabled={tracked || busy}
       title={tracked ? "Already tracking" : "Add to the shared Tracking view"}
       onClick={async () => {
@@ -879,11 +879,29 @@ function GlobalSearchPage() {
               { key: "score", label: "Score" },
               { key: "source", label: "Source", render: (row) => <span className="pill">{row.source}</span> },
               { key: "description", label: "Description" },
+              {
+                key: "claude_decision",
+                label: "Claude review",
+                render: (row) =>
+                  row.claude_decision ? (
+                    <ClaudeReviewBadge row={row} />
+                  ) : claudePending(row) ? (
+                    <span className="muted">Queued</span>
+                  ) : (
+                    <span className="muted">Not reviewed</span>
+                  ),
+              },
               { key: "updated", label: "Updated" },
               {
                 key: "track",
                 label: "Track",
-                render: (row) => <TrackButton row={row} onChanged={refresh} />,
+                render: (row) => (
+                  <TrackButton
+                    row={row}
+                    onChanged={refresh}
+                    className="track-inline"
+                  />
+                ),
               },
             ]}
           />
