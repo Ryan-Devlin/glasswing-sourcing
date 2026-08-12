@@ -10,6 +10,7 @@ import json
 import os
 import re
 import sqlite3
+import sys
 import time
 from dataclasses import dataclass
 from functools import lru_cache
@@ -4602,6 +4603,7 @@ def persist_screening_output(output: pd.DataFrame) -> dict[str, int]:
     upsert_classifications(persistable_output)
 
     tombstoned = 0
+    tombstone_verified = 0
     if not automated_discarded.empty:
         # Keep only a minimal cross-crawler tombstone. All website text,
         # search rows, retry data, and full classification payloads go away.
@@ -4610,6 +4612,33 @@ def persist_screening_output(output: pd.DataFrame) -> dict[str, int]:
         tombstoned = record_automated_exclusions(
             automated_discarded.to_dict(orient="records")
         )
+        # Verify the write actually landed. record_automated_exclusions returns
+        # the number of rows it *intended* to write, so a store that accepts the
+        # statement without persisting anything is indistinguishable from a
+        # successful write. Confirmed live: it reported 12-17 rows per batch
+        # while automated_exclusions grew by zero over 100 seconds, and reads
+        # from the same store returned correct counts -- so only a read-back can
+        # tell the difference.
+        try:
+            from classification_store import excluded_domain_set
+
+            tombstone_verified = len(
+                excluded_domain_set(list(automated_discarded["domain"]))
+            )
+        except Exception as exc:
+            tombstone_verified = -1
+            print(
+                f"tombstone verification failed: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+        if tombstone_verified == 0 and tombstoned > 0:
+            print(
+                "CLASSIFICATION STORE IS NOT PERSISTING: wrote "
+                f"{tombstoned} exclusions, read back 0.",
+                file=sys.stderr,
+                flush=True,
+            )
         purge_automated_rejections(
             automated_discarded["domain"],
             clean_csv=False,
@@ -4737,6 +4766,7 @@ def persist_screening_output(output: pd.DataFrame) -> dict[str, int]:
         "rows_persisted": int(len(persistable_output)),
         "rows_unreadable": int(unreadable.sum()),
         "rows_tombstoned": int(tombstoned),
+        "rows_tombstone_verified": int(tombstone_verified),
         "retry_domains": retry_domains,
         "blocked_or_erroring": len(retry_domains),
         "shortlist_master": len(shortlist_master),

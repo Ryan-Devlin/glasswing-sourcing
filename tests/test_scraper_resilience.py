@@ -508,3 +508,20 @@ if __name__ == "__main__":
         # The tombstone count must come from the writer's own return value,
         # not be inferred from the frame.
         self.assertIn("tombstoned = record_automated_exclusions(", source)
+
+    def test_persist_diagnostics_do_not_reference_missing_imports(self):
+        """The stderr diagnostics in persist must not NameError at runtime.
+
+        These paths only execute with a non-empty discard set against a real
+        store, so the test suite would not otherwise exercise them -- and a
+        NameError there would break persistence for every batch.
+        """
+        import filter as module
+
+        source = Path("filter.py").read_text(encoding="utf-8")
+        for name in ("sys.stderr",):
+            if name in source:
+                self.assertTrue(
+                    hasattr(module, name.split(".")[0]),
+                    f"filter.py uses {name} but never imports {name.split('.')[0]}",
+                )
