@@ -2439,6 +2439,30 @@ async def async_main() -> None:
         queue=queue_counts(conn),
     )
 
+    # The classification store is gated on DATABASE_URL while every other
+    # subsystem here uses a namespaced *_DATABASE_URL. On a multi-service deploy
+    # it is trivially easy to set the siblings and miss this one, and the
+    # failure is completely silent: screening keeps running at full speed and
+    # writes every classification and tombstone to a SQLite file on this
+    # worker's own volume that nothing else ever reads. Confirmed live -- the
+    # dashboard showed "Candidates retained: 0" against thousands of screened
+    # domains for exactly this reason. Never let that be invisible again.
+    if RUNTIME_MODE != "local" and not using_classification_postgres():
+        message = (
+            "MISCONFIGURED: DATABASE_URL is not set on this worker, so every "
+            "screening result is being written to a local SQLite file instead "
+            "of the shared store. Nothing screened here will appear in the "
+            "dashboard. Set DATABASE_URL to ${{Postgres.DATABASE_URL}} on this "
+            "service."
+        )
+        print(message, file=sys.stderr, flush=True)
+        write_status(
+            classification_store_warning=message,
+            updated_at=utc_now(),
+        )
+    else:
+        write_status(classification_store_warning="", updated_at=utc_now())
+
     if (
         using_classification_postgres()
         and not SHARED_CLASSIFICATION_MIGRATION_MARKER.exists()

@@ -1825,6 +1825,9 @@ function CertStreamPage() {
         Worker attempts can be higher because failed fetches are retried. Only retained
         candidates appear below.
       </p>
+      {s.classification_store_warning && (
+        <p className="error inline-notice">{s.classification_store_warning}</p>
+      )}
       {claude.data?.warning && (
         <p className="notice">Claude: {claude.data.warning}</p>
       )}

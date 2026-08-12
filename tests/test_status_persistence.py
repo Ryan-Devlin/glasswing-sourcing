@@ -766,3 +766,35 @@ class LiveFilterChangeTests(unittest.TestCase):
             "await asyncio.sleep(poll_seconds)", 1
         )[0]
         self.assertIn("conn.rollback()", idle_branch)
+
+
+class MisconfiguredStoreWarningTests(unittest.TestCase):
+    """A worker writing results nowhere must say so, loudly.
+
+    The classification store is gated on DATABASE_URL while every sibling
+    subsystem uses a namespaced *_DATABASE_URL, so it is easy to set the others
+    and miss this one. Confirmed live: pipeline-worker had every
+    *_DATABASE_URL set except DATABASE_URL, so screening ran at ~170/min and
+    wrote every classification and tombstone to a SQLite file on its own volume
+    that nothing reads. The dashboard showed "Candidates retained: 0" against
+    thousands of screened domains and gave no hint why.
+    """
+
+    def test_worker_warns_when_the_shared_store_is_not_configured(self):
+        source = Path("continuous_pipeline.py").read_text(encoding="utf-8")
+        self.assertIn("classification_store_warning", source)
+        self.assertIn('RUNTIME_MODE != "local" and not using_classification_postgres()', source)
+        # Must reach both the operator's logs and the dashboard.
+        guard = source.split('RUNTIME_MODE != "local" and not using_classification_postgres()', 1)[1][:900]
+        self.assertIn("file=sys.stderr", guard)
+        self.assertIn("write_status(", guard)
+        self.assertIn("DATABASE_URL", guard)
+
+    def test_warning_is_cleared_once_configured(self):
+        source = Path("continuous_pipeline.py").read_text(encoding="utf-8")
+        block = source.split('RUNTIME_MODE != "local" and not using_classification_postgres()', 1)[1][:1400]
+        self.assertIn('classification_store_warning=""', block)
+
+    def test_dashboard_surfaces_the_warning(self):
+        ui = Path("webapp/src/main.jsx").read_text(encoding="utf-8")
+        self.assertIn("s.classification_store_warning", ui)
