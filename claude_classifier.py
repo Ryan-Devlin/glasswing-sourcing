@@ -366,6 +366,57 @@ def load_currently_diligenced_domains() -> set[str]:
     return {domain for domain in domains if domain}
 
 
+PILLAR_COLUMN = "rule_thesis_pillar"
+# Diligence used to take a pure global top-N by score, so the highest-scoring
+# thesis pillar monopolised every batch of 10 calls. Measured live: cybersecurity
+# took 40.8% of all Claude KEEPs while vertical AI -- which had the *largest*
+# candidate pool of any pillar (2,391 vs 2,115) -- took 3.8%, and quantum/compute
+# took 0.8% off 13 eligible candidates. Cyber copy is unusually keyword-dense, so
+# it accumulates rule score and crowds everything else out of the paid queue
+# rather than being genuinely more investable. Round-robin across pillars keeps
+# the best candidate within each pillar first while guaranteeing the other
+# pillars actually get looked at.
+DIVERSIFY_CLAUDE_PILLARS = os.getenv(
+    "GLASSWING_DIVERSIFY_CLAUDE_PILLARS", "1"
+).strip().lower() not in {"0", "false", "no"}
+
+
+def _spread_across_pillars(frame: pd.DataFrame, quota: int) -> pd.DataFrame:
+    """Fill the quota round-robin across thesis pillars, best-first within each.
+
+    `frame` must already be sorted best-first. The single strongest candidate
+    overall still goes first, so an exceptional score is never held back.
+    """
+    if quota <= 0 or frame.empty:
+        return frame.head(max(0, quota)).copy()
+    if not DIVERSIFY_CLAUDE_PILLARS or PILLAR_COLUMN not in frame.columns:
+        return frame.head(quota).copy()
+
+    pillars = frame[PILLAR_COLUMN].astype(str).str.strip().str.lower()
+    # groupby(sort=False) preserves the incoming score order inside each group.
+    groups = [group for _, group in frame.groupby(pillars, sort=False)]
+    if len(groups) <= 1:
+        return frame.head(quota).copy()
+    # Lead with the pillar holding the strongest candidate.
+    groups.sort(key=lambda g: float(g.iloc[0]["_queue_score"]), reverse=True)
+
+    order: list[int] = []
+    depth = 0
+    while len(order) < quota:
+        progressed = False
+        for group in groups:
+            if depth >= len(group):
+                continue
+            order.append(group.index[depth])
+            progressed = True
+            if len(order) >= quota:
+                break
+        if not progressed:
+            break
+        depth += 1
+    return frame.loc[order].copy()
+
+
 def prepare_input(
     path: Path,
     reclassify: bool,
@@ -538,7 +589,7 @@ def prepare_input(
     if max_calls >= 0:
         quota = min(quota, max_calls)
 
-    selected = frame.head(quota).copy()
+    selected = _spread_across_pillars(frame, quota)
 
     return selected, {
         "total_screened": total_screened,

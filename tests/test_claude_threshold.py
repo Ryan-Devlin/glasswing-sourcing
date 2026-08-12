@@ -335,3 +335,84 @@ class ClaudeThresholdTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _ranked(counts):
+    """Score-ordered candidate frame: {pillar: n} with cyber scoring highest."""
+    rows = []
+    score = 95
+    for pillar, n in counts.items():
+        for _ in range(n):
+            rows.append({
+                "domain": f"{pillar}{score}.ai",
+                "_queue_score": score,
+                "rule_score": score,
+                "rule_thesis_pillar": pillar,
+            })
+            score -= 1
+    frame = pd.DataFrame(rows).sort_values("_queue_score", ascending=False)
+    return frame.reset_index(drop=True)
+
+
+def test_one_pillar_cannot_monopolise_the_paid_queue():
+    """Cyber took 40.8% of live Claude KEEPs while vertical AI -- with the
+    largest candidate pool of any pillar -- took 3.8% and quantum 0.8%. Cyber
+    copy is keyword-dense, so it accumulates rule score and crowds the others
+    out of a global top-N selection rather than being more investable."""
+    frame = _ranked({
+        "intelligent_enterprise_defense": 20,
+        "physical_ai": 5,
+        "vertical_ai": 8,
+        "next_gen_compute": 3,
+    })
+    assert frame.head(10)["rule_thesis_pillar"].nunique() == 1, "precondition"
+
+    selected = claude_classifier._spread_across_pillars(frame, 10)
+    assert len(selected) == 10
+    assert selected["rule_thesis_pillar"].nunique() >= 4
+    # No pillar may take more than half of a batch here.
+    assert selected["rule_thesis_pillar"].value_counts().max() <= 5
+
+
+def test_strongest_candidate_overall_is_still_reviewed_first():
+    frame = _ranked({"intelligent_enterprise_defense": 5, "vertical_ai": 5})
+    selected = claude_classifier._spread_across_pillars(frame, 4)
+    assert selected.iloc[0]["_queue_score"] == frame["_queue_score"].max()
+
+
+def test_quota_is_respected_exactly_and_never_exceeded():
+    frame = _ranked({"a": 6, "b": 6, "c": 6})
+    for quota in (1, 2, 5, 9, 18):
+        assert len(claude_classifier._spread_across_pillars(frame, quota)) == quota
+
+
+def test_quota_larger_than_the_pool_returns_everything_once():
+    frame = _ranked({"a": 2, "b": 3})
+    selected = claude_classifier._spread_across_pillars(frame, 50)
+    assert len(selected) == 5
+    assert selected["domain"].is_unique
+
+
+def test_zero_or_empty_is_safe():
+    frame = _ranked({"a": 3})
+    assert claude_classifier._spread_across_pillars(frame, 0).empty
+    assert claude_classifier._spread_across_pillars(pd.DataFrame(), 5).empty
+
+
+def test_single_pillar_keeps_pure_score_order():
+    frame = _ranked({"intelligent_enterprise_defense": 6})
+    selected = claude_classifier._spread_across_pillars(frame, 4)
+    assert list(selected["domain"]) == list(frame.head(4)["domain"])
+
+
+def test_missing_pillar_column_falls_back_to_score_order():
+    frame = _ranked({"a": 4, "b": 4}).drop(columns=["rule_thesis_pillar"])
+    selected = claude_classifier._spread_across_pillars(frame, 3)
+    assert list(selected["domain"]) == list(frame.head(3)["domain"])
+
+
+def test_diversification_can_be_switched_off():
+    frame = _ranked({"intelligent_enterprise_defense": 20, "vertical_ai": 8})
+    with patch.object(claude_classifier, "DIVERSIFY_CLAUDE_PILLARS", False):
+        selected = claude_classifier._spread_across_pillars(frame, 10)
+    assert selected["rule_thesis_pillar"].nunique() == 1
