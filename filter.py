@@ -3328,17 +3328,7 @@ def route_company(
     if high_conviction_fit:
         return "review", "trusted_high_conviction_product_fit"
 
-    # A substantive site with no thesis keyword still gets one chance on score.
-    # This rule sits ahead of every score-based review path, so a real company
-    # scoring in the 40s was discarded before it could reach them. Measured over
-    # 3 hours of live traffic: 86.5% of discards scored 0-9 (the feed genuinely
-    # is that low-signal, so the rule is right in bulk), but the top of the
-    # discard pile was xfactor.io at 50, trialetics.io 48, nexorum.io 47,
-    # detaillabs.ai 45 -- all deleted permanently. Roughly 100/day clear this
-    # floor, which is real deal flow rather than a flood.
     if substantive_no_fit_evidence:
-        if score >= SUBSTANTIVE_REVIEW_FLOOR:
-            return "review", "substantive_site_scored_for_human_review"
         return "screened_out", "substantive_site_no_glasswing_fit_signals"
 
     # A credible product, wedge, and moat/technical edge -- still routed to
@@ -3432,14 +3422,6 @@ def is_retryable_inaccessible_reason(reason: object) -> bool:
     except ValueError:
         return False
     return status in RETRYABLE_FETCH_STATUSES or 500 <= status <= 599
-
-
-# A substantive site scoring at or above this still reaches Needs Review even
-# with no explicit thesis keyword match. Tunable without a redeploy so the
-# retained-versus-discarded tradeoff can be moved from evidence.
-SUBSTANTIVE_REVIEW_FLOOR = max(
-    0, min(100, int(os.getenv("GLASSWING_SUBSTANTIVE_REVIEW_FLOOR", "35")))
-)
 
 
 HARD_DENIAL_REASONS = {
