@@ -85,8 +85,24 @@ class PostgresConnection:
         )
 
     def executescript(self, sql: str) -> None:
-        with self._raw.cursor() as cursor:
-            cursor.execute(sql)
+        # Roll back a failed script before returning control. Postgres aborts
+        # the whole transaction on any error, so without this every later
+        # statement on the same connection raises InFailedSqlTransaction --
+        # and because the connection goes back to the pool, it stays poisoned.
+        # Confirmed live: one DeadlockDetected inside ai_search's schema DDL
+        # wedged the .ai crawler for ~20 hours. Its caller's own `finally`
+        # then ran an advisory-unlock on the aborted transaction, which
+        # replaced the real DeadlockDetected with a misleading
+        # InFailedSqlTransaction and hid the cause.
+        try:
+            with self._raw.cursor() as cursor:
+                cursor.execute(sql)
+        except Exception:
+            try:
+                self._raw.rollback()
+            except Exception:
+                pass
+            raise
 
     def commit(self) -> None:
         self._raw.commit()

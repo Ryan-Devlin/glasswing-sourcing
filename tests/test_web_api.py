@@ -620,3 +620,24 @@ def test_paused_cloud_worker_allows_filter_changes(monkeypatch, tmp_path):
         },
     )
     assert response.status_code == 200
+
+
+def test_review_view_never_surfaces_unreadable_sites():
+    """A site we could not read is not a review candidate.
+
+    Confirmed live: alsharif.tech ("525: SSL handshake failed") and
+    domedia.tech ("403 Forbidden") both appeared in the working review table.
+    Ghost rows are now retained rather than purged so the queue can recheck
+    them, which makes filtering them out of this view load-bearing rather than
+    incidental.
+    """
+    assert "ghost" not in web_api.BUCKETS["review"]
+    assert "ghost" not in web_api.BUCKETS["investable"]
+    assert "ghost" not in web_api.BUCKETS["denied"]
+    # Still reachable when something explicitly asks for everything.
+    assert "ghost" in web_api.BUCKETS["all"]
+
+
+def test_review_view_still_contains_the_real_candidate_buckets():
+    for bucket in ("review", "coming_soon", "insufficient", "screened_out", "comp"):
+        assert bucket in web_api.BUCKETS["review"], bucket

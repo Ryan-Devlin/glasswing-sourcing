@@ -310,3 +310,65 @@ def test_read_only_pool_still_sets_both_session_options(monkeypatch):
     joined = " | ".join(raw.statements)
     assert "idle_in_transaction_session_timeout" in joined
     assert "default_transaction_read_only = on" in joined
+
+
+class _FailingScriptRaw:
+    """Raw connection whose DDL fails, as a deadlock would."""
+
+    def __init__(self):
+        self.rolled_back = 0
+        self.executed = []
+
+    class _Cur:
+        def __init__(self, outer):
+            self.outer = outer
+
+        def execute(self, sql, params=()):
+            self.outer.executed.append(sql)
+            raise RuntimeError("deadlock detected")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def cursor(self):
+        return self._Cur(self)
+
+    def rollback(self):
+        self.rolled_back += 1
+
+
+def test_failed_script_rolls_back_so_the_connection_is_reusable():
+    """A failed DDL must not poison the pooled connection.
+
+    Confirmed live: one DeadlockDetected inside ai_search's schema DDL left the
+    transaction aborted, so every later statement on that connection raised
+    InFailedSqlTransaction. Because the connection returns to the pool, the .ai
+    crawler stayed wedged for ~20 hours.
+    """
+    raw = _FailingScriptRaw()
+    conn = db_backend.PostgresConnection(raw)
+    try:
+        conn.executescript("CREATE TABLE x (id int)")
+    except RuntimeError as exc:
+        assert "deadlock" in str(exc), "the real cause must propagate"
+    else:
+        raise AssertionError("the failure should have been re-raised")
+    assert raw.rolled_back == 1, "connection was left in an aborted transaction"
+
+
+def test_rollback_failure_does_not_mask_the_original_error():
+    class Stubborn(_FailingScriptRaw):
+        def rollback(self):
+            raise RuntimeError("rollback also failed")
+
+    conn = db_backend.PostgresConnection(Stubborn())
+    try:
+        conn.executescript("CREATE TABLE x (id int)")
+    except RuntimeError as exc:
+        # The DDL failure is what a caller needs to see, not the rollback's.
+        assert "deadlock" in str(exc), str(exc)
+    else:
+        raise AssertionError("the failure should have been re-raised")

@@ -51,10 +51,21 @@ def connect(
                 migrate_postgres(conn)
             finally:
                 if locked:
-                    conn.execute(
-                        "SELECT pg_advisory_unlock(hashtext(?))",
-                        ("ai_search_migration",),
-                    )
+                    # Never let releasing the lock mask why migration failed.
+                    # On an aborted transaction this statement raises
+                    # InFailedSqlTransaction, which used to replace the real
+                    # DeadlockDetected and leave the lock held on top of it.
+                    try:
+                        conn.execute(
+                            "SELECT pg_advisory_unlock(hashtext(?))",
+                            ("ai_search_migration",),
+                        )
+                    except Exception:
+                        conn.rollback()
+                        conn.execute(
+                            "SELECT pg_advisory_unlock(hashtext(?))",
+                            ("ai_search_migration",),
+                        )
         return conn
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

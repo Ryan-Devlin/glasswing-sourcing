@@ -182,7 +182,13 @@ async def production_headers(request, call_next):
 BUCKETS = {
     "all": ("priority", "review", "coming_soon", "insufficient", "ghost", "screened_out", "comp", "reject"),
     "investable": ("priority",),
-    "review": ("review", "coming_soon", "insufficient", "ghost", "screened_out", "comp"),
+    # "ghost" is deliberately absent. A ghost row is a site we could not read
+    # at all -- an SSL handshake failure, a 403 challenge, a blank page. There
+    # is nothing for a human to review, so surfacing it here just buries the
+    # real candidates. These rows are retained (not purged) so the queue can
+    # recheck them later, which is exactly why they must be filtered out of the
+    # working list rather than relied on being deleted.
+    "review": ("review", "coming_soon", "insufficient", "screened_out", "comp"),
     "denied": ("reject",),
 }
 CORPUS_SOURCES = {
