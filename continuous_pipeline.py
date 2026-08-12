@@ -681,6 +681,13 @@ def claim_batch(
         # local corpora above. Bounding this window (rather than scanning
         # every pending row) keeps a single claim cheap regardless of how
         # deep the real-time queue gets.
+        # The extension filter has to live in SQL, not after the fact. This
+        # window is ordered newest-first and then filtered, so a standing
+        # backlog made up of de-selected extensions used to fill the whole
+        # window and leave almost nothing claimable -- confirmed live: batches
+        # of 2.9 domains against a requested 24, i.e. ~72/min instead of ~600,
+        # with a 127k backlog that was mostly .io/.tech after those were turned
+        # off. Filtering in the query keeps every candidate row usable.
         candidate_limit = min(max(size * 10, size), 2000)
         rows = conn.execute(
             """
@@ -688,6 +695,11 @@ def claim_batch(
             FROM domains
             WHERE status='pending'
               AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+              AND (
+                ? = 0
+                OR substring(domain from '\\.[^.]+$') = ANY(?)
+                OR last_seen_run_id IN ('manual_domain_intake','csv_upload')
+              )
             ORDER BY
               CASE
                 WHEN first_seen_run_id=? THEN 0
@@ -698,7 +710,14 @@ def claim_batch(
               first_seen DESC
             LIMIT ?
             """,
-            (now, preferred_run_id, preferred_run_id, candidate_limit),
+            (
+                now,
+                1 if allowed_extensions else 0,
+                sorted(allowed_extensions or []),
+                preferred_run_id,
+                preferred_run_id,
+                candidate_limit,
+            ),
         ).fetchall()
         if allowed_extensions:
             rows = [

@@ -109,7 +109,11 @@ class StatusPersistenceTests(unittest.TestCase):
             ["current.ai", "old-repeat.ai", "manual.com", "old-cached.ai"],
         )
         self.assertEqual(conn.claimed, claimed)
-        self.assertEqual(conn.params[1:3], ("run-now", "run-now"))
+        # Extension filtering now happens in SQL, so the run ids sit after the
+        # has-extensions flag and the extension array.
+        self.assertEqual(conn.params[1], 1)
+        self.assertEqual(conn.params[2], [".ai"])
+        self.assertEqual(conn.params[3:5], ("run-now", "run-now"))
 
     def test_listener_connectivity_does_not_clobber_active_screening_stage(self):
         with tempfile.TemporaryDirectory() as directory:
