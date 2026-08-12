@@ -78,7 +78,7 @@ class ScraperResilienceTests(unittest.TestCase):
         # timeouts. Tunable via STREAM_SURGE_WORKERS without a redeploy.
         self.assertEqual(surge["batch_size"], surge["workers"])
         self.assertGreaterEqual(surge["workers"], 16)
-        self.assertLessEqual(surge["workers"], 32)
+        self.assertLessEqual(surge["workers"], 40)
         self.assertLessEqual(surge["timeout"], 8)
         self.assertEqual(catch_up["batch_size"], 8)
         self.assertEqual(catch_up["workers"], 8)

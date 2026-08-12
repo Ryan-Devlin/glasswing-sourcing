@@ -1780,8 +1780,17 @@ def adaptive_screening_profile(
         # keep it tunable without a redeploy so the ceiling can be found by
         # measurement (watch fetch_failure_rate and worker_rss_mb) rather
         # than by another round of guessing.
+        #
+        # Raised 24 -> 40 after widening the extension filter to 7 TLDs took
+        # arrival from ~70/min to ~373/min, well past what 24 could drain.
+        # Evidence that 40 is safe: fetch_failure_rate held at 0.25-0.35 across
+        # 10, 24 and 40 workers, scoring CPU has ~34x headroom (12ms/domain),
+        # and worker RSS sat near 200 MB. The original "40 collapses the
+        # resolver" reading was taken while persistence was blocked on lock
+        # convoys, which stalls this event loop and makes every in-flight
+        # timeout fire at once.
         surge_workers = max(
-            1, min(40, int(os.getenv("STREAM_SURGE_WORKERS", "24")))
+            1, min(40, int(os.getenv("STREAM_SURGE_WORKERS", "40")))
         )
         return {
             "mode": "surge",
