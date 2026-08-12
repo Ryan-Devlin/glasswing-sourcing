@@ -468,3 +468,29 @@ if __name__ == "__main__":
                 10_000, base_batch=75, base_workers=28, base_timeout=12
             )
         self.assertEqual(profile["workers"], 40)
+
+    def test_candidate_frame_is_built_outside_the_worker_process(self):
+        """The worker must never hold the whole-corpus candidate frame.
+
+        Confirmed live: building it in-process put the always-on worker at
+        ~1.78 GB, past its own 1200 MB GLASSWING_PIPELINE_RECYCLE_RSS_MB
+        ceiling, so the post-batch check os.execv'd the process after roughly
+        every batch. The dashboard counted ~24 domains -- exactly one surge
+        wave -- then reset every per-run counter to zero, on repeat.
+        """
+        source = Path("continuous_pipeline.py").read_text(encoding="utf-8")
+        # The in-process load must be gone entirely, import included.
+        self.assertNotIn("frame_from_store", source)
+        self.assertIn("build_claude_candidates.py", source)
+        self.assertTrue(Path("build_claude_candidates.py").exists())
+
+    def test_candidate_builder_reports_an_empty_store_distinctly(self):
+        # rc=2 means "nothing to do", which must not be treated as a failure
+        # warning, and must not leave a stale file behind to be mistaken for
+        # real candidates.
+        builder = Path("build_claude_candidates.py").read_text(encoding="utf-8")
+        self.assertIn("return 2", builder)
+        self.assertIn("unlink(missing_ok=True)", builder)
+
+        source = Path("continuous_pipeline.py").read_text(encoding="utf-8")
+        self.assertIn("if build.returncode == 2:", source)

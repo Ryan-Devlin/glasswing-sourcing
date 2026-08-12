@@ -40,7 +40,6 @@ for _source_root in (_AI_SEARCH_SRC, _ZONE_UNIVERSE_SRC):
 
 import filter as screening_filter
 from classification_store import (
-    frame_from_store,
     import_private_sqlite_into_shared,
     using_classification_postgres,
 )
@@ -1240,11 +1239,39 @@ def maybe_run_claude(batch_path: Path) -> int:
             # domains sitting in the (Postgres) classification store the
             # whole time. Build a fresh candidate file straight from the
             # real store instead of depending on that local mirror at all.
-            frame = frame_from_store()
-            if frame.empty:
-                return 0
+            #
+            # Built in a child process on purpose. The frame holds every row's
+            # full record_json website copy (~1.7 GB at ~99k rows) because
+            # claude_classifier re-scores that copy live. Building it here used
+            # to push this always-on worker past its own 1200 MB recycle
+            # ceiling, so the post-batch check os.execv'd the process after
+            # roughly every batch -- the dashboard counted ~24 domains, exactly
+            # one surge wave, then reset every per-run counter to zero, on
+            # repeat. The child's peak dies with the child.
             candidates = FILTERED / "all_screened_live.csv"
-            frame.to_csv(candidates, index=False)
+            candidates.parent.mkdir(parents=True, exist_ok=True)
+            build = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "build_claude_candidates.py"),
+                    str(candidates),
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+            if build.returncode == 2:
+                return 0
+            if build.returncode != 0 or not candidates.exists():
+                write_status(
+                    claude_warning=(
+                        "Claude skipped: building the candidate file failed: "
+                        f"{(build.stderr or '').strip()[:300]}"
+                    )[:500],
+                    updated_at=utc_now(),
+                )
+                return 0
         else:
             candidates = FILTERED / "all_screened.csv"
             if not candidates.exists() or candidates.stat().st_size == 0:
