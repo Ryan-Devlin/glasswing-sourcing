@@ -4601,12 +4601,13 @@ def persist_screening_output(output: pd.DataFrame) -> dict[str, int]:
         bootstrap_from_csv()
     upsert_classifications(persistable_output)
 
+    tombstoned = 0
     if not automated_discarded.empty:
         # Keep only a minimal cross-crawler tombstone. All website text,
         # search rows, retry data, and full classification payloads go away.
         from rejection_cleanup import purge_automated_rejections
 
-        record_automated_exclusions(
+        tombstoned = record_automated_exclusions(
             automated_discarded.to_dict(orient="records")
         )
         purge_automated_rejections(
@@ -4728,6 +4729,14 @@ def persist_screening_output(output: pd.DataFrame) -> dict[str, int]:
         ).sum()),
         "ghost": int(output["routing_bucket"].eq("ghost").sum()),
         "storage_discarded": len(automated_discarded),
+        # Per-batch write accounting. Without this, a batch that computed
+        # discards but wrote nothing to the shared store was indistinguishable
+        # from a batch with nothing to write -- and this worker has no log
+        # capture, so there was no other way to tell them apart.
+        "rows_in": int(len(output)),
+        "rows_persisted": int(len(persistable_output)),
+        "rows_unreadable": int(unreadable.sum()),
+        "rows_tombstoned": int(tombstoned),
         "retry_domains": retry_domains,
         "blocked_or_erroring": len(retry_domains),
         "shortlist_master": len(shortlist_master),

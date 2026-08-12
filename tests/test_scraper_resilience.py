@@ -494,3 +494,17 @@ if __name__ == "__main__":
 
         source = Path("continuous_pipeline.py").read_text(encoding="utf-8")
         self.assertIn("if build.returncode == 2:", source)
+
+    def test_persist_reports_what_it_actually_wrote(self):
+        """A batch that wrote nothing must be distinguishable from one with
+        nothing to write. This worker has no log capture, so per-batch write
+        accounting is the only way to tell those apart -- confirmed needed when
+        2,641 processed domains yielded 33 tombstones and 11 classifications
+        with no way to see where the rest went."""
+        source = Path("filter.py").read_text(encoding="utf-8")
+        stats = source.split('"storage_discarded": len(automated_discarded),', 1)[1][:700]
+        for key in ("rows_in", "rows_persisted", "rows_unreadable", "rows_tombstoned"):
+            self.assertIn(f'"{key}"', stats)
+        # The tombstone count must come from the writer's own return value,
+        # not be inferred from the frame.
+        self.assertIn("tombstoned = record_automated_exclusions(", source)
