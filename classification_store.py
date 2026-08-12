@@ -106,6 +106,21 @@ def connect_store(
             read_only=read_only,
             env_var=database_env_var,
         )
+        # Pin the schema. This store owns "public", but when DATABASE_URL is
+        # absent it falls back to PIPELINE_DATABASE_URL and therefore shares
+        # continuous_pipeline's connection pool -- whose connections carry a
+        # session-level `SET search_path TO pipeline, public`. Unqualified table
+        # names then resolved to the pipeline schema, so migrate() created a
+        # duplicate set of tables there and every write landed in
+        # pipeline.classifications while the dashboard read public.classifications.
+        # Reads came from the separate read-only pool, which kept the default
+        # search_path, so the two diverged in total silence: writes reported
+        # success, reads returned correct-looking counts, and 11,687
+        # classifications plus 36,950 exclusions accumulated invisibly in the
+        # wrong schema. That is what "Candidates retained: 0" actually was.
+        conn.execute("SET search_path TO public")
+        if not read_only:
+            conn.commit()
         if not read_only and database_env_var not in _MIGRATED_POSTGRES_TARGETS:
             # This connection string is now shared by the web service and
             # the ai-worker/zone-worker cloud services too -- multiple

@@ -981,3 +981,52 @@ def test_claude_queue_recovers_false_selection_failure(tmp_path):
     )
     assert classification_store.recover_claude_review_queue(path=database) == 1
     assert classification_store.claude_review_status("praxl.app", path=database)["status"] == "queued"
+
+def test_postgres_connections_pin_the_public_schema():
+    """The store must not inherit another subsystem's search_path.
+
+    When DATABASE_URL is absent the store falls back to PIPELINE_DATABASE_URL and
+    shares continuous_pipeline's connection pool, whose connections carry a
+    session-level `SET search_path TO pipeline, public`. Unqualified names then
+    resolved to the pipeline schema: migrate() built a duplicate set of tables
+    there and every write landed in pipeline.classifications while the dashboard
+    read public.classifications. Reads used the separate read-only pool and kept
+    the default search_path, so the divergence was completely silent -- 11,687
+    classifications and 36,950 exclusions accumulated in the wrong schema and
+    the dashboard reported "Candidates retained: 0".
+    """
+    statements = []
+
+    class FakeConn:
+        def execute(self, sql, params=()):
+            statements.append(sql)
+            class C:
+                def fetchone(self_inner):
+                    return None
+                def fetchall(self_inner):
+                    return []
+            return C()
+
+        def commit(self):
+            pass
+
+    import classification_store as store
+
+    original_connect = store.connect_postgres
+    original_migrate = store.migrate
+    original_env = store.classification_database_env_var
+    store.connect_postgres = lambda **kw: FakeConn()
+    store.migrate = lambda conn: None
+    store.classification_database_env_var = lambda: "PIPELINE_DATABASE_URL"
+    try:
+        store.connect_store(read_only=True)
+        assert any("SET search_path TO public" in s for s in statements), statements
+        statements.clear()
+        store._MIGRATED_POSTGRES_TARGETS.add("PIPELINE_DATABASE_URL")
+        store.connect_store()
+        assert any("SET search_path TO public" in s for s in statements), statements
+    finally:
+        store.connect_postgres = original_connect
+        store.migrate = original_migrate
+        store.classification_database_env_var = original_env
+        store._MIGRATED_POSTGRES_TARGETS.discard("PIPELINE_DATABASE_URL")
