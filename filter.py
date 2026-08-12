@@ -3436,10 +3436,13 @@ def is_retryable_inaccessible_reason(reason: object) -> bool:
 
 
 # A substantive site scoring at or above this still reaches Needs Review even
-# with no explicit thesis keyword match. Tunable without a redeploy so the
-# retained-versus-discarded tradeoff can be moved from evidence.
+# with no explicit thesis keyword match. Set to 25 deliberately: measured over 3
+# hours of live traffic, 86.5% of discards score 0-9 and are still discarded,
+# while the 20-29 band alone held ~117 real sites in that window. Trading some
+# precision for recall here is the point -- a thin-but-real company belongs in
+# the human queue, not deleted. Tunable without a redeploy in either direction.
 SUBSTANTIVE_REVIEW_FLOOR = max(
-    0, min(100, int(os.getenv("GLASSWING_SUBSTANTIVE_REVIEW_FLOOR", "35")))
+    0, min(100, int(os.getenv("GLASSWING_SUBSTANTIVE_REVIEW_FLOOR", "25")))
 )
 
 

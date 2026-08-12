@@ -752,7 +752,7 @@ class SubstantiveSiteFloorTests(unittest.TestCase):
 
     def test_low_signal_substantive_sites_are_still_discarded(self):
         # The 86.5% majority must keep being discarded; this is not a reversal.
-        for score in (0, 5, 12, 25, 34):
+        for score in (0, 5, 12, 19, 24):
             with self.subTest(score=score):
                 bucket, reason = self._route(score)
                 self.assertEqual(bucket, "screened_out")
@@ -761,7 +761,7 @@ class SubstantiveSiteFloorTests(unittest.TestCase):
                 )
 
     def test_higher_scoring_substantive_sites_reach_review(self):
-        for score in (35, 44, 50, 72):
+        for score in (25, 35, 44, 50, 72):
             with self.subTest(score=score):
                 bucket, _ = self._route(score)
                 self.assertNotEqual(
@@ -777,7 +777,7 @@ class SubstantiveSiteFloorTests(unittest.TestCase):
         # Clamped, so a bad value cannot silently disable or invert the rule.
         self.assertIn("min(100", block)
         self.assertIn("max(", block)
-        self.assertEqual(screening_filter.SUBSTANTIVE_REVIEW_FLOOR, 35)
+        self.assertEqual(screening_filter.SUBSTANTIVE_REVIEW_FLOOR, 25)
 
     def test_retained_substantive_site_is_not_a_hard_denial(self):
         # It must land in the human queue, not be presented as a denial.
