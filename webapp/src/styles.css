@@ -222,13 +222,16 @@ header p {
 }
 .top-pick-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: 11px;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  align-items: stretch;
+  gap: 12px;
 }
 .top-pick {
   position: relative;
+  display: flex;
+  flex-direction: column;
   min-width: 0;
-  padding: 16px 16px 50px;
+  padding: 14px 14px 46px;
   border: 1px solid #dbe8e3;
   border-radius: 11px;
   background: #fff;
@@ -336,7 +339,7 @@ header p {
   align-items: flex-start;
   justify-content: space-between;
   gap: 10px;
-  margin-bottom: 11px;
+  margin-bottom: 8px;
 }
 .deal-status {
   display: flex;
@@ -384,8 +387,16 @@ header p {
   font-size: 11px;
 }
 .top-pick h3 {
-  margin: 0 0 3px;
-  font-size: 16px;
+  display: -webkit-box;
+  height: 62px;
+  margin: 0 0 2px;
+  overflow: hidden;
+  font-size: 15px;
+  line-height: 1.38;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
 }
 .top-pick > a {
   color: #138c7b;
@@ -394,7 +405,7 @@ header p {
   text-decoration: none;
 }
 .deal-claude-review {
-  margin-top: 9px;
+  margin-top: 7px;
 }
 .deal-claude-review .pill {
   cursor: help;
@@ -422,15 +433,25 @@ header p {
   display: inline;
 }
 .top-pick > p {
-  min-height: 49px;
-  margin: 11px 0;
+  min-height: 48px;
+  margin: 8px 0;
   color: #566a66;
-  font-size: 12px;
+  font-size: 11px;
+  line-height: 1.42;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
 }
 .top-pick-category {
+  display: -webkit-box;
+  min-height: 15px;
+  overflow: hidden;
   color: #71837f;
-  font-size: 11px;
+  font-size: 10px;
+  line-height: 1.35;
   text-transform: capitalize;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
 }
 .dimension-row {
   display: flex;
@@ -1113,5 +1134,31 @@ tbody tr:hover {
   }
   td {
     min-width: 120px;
+  }
+  .top-picks {
+    padding: 14px;
+  }
+  .top-pick-grid {
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  }
+  .tracking-header-actions {
+    flex-wrap: wrap;
+  }
+  .deal-status {
+    max-width: 72%;
+  }
+}
+@media (max-width: 520px) {
+  .top-pick-grid {
+    grid-template-columns: 1fr;
+  }
+  .top-pick-head {
+    align-items: flex-start;
+  }
+  .deal-status {
+    max-width: 74%;
+  }
+  .deal-status .pill {
+    white-space: normal;
   }
 }
