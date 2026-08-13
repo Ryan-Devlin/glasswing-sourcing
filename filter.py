@@ -847,8 +847,9 @@ PRODUCT_REALITY_SIGNALS = [
     "changelog",
     "status page",
     "single sign-on",
-    "soc 2",
-    "soc2",
+    # SOC/SOC 2 language is ubiquitous procurement boilerplate. It may be
+    # displayed as context, but it is not evidence that a product is real or
+    # differentiated and must never increase the score.
     "approval workflows",
     "audit log",
     "audit logs",
@@ -2229,7 +2230,7 @@ ENTERPRISE_RESCUE_PRODUCTS = [
 
 ENTERPRISE_RESCUE_STRONG_CONCEPTS = [
     "enterprise ai governance", "ai governance", "control plane",
-    "runtime control", "runtime integrity", "grc", "soc 2", "iso 27001",
+    "runtime control", "runtime integrity", "grc", "iso 27001",
     "iso 42001", "nis2", "research operating system", "formal proof",
     "mathematically verified", "mcp tools", "agent orchestration",
     "agent workspace", "autonomous systems", "software engineering",

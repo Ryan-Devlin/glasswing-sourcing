@@ -848,6 +848,23 @@ class ConcreteMechanismOutranksBoilerplateTests(unittest.TestCase):
         concrete, _, _, _ = screening_filter.score_text(self.CONCRETE)
         self.assertLess(score, concrete)
 
+    def test_repeated_soc2_boilerplate_does_not_increase_score(self):
+        base = (
+            "Runtime verification for AI coding agents with sandboxed "
+            "execution, deterministic replay, an SDK, and audit logs."
+        )
+        stuffed = base + " SOC 2 SOC2 SOC 2 compliant SOC2 SOC 2."
+        base_score, _, _, _ = screening_filter.score_text(base)
+        stuffed_score, _, _, _ = screening_filter.score_text(stuffed)
+        self.assertEqual(base_score, stuffed_score)
+
+    def test_soc2_does_not_rescue_an_otherwise_generic_company(self):
+        rescued, evidence = screening_filter.enterprise_rescue_assessment(
+            "Enterprise platform for teams. SOC 2 SOC2 SOC 2 compliant."
+        )
+        self.assertFalse(rescued)
+        self.assertNotIn("soc 2", evidence)
+
 
 class PersonalAndAcademicPagesAreNotCompaniesTests(unittest.TestCase):
     """An academic CV or personal portfolio is not an investable company.
