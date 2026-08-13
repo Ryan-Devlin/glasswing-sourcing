@@ -3436,13 +3436,23 @@ def is_retryable_inaccessible_reason(reason: object) -> bool:
 
 
 # A substantive site scoring at or above this still reaches Needs Review even
-# with no explicit thesis keyword match. Set to 25 deliberately: measured over 3
-# hours of live traffic, 86.5% of discards score 0-9 and are still discarded,
-# while the 20-29 band alone held ~117 real sites in that window. Trading some
-# precision for recall here is the point -- a thin-but-real company belongs in
-# the human queue, not deleted. Tunable without a redeploy in either direction.
+# with no explicit thesis keyword match.
+#
+# Set to 20 from direct inspection, not intuition. Sampling live discards in the
+# 12-24 band and re-reading their homepages found roughly 40% were real,
+# thesis-relevant companies: kerno.io at 23 ("the self-healing loop for AI coding
+# agents... independent runtime verification layer"), axfolio.io at 24
+# ("portfolio intelligence for RIA firms"), pulseupdates.dev at 23 (signed
+# self-hosted OTA infrastructure). The rest were personal portfolios and
+# marketing consultancies, which have their own detectors.
+#
+# The underlying problem is that score_text badly under-rates concise technical
+# copy -- a crisp three-sentence landing page cannot hit enough lexicon terms
+# across enough dimensions, while keyword-dense security copy clears 60 easily.
+# Until that is addressed, this floor is what keeps those companies out of the
+# bin. 84.5% of discards still score 0-9 and are unaffected.
 SUBSTANTIVE_REVIEW_FLOOR = max(
-    0, min(100, int(os.getenv("GLASSWING_SUBSTANTIVE_REVIEW_FLOOR", "25")))
+    0, min(100, int(os.getenv("GLASSWING_SUBSTANTIVE_REVIEW_FLOOR", "20")))
 )
 
 
