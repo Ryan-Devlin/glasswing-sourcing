@@ -95,6 +95,90 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _enrich_green_flags_in_connection(
+    conn,
+    domains: Iterable[str],
+    *,
+    checked_at: str,
+) -> int:
+    """Backfill evidence-backed website flags without network or paid calls."""
+    normalized = list(dict.fromkeys(
+        stable_domain(domain) for domain in domains if stable_domain(domain)
+    ))
+    if not normalized:
+        return 0
+    # Local import avoids making the scoring module a store import dependency.
+    from filter import founder_green_flags
+
+    changed = 0
+    for start in range(0, len(normalized), 700):
+        batch = normalized[start:start + 700]
+        marks = ",".join("?" for _ in batch)
+        rows = conn.execute(
+            "SELECT domain,final_url,description,excerpt,evidence,record_json "
+            f"FROM classifications WHERE domain IN ({marks})",
+            batch,
+        ).fetchall()
+        for row in rows:
+            try:
+                record = json.loads(str(row["record_json"] or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                record = {}
+            existing = record.get("website_green_flags", [])
+            if isinstance(existing, str):
+                try:
+                    existing = json.loads(existing)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    existing = []
+            if not isinstance(existing, list):
+                existing = []
+            evidence_text = " ".join(clean(value) for value in (
+                record.get("page_title", ""),
+                record.get("meta_description", ""),
+                record.get("homepage_excerpt", ""),
+                record.get("venture_founder_evidence", ""),
+                record.get("rule_evidence", ""),
+                row["description"], row["excerpt"], row["evidence"],
+            ) if clean(value))
+            derived = founder_green_flags(evidence_text[:20000])
+            source = clean(row["final_url"]) or f"https://{row['domain']}"
+            for flag in derived:
+                if flag.get("source") == "website":
+                    flag["source"] = source
+            merged = []
+            seen = set()
+            for flag in [*existing, *derived]:
+                if not isinstance(flag, dict):
+                    continue
+                key = (clean(flag.get("type", "")), clean(flag.get("label", "")).lower())
+                if not all(key) or key in seen or not clean(flag.get("evidence", "")):
+                    continue
+                seen.add(key)
+                merged.append(flag)
+                if len(merged) == 4:
+                    break
+            record["website_green_flags"] = merged
+            record["green_flags_checked_at"] = checked_at
+            conn.execute(
+                "UPDATE classifications SET record_json=? WHERE domain=?",
+                (json.dumps(record, ensure_ascii=False, separators=(",", ":")), row["domain"]),
+            )
+            changed += 1
+    return changed
+
+
+def enrich_green_flags(
+    domains: Iterable[str], *, path: Path | str = CLASSIFICATION_DB
+) -> int:
+    """Persist verified tags for selected companies using retained evidence."""
+    with connect_store(path) as conn:
+        changed = _enrich_green_flags_in_connection(
+            conn, domains, checked_at=utc_now()
+        )
+        conn.commit()
+    return changed
+
+
 def connect_store(
     path: Path | str = CLASSIFICATION_DB,
     *,
@@ -890,6 +974,11 @@ def upsert_claude_diligence(
                 """,
                 (domain, label, fit_score, "claude", reason, now),
             )
+        _enrich_green_flags_in_connection(
+            conn,
+            [value[0] for value in values if value[1] == "KEEP"],
+            checked_at=now,
+        )
         conn.commit()
     return len(values)
 
@@ -2385,6 +2474,7 @@ def track_domains(
             """,
             [(domain, now) for domain in values],
         )
+        _enrich_green_flags_in_connection(conn, values, checked_at=now)
         conn.commit()
     return len(values)
 
@@ -2724,6 +2814,10 @@ def record_manual_move(
                         domain,
                     ),
                 )
+        if clean(target_label).lower() == "yes":
+            _enrich_green_flags_in_connection(
+                conn, normalized, checked_at=now
+            )
         conn.commit()
     if Path(path).resolve() == Path(CLASSIFICATION_DB).resolve():
         from manual_truth_backup import create_manual_snapshot

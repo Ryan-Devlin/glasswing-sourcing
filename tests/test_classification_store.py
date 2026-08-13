@@ -60,6 +60,37 @@ def test_tracking_is_persistent_and_idempotent(tmp_path):
     assert tracked_domain_set(["example.ai"], path=database) == set()
 
 
+@pytest.mark.parametrize("transition", ["tracking", "human_yes", "claude_keep"])
+def test_positive_transitions_backfill_evidence_green_flags(tmp_path, transition):
+    database = tmp_path / "classifications.sqlite3"
+    upsert_classifications(pd.DataFrame([{
+        "domain": f"{transition}.ai",
+        "page_title": "Evidence company",
+        "homepage_excerpt": (
+            "Our founder Jane Doe previously worked at Google building "
+            "enterprise infrastructure."
+        ),
+        "routing_bucket": "review",
+        "fit_score": 82,
+    }]), path=database)
+    domain = f"{transition}.ai"
+    if transition == "tracking":
+        track_domains([domain], path=database)
+    elif transition == "human_yes":
+        record_manual_move(
+            [domain], target_label="yes", target_bucket="priority",
+            scores={domain: 82}, path=database,
+        )
+    else:
+        upsert_claude_diligence([{
+            "domain": domain,
+            "llm_decision": "KEEP",
+            "llm_fit_score": 82,
+        }], path=database)
+    row = query_classifications_by_domains([domain], path=database)[0]
+    assert row["website_green_flags"][0]["label"] == "Ex-Google"
+
+
 def test_discard_uninvestable_keeps_only_priority_and_human_truth(tmp_path):
     database = tmp_path / "classifications.sqlite3"
     upsert_classifications(
