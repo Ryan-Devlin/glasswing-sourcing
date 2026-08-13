@@ -1057,6 +1057,115 @@ tbody tr:hover {
   font-size: 12px;
   color: #71817e;
 }
+.scoring-locked,
+.scoring-section {
+  margin-bottom: 24px;
+  padding: 20px;
+  border: 1px solid var(--gw-border);
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 5px 20px #173d350d;
+}
+.scoring-funnel {
+  grid-template-columns: repeat(4, minmax(130px, 1fr));
+  margin-bottom: 24px;
+}
+.scoring-section .section-title {
+  margin-bottom: 14px;
+}
+.scoring-section .section-title p,
+.simulator p {
+  margin: 4px 0 0;
+  color: var(--gw-muted);
+  font-size: 12px;
+}
+.audit-warning {
+  color: #8b5200;
+  background: #fff1d6;
+}
+.simulator {
+  display: grid;
+  grid-template-columns: minmax(220px, .7fr) minmax(0, 1.3fr);
+  align-items: end;
+  gap: 20px;
+  background: linear-gradient(135deg, var(--gw-red-mist), #fff 55%);
+}
+.simulator label {
+  display: grid;
+  gap: 8px;
+  margin-top: 18px;
+  color: #65585a;
+  font-size: 12px;
+}
+.simulation-results {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(100px, 1fr));
+  gap: 8px;
+}
+.simulation-results .metric {
+  min-height: 82px;
+  padding: 12px;
+}
+.simulation-results .metric strong {
+  font-size: 20px;
+}
+.scoring-debug-form {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.scoring-debug-form input {
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--gw-border-strong);
+  border-radius: 9px;
+}
+.decision-trace {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid var(--gw-border);
+  border-radius: 11px;
+  background: #fbf9f8;
+}
+.trace-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.trace-summary > strong {
+  font-family: "Play", sans-serif;
+  font-size: 17px;
+}
+.trace-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+.trace-grid > div {
+  padding: 12px;
+  border-radius: 9px;
+  background: #fff;
+}
+.trace-grid h3,
+.decision-trace h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+.trace-grid p {
+  margin: 5px 0;
+  color: #655b5c;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.decision-trace ul {
+  margin: 0;
+  padding-left: 18px;
+  color: #655b5c;
+  font-size: 11px;
+}
 .modal-bg {
   position: fixed;
   inset: 0;
@@ -1134,6 +1243,14 @@ tbody tr:hover {
   }
   td {
     min-width: 120px;
+  }
+  .scoring-funnel,
+  .simulation-results {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .simulator,
+  .trace-grid {
+    grid-template-columns: 1fr;
   }
   .top-picks {
     padding: 14px;

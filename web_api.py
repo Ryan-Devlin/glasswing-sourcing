@@ -68,6 +68,9 @@ from classification_store import (
     recover_claude_review_queue,
     reconcile_claude_routing,
     search_classifications,
+    scoring_domain_trace,
+    scoring_evaluation,
+    scoring_threshold_simulation,
     source_bucket_counts,
     list_tracked_domains,
     set_tracking_status,
@@ -1433,6 +1436,24 @@ def system_health(full: bool = False, refresh: int = 0):
     if not full:
         _health_cache = (time.monotonic(), report)
     return report
+
+
+@app.get("/api/scoring/evaluation", dependencies=[Depends(_require_admin)])
+def scorer_evaluation():
+    return scoring_evaluation()
+
+
+@app.get("/api/scoring/simulate", dependencies=[Depends(_require_admin)])
+def scorer_simulation(threshold: int = Query(75, ge=0, le=100)):
+    return scoring_threshold_simulation(threshold)
+
+
+@app.get("/api/scoring/domain/{domain}", dependencies=[Depends(_require_admin)])
+def scorer_domain_trace(domain: str):
+    trace = scoring_domain_trace(domain)
+    if not trace:
+        raise HTTPException(404, "Company not found")
+    return trace
 
 
 @app.get("/api/ai/search")

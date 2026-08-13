@@ -37,6 +37,7 @@ import { dealAgeLabel, formatCount as fmt, pageCount } from "./domain";
 const NAV = [
   ["home", "Home", Home],
   ["search", "Search", Search],
+  ["scoring", "Scoring Lab", Activity],
   ["certstream", "CertStream Scraper", Activity],
   ["csv", "Domain Intake", Database],
   ["domains", "Domain Crawler (.com, .app)", Globe2],
@@ -260,6 +261,10 @@ function useApi(path, deps = []) {
   useEffect(() => {
     let live = true;
     let retryTimer = null;
+    if (!path) {
+      set({ data: null, error: "", loading: false });
+      return () => { live = false; };
+    }
     // Refresh in place. Clearing or hiding previously rendered data here makes
     // tall cards/tables collapse to a one-line loader, which changes the page
     // height and forces the browser to move the user's scroll position.
@@ -2688,6 +2693,45 @@ function AdminActivity() {
   );
 }
 
+function percent(part, total) {
+  return total ? `${((Number(part || 0) / Number(total)) * 100).toFixed(1)}%` : "—";
+}
+
+function ScoringLabPage() {
+  const { admin, requestLogin } = useAdmin();
+  const [tick, setTick] = useState(0);
+  const [threshold, setThreshold] = useState(75);
+  const [domain, setDomain] = useState("");
+  const [trace, setTrace] = useState(null);
+  const [traceError, setTraceError] = useState("");
+  const [traceBusy, setTraceBusy] = useState(false);
+  const evaluation = useApi(admin ? "/api/scoring/evaluation" : "", [admin, tick]);
+  const simulation = useApi(admin ? `/api/scoring/simulate?threshold=${threshold}` : "", [admin, threshold]);
+  if (!admin) return <section className="scoring-locked"><h1>Scoring Lab</h1><p>Admin access is required because this page exposes internal decision evidence.</p><button className="primary" onClick={requestLogin}>Admin login</button></section>;
+  const data = evaluation.data;
+  const funnel = data?.funnel || {};
+  const inspect = async (event) => {
+    event.preventDefault();
+    const checked = validateDomainInput(domain);
+    if (checked.error) return setTraceError(checked.error);
+    setTraceBusy(true); setTraceError(""); setTrace(null);
+    try { setTrace(await api(`/api/scoring/domain/${encodeURIComponent(checked.domain)}`)); }
+    catch (error) { setTraceError(error.status === 404 ? "Company is not in the classification database." : error.message); }
+    finally { setTraceBusy(false); }
+  };
+  return <>
+    <header><p className="eyebrow">Deterministic evaluation</p><h1>Scoring Lab</h1><p>Measure scoring quality, audit denials, and simulate thresholds without training a model or spending Claude calls.</p></header>
+    <div className="section-title"><h2>Decision funnel</h2><button onClick={() => setTick((value) => value + 1)}><RefreshCw size={14}/> Refresh</button></div>
+    {evaluation.loading && !data ? <Loading/> : evaluation.error && !data ? <ErrorBox>{evaluation.error}</ErrorBox> : <>
+      <div className="metrics scoring-funnel"><Metric label="Screened" value={fmt(funnel.screened)}/><Metric label="Needs Review" value={fmt(funnel.review)}/><Metric label="Hard Denied" value={fmt(funnel.denied)}/><Metric label="Claude reviewed" value={fmt(funnel.claude_reviewed)}/><Metric label="Claude KEEP" value={fmt(funnel.claude_keep)}/><Metric label="Human YES" value={fmt(funnel.human_yes)}/><Metric label="Tracked" value={fmt(funnel.tracked)}/><Metric label="Meetings" value={fmt(funnel.meetings)}/></div>
+      <section className="scoring-section"><div className="section-title"><div><h2>Score accuracy</h2><p>Historical conversion by deterministic website score.</p></div></div><div className="table-wrap"><table><thead><tr><th>Score band</th><th>Screened</th><th>Claude KEEP</th><th>KEEP rate</th><th>Human YES</th><th>Tracked</th></tr></thead><tbody>{(data.score_bands || []).map((row) => <tr key={row.band}><td><strong>{row.band}</strong></td><td>{fmt(row.screened)}</td><td>{fmt(row.claude_keep)}</td><td>{percent(row.claude_keep, row.screened)}</td><td>{fmt(row.human_yes)}</td><td>{fmt(row.tracked)}</td></tr>)}</tbody></table></div></section>
+      <section className="scoring-section"><div className="section-title"><div><h2>Denial rule audit</h2><p>Tracked or human-YES denials count as reversals requiring review.</p></div></div><div className="table-wrap"><table><thead><tr><th>Rule</th><th>Denied</th><th>Reversed</th><th>Reversal rate</th></tr></thead><tbody>{(data.rules || []).map((row) => <tr key={row.rule || "unknown"}><td>{String(row.rule || "Unspecified").replaceAll("_", " ")}</td><td>{fmt(row.denied)}</td><td>{fmt(row.reversals)}</td><td><span className={`pill ${Number(row.reversals) ? "audit-warning" : ""}`}>{percent(row.reversals, row.denied)}</span></td></tr>)}</tbody></table></div></section>
+    </>}
+    <section className="scoring-section simulator"><div><h2>Threshold simulator</h2><p>No-write estimate against historical classifications.</p><label>Claude score threshold <strong>{threshold}</strong><input type="range" min="40" max="95" value={threshold} onChange={(event) => setThreshold(Number(event.target.value))}/></label></div>{simulation.data && <div className="simulation-results"><Metric label="Eligible" value={fmt(simulation.data.eligible)}/><Metric label="Unreviewed calls" value={fmt(simulation.data.unreviewed)}/><Metric label="Historical KEEP" value={fmt(simulation.data.historical_keeps)}/><Metric label="Human YES captured" value={fmt(simulation.data.human_yes)}/></div>}</section>
+    <section className="scoring-section"><div className="section-title"><div><h2>Domain decision debugger</h2><p>Inspect stored signals, score components, routing, Claude, human, and workflow history.</p></div></div><form className="scoring-debug-form" onSubmit={inspect}><input value={domain} onChange={(event) => setDomain(event.target.value)} placeholder="company.ai"/><button className="primary" disabled={traceBusy}>{traceBusy ? "Inspecting…" : "Inspect domain"}</button></form>{traceError && <p className="error">{traceError}</p>}{trace && <div className="decision-trace"><div className="trace-summary"><strong>{trace.company_name || trace.domain}</strong><span>{trace.domain}</span><span className="score-ring">{trace.fit_score}<small>/100</small></span><span className={`pill ${trace.routing_bucket}`}>{String(trace.routing_bucket).replaceAll("_", " ")}</span></div><div className="trace-grid"><div><h3>Routing</h3><p><strong>Rule:</strong> {String(trace.routing_reason || "none").replaceAll("_", " ")}</p><p><strong>Caps:</strong> {trace.score_eligibility_caps || "None"}</p><p><strong>Denial evidence:</strong> {trace.denial_evidence || "None"}</p></div><div><h3>Signals</h3>{Object.entries(trace.signals || {}).map(([key, value]) => <p key={key}><strong>{key.replaceAll("_", " ")}:</strong> {String(value ?? 0)}</p>)}</div><div><h3>Decisions</h3><p><strong>Claude:</strong> {trace.claude?.decision || "Not reviewed"} {trace.claude?.fit_score ?? ""}</p><p><strong>Human:</strong> {trace.human?.target_label || "No decision"}</p><p><strong>Workflow:</strong> {trace.tracking?.tracking_status || "Not tracked"}</p></div></div>{trace.movements?.length > 0 && <div><h3>Movement history</h3><ul>{trace.movements.map((move, index) => <li key={`${move.moved_at}-${index}`}>{move.from_bucket || "unclassified"} → {move.to_bucket} · {move.source} · {new Date(move.moved_at).toLocaleString()}</li>)}</ul></div>}</div>}</section>
+  </>;
+}
+
 function ClaudeQueuePage() {
   const { admin, requestLogin } = useAdmin();
   const [tick, setTick] = useState(0);
@@ -3055,6 +3099,7 @@ function App() {
   const body = {
     home: <HomePage />,
     search: <GlobalSearchPage />,
+    scoring: <ScoringLabPage />,
     certstream: <CertStreamPage />,
     formd: <FormDPage />,
     csv: <SearchCorpusPage kind="ai" />,

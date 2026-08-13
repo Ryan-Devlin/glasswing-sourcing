@@ -1134,6 +1134,141 @@ def source_bucket_counts(
     return {str(row["routing_bucket"]): int(row["total"]) for row in rows}
 
 
+SCORE_BANDS = (
+    ("90–100", 90, 100), ("80–89", 80, 89), ("70–79", 70, 79),
+    ("60–69", 60, 69), ("Under 60", 0, 59),
+)
+
+
+def scoring_evaluation(*, path: Path | str = CLASSIFICATION_DB) -> dict[str, object]:
+    """Aggregate scorer outcomes without loading classification records."""
+    if not using_classification_postgres() and not Path(path).exists():
+        return {"funnel": {}, "score_bands": [], "rules": [], "sources": []}
+    with connect_store(path, read_only=True) as conn:
+        total = int(conn.execute("SELECT count(*) AS n FROM classifications").fetchone()["n"])
+        buckets = {str(row["routing_bucket"]): int(row["n"]) for row in conn.execute(
+            "SELECT routing_bucket,count(*) AS n FROM classifications GROUP BY routing_bucket"
+        ).fetchall()}
+        reviewed = conn.execute(
+            "SELECT count(*) AS n,"
+            "sum(CASE WHEN decision='KEEP' THEN 1 ELSE 0 END) AS kept "
+            "FROM claude_diligence WHERE decision IN ('KEEP','REJECT')"
+        ).fetchone()
+        human = conn.execute(
+            "SELECT count(*) AS n,"
+            "sum(CASE WHEN lower(target_label)='yes' THEN 1 ELSE 0 END) AS yes_n "
+            "FROM manual_decisions"
+        ).fetchone()
+        tracked = conn.execute(
+            "SELECT count(*) AS n,"
+            "sum(CASE WHEN tracking_status='reached_out' THEN 1 ELSE 0 END) AS reached,"
+            "sum(CASE WHEN tracking_status='meeting' THEN 1 ELSE 0 END) AS meetings "
+            "FROM tracked_domains"
+        ).fetchone()
+        score_bands = []
+        for label, low, high in SCORE_BANDS:
+            row = conn.execute(
+                "SELECT count(*) AS screened,"
+                "sum(CASE WHEN cd.decision='KEEP' THEN 1 ELSE 0 END) AS claude_keep,"
+                "sum(CASE WHEN lower(md.target_label)='yes' THEN 1 ELSE 0 END) AS human_yes,"
+                "sum(CASE WHEN td.domain IS NOT NULL THEN 1 ELSE 0 END) AS tracked "
+                "FROM classifications c LEFT JOIN claude_diligence cd ON cd.domain=c.domain "
+                "LEFT JOIN manual_decisions md ON md.domain=c.domain "
+                "LEFT JOIN tracked_domains td ON td.domain=c.domain "
+                "WHERE c.fit_score BETWEEN ? AND ?",
+                (low, high),
+            ).fetchone()
+            screened = int(row["screened"] or 0)
+            score_bands.append({
+                "band": label, "low": low, "high": high, "screened": screened,
+                "claude_keep": int(row["claude_keep"] or 0),
+                "human_yes": int(row["human_yes"] or 0),
+                "tracked": int(row["tracked"] or 0),
+            })
+        rules = [dict(row) for row in conn.execute(
+            "SELECT c.routing_reason AS rule,count(*) AS denied,"
+            "sum(CASE WHEN lower(md.target_label)='yes' OR td.domain IS NOT NULL "
+            "THEN 1 ELSE 0 END) AS reversals "
+            "FROM classifications c LEFT JOIN manual_decisions md ON md.domain=c.domain "
+            "LEFT JOIN tracked_domains td ON td.domain=c.domain "
+            "WHERE c.routing_bucket='reject' GROUP BY c.routing_reason "
+            "ORDER BY denied DESC LIMIT 30"
+        ).fetchall()]
+        sources = [dict(row) for row in conn.execute(
+            "SELECT content_source AS source,count(*) AS screened,"
+            "sum(CASE WHEN routing_bucket='priority' THEN 1 ELSE 0 END) AS investable,"
+            "sum(CASE WHEN routing_bucket='review' THEN 1 ELSE 0 END) AS review,"
+            "sum(CASE WHEN routing_bucket='reject' THEN 1 ELSE 0 END) AS denied "
+            "FROM classifications GROUP BY content_source ORDER BY screened DESC LIMIT 20"
+        ).fetchall()]
+    return {
+        "funnel": {
+            "screened": total, "investable": buckets.get("priority", 0),
+            "review": buckets.get("review", 0), "denied": buckets.get("reject", 0),
+            "ghost": buckets.get("ghost", 0), "claude_reviewed": int(reviewed["n"] or 0),
+            "claude_keep": int(reviewed["kept"] or 0), "human_decisions": int(human["n"] or 0),
+            "human_yes": int(human["yes_n"] or 0), "tracked": int(tracked["n"] or 0),
+            "reached_out": int(tracked["reached"] or 0), "meetings": int(tracked["meetings"] or 0),
+        },
+        "score_bands": score_bands, "rules": rules, "sources": sources,
+    }
+
+
+def scoring_threshold_simulation(
+    threshold: int, *, path: Path | str = CLASSIFICATION_DB
+) -> dict[str, object]:
+    threshold = max(0, min(100, int(threshold)))
+    with connect_store(path, read_only=True) as conn:
+        row = conn.execute(
+            "SELECT count(*) AS eligible,"
+            "sum(CASE WHEN cd.decision='KEEP' THEN 1 ELSE 0 END) AS historical_keeps,"
+            "sum(CASE WHEN lower(md.target_label)='yes' THEN 1 ELSE 0 END) AS human_yes,"
+            "sum(CASE WHEN cd.domain IS NULL THEN 1 ELSE 0 END) AS unreviewed "
+            "FROM classifications c LEFT JOIN claude_diligence cd ON cd.domain=c.domain "
+            "LEFT JOIN manual_decisions md ON md.domain=c.domain "
+            "WHERE c.fit_score>=? AND c.routing_bucket NOT IN ('reject','ghost','screened_out')",
+            (threshold,),
+        ).fetchone()
+    return {"threshold": threshold, **{key: int(row[key] or 0) for key in row.keys()}}
+
+
+def scoring_domain_trace(
+    domain: str, *, path: Path | str = CLASSIFICATION_DB
+) -> dict[str, object] | None:
+    target = stable_domain(domain)
+    if not target:
+        return None
+    with connect_store(path, read_only=True) as conn:
+        row = conn.execute("SELECT * FROM classifications WHERE domain=?", (target,)).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        for table, key in (("claude_diligence", "claude"), ("manual_decisions", "human"), ("tracked_domains", "tracking")):
+            found = conn.execute(f"SELECT * FROM {table} WHERE domain=?", (target,)).fetchone()
+            result[key] = dict(found) if found else None
+        result["movements"] = [dict(item) for item in conn.execute(
+            "SELECT from_bucket,to_bucket,objective_score,note,source,moved_at "
+            "FROM movement_log WHERE domain=? ORDER BY moved_at", (target,)
+        ).fetchall()]
+    try:
+        record = json.loads(str(result.pop("record_json", "{}") or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        record = {}
+    result["scorecard"] = record.get("scorecard", {})
+    result["score_eligibility_caps"] = clean(record.get("score_eligibility_caps", ""))
+    result["denial_evidence"] = clean(record.get("denial_evidence", ""))
+    result["denial_confidence"] = clean(record.get("denial_confidence", ""))
+    result["signals"] = {
+        key: record.get(key, 0) for key in (
+            "pillar_hit_count", "product_hit_count", "buyer_signal_count",
+            "technical_depth_count", "workflow_depth_count",
+            "business_value_count", "score_defensibility_signals",
+            "score_important_problem_signals", "venture_quality_score",
+        )
+    }
+    return result
+
+
 def query_source_classifications(
     source_prefixes: Iterable[str],
     buckets: Iterable[str],
