@@ -1141,7 +1141,7 @@ def query_classifications(
     params.extend([bounded_limit, bounded_offset])
     with connect_store(path, read_only=True) as conn:
         rows = conn.execute(
-            "SELECT domain,company_name,final_url,description,"
+            "SELECT domain,company_name,final_url,description,record_json,"
             "routing_bucket,routing_reason,fit_score,priority_score,"
             "thesis_pillar,content_source,manual_override,manual_override_target,classified_at,updated_at "
             "FROM classifications WHERE "
@@ -1149,7 +1149,23 @@ def query_classifications(
             + f" ORDER BY {order} LIMIT ? OFFSET ?",
             params,
         ).fetchall()
-    return [dict(row) for row in rows]
+    results = []
+    for row in rows:
+        result = dict(row)
+        try:
+            record = json.loads(str(result.pop("record_json", "") or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            record = {}
+        flags = record.get("website_green_flags", [])
+        if isinstance(flags, str):
+            try:
+                flags = json.loads(flags)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                flags = []
+        result["website_green_flags"] = flags if isinstance(flags, list) else []
+        result["scorecard"] = record.get("scorecard", {})
+        results.append(result)
+    return results
 
 
 def claude_decisions_for_domains(

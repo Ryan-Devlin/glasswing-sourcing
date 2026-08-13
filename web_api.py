@@ -434,7 +434,7 @@ def _with_claude(rows: list[dict]) -> list[dict]:
                 )
     except Exception:
         pass
-    return [
+    enriched = [
         {
             **row,
             "claude_decision": decisions.get(row.get("domain", ""), {}).get("decision", ""),
@@ -460,6 +460,16 @@ def _with_claude(rows: list[dict]) -> list[dict]:
         }
         for row in rows
     ]
+    for row in enriched:
+        for key in ("claude_green_flags", "website_green_flags"):
+            value = row.get(key, [])
+            if isinstance(value, str):
+                try:
+                    value = json.loads(value)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    value = []
+            row[key] = value if isinstance(value, list) else []
+    return enriched
 
 
 @app.get("/api/healthz")
@@ -664,10 +674,12 @@ def classifications(
     )
     hidden = hidden_domain_set([row["domain"] for row in rows])
     tracked = tracked_domain_set([row["domain"] for row in rows])
+    decided = _manual_decision_state([row["domain"] for row in rows])
     return {
         "rows": _with_claude([
             {
                 **row,
+                **decided.get(row["domain"], {}),
                 "hidden": row["domain"] in hidden,
                 "tracked": row["domain"] in tracked,
             }
@@ -746,9 +758,11 @@ def tracking(limit: int = Query(100, ge=1, le=500)):
     tracking_meta = {row["domain"]: row for row in tracked_rows}
     records = query_classifications_by_domains(list(tracking_meta))
     by_domain = {row["domain"]: row for row in records}
+    decided = _manual_decision_state(list(tracking_meta))
     ordered = [
         {
             **by_domain[domain],
+            **decided.get(domain, {}),
             "tracked": True,
             "tracked_at": meta["tracked_at"],
             "tracking_status": meta.get("tracking_status", "tracking"),

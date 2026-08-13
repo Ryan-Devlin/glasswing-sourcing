@@ -1058,3 +1058,31 @@ def test_explicit_domain_query_returns_persisted_green_flags(tmp_path):
         ["tracked.ai"], path=database
     )
     assert rows[0]["website_green_flags"][0]["label"] == "Ex-Google"
+
+
+def test_paginated_query_returns_persisted_green_flags(tmp_path):
+    database = tmp_path / "classifications.sqlite3"
+    classification_store.upsert_classifications(pd.DataFrame([{
+        "domain": "yes.ai",
+        "page_title": "Yes",
+        "routing_bucket": "priority",
+    }]), path=database)
+    with classification_store.connect_store(database) as conn:
+        stored = json.loads(conn.execute(
+            "SELECT record_json FROM classifications WHERE domain='yes.ai'"
+        ).fetchone()["record_json"])
+        stored["website_green_flags"] = [{
+            "type": "repeat_founder",
+            "label": "Repeat founder",
+            "evidence": "Previously founded a company.",
+            "source": "https://yes.ai/about",
+        }]
+        conn.execute(
+            "UPDATE classifications SET record_json=? WHERE domain='yes.ai'",
+            (json.dumps(stored),),
+        )
+        conn.commit()
+    rows = classification_store.query_classifications(
+        ["priority"], path=database
+    )
+    assert rows[0]["website_green_flags"][0]["label"] == "Repeat founder"

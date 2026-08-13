@@ -856,20 +856,25 @@ tbody tr:hover {
 .green-flag-tags {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  align-items: flex-start;
+  gap: 4px;
+  margin-top: 2px;
 }
 .green-flag {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  width: max-content;
-  padding: 5px 8px;
+  display: inline-block;
+  flex: 0 1 auto;
+  width: auto;
+  max-width: 100%;
+  padding: 3px 7px;
   border: 1px solid #bfe4d3;
-  border-radius: 999px;
+  border-radius: 10px;
   color: #176847;
   background: #eaf7f0;
-  font-size: 12px;
-  font-weight: 700;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.25;
+  white-space: normal;
+  overflow-wrap: anywhere;
   cursor: help;
 }
 .intake-panel {

@@ -119,12 +119,9 @@ function ClaudePendingBadge({ row }) {
   );
 }
 function GreenFlagTags({ row }) {
-  const investable = String(row.routing_bucket || "").toLowerCase() === "priority";
-  if (
-    String(row.claude_decision || row.decision || "").toUpperCase() !== "KEEP"
-    && !investable
-    && !row.tracked
-  ) return null;
+  const claudeVerifiedYes = String(row.claude_decision || row.decision || "").toUpperCase() === "KEEP";
+  const humanYes = String(row.manual_override_target || row.label || "").toLowerCase() === "yes";
+  if (!claudeVerifiedYes && !humanYes) return null;
   const claudeFlags = Array.isArray(row.claude_green_flags)
     ? row.claude_green_flags
     : Array.isArray(row.green_flags) ? row.green_flags : [];
@@ -139,7 +136,7 @@ function GreenFlagTags({ row }) {
     <div className="green-flag-tags" aria-label="Positive diligence signals">
       {flags.slice(0, 4).map((flag) => (
         <span className="green-flag" key={flag.type || flag.label} title={flag.evidence || "Verified by Claude diligence"}>
-          <CheckCircle2 size={12} /> {flag.label}
+          {flag.label}
         </span>
       ))}
     </div>
