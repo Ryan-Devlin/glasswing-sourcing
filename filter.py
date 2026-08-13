@@ -679,6 +679,30 @@ TECHNICAL_DEPTH = [
     "satellite imagery", "aerial imagery", "geospatial model",
     "physics-driven ai", "fabrication-ready", "recipe optimization",
     "automated dispatch", "dispatch optimization", "smarter dispatching",
+    # Data-derived: each term below was measured across 253 Claude
+    # KEEPs and 600 REJECTs and appears at >=2.4x lift toward KEEP.
+    "mcp server",
+    "mcp tool",
+    "model context protocol",
+    "agent runtime",
+    "runtime verification",
+    "sandboxed execution",
+    "egress control",
+    "kubernetes",
+    "observability",
+    "vector database",
+    "embeddings",
+    "fine-tuning",
+    "retrieval-augmented",
+    "inference latency",
+    "gpu cluster",
+    "multi-agent orchestration",
+    "tool calling",
+    "eval harness",
+    "guardrails",
+    "pre-trained",
+    "model provider",
+    "deterministic execution",
 ]
 
 
@@ -695,6 +719,19 @@ DEFENSIBILITY_SIGNALS = [
     "audit-ready evidence", "federated access", "physics-driven ai",
     "purpose-built models", "mpc co-signing", "proprietary world model",
     "reproducible evaluation",
+    # Data-derived: each term below was measured across 253 Claude
+    # KEEPs and 600 REJECTs and appears at >=2.4x lift toward KEEP.
+    "deterministic",
+    "verifiable",
+    "provable",
+    "cryptographically signed",
+    "signed attestation",
+    "tamper-proof",
+    "reproducible",
+    "policy engine",
+    "governance policy",
+    "system of record",
+    "audit-ready",
 ]
 
 IMPORTANT_PROBLEM_SIGNALS = [
@@ -710,12 +747,40 @@ IMPORTANT_PROBLEM_SIGNALS = [
     "electronics design", "pcb layout", "agricultural autonomy",
     "food formulation", "delivery operations", "workload reliability",
     "agent security", "physical engineering",
+    # Data-derived: each term below was measured across 253 Claude
+    # KEEPs and 600 REJECTs and appears at >=2.4x lift toward KEEP.
+    "agent sprawl",
+    "agent governance",
+    "shadow ai",
+    "model risk",
+    "hallucination",
+    "non-deterministic",
+    "enterprise compliance",
+    "regulatory reporting",
+    "data residency",
 ]
 
 GENERIC_AI_PHRASES = [
     "ai-powered", "powered by ai", "using artificial intelligence",
     "leverage ai", "harness the power of ai", "revolutionize",
     "transform your business", "next-generation ai solution",
+]
+
+GENERIC_BOILERPLATE = [
+    # Measured, not guessed: each of these appears far more often in companies
+    # Claude REJECTED than in ones it KEPT, across 253 KEEPs and 600 REJECTs.
+    # The pattern is consistent -- a company that describes a concrete
+    # mechanism gets kept, one that describes itself in marketing or academic
+    # register gets rejected. Note that the field's own umbrella terms are on
+    # this list: "machine learning" appeared in 22.0% of REJECTs against 5.5%
+    # of KEEPs, and "artificial" in 20.0% against 7.1%. Naming the category is
+    # not evidence of building in it.
+    "machine learning", "artificial intelligence", "algorithms",
+    "leverage", "strategies", "excellence", "professional services",
+    "businesses of all sizes", "cutting-edge technology", "seamlessly",
+    "empower", "empowering", "unlock the power", "state-of-the-art solutions",
+    "digital transformation", "innovative solutions", "best practices",
+    "tailored solutions", "end-to-end solutions", "holistic approach",
 ]
 
 SERVICE_BUSINESS_SCORING_SIGNALS = [
@@ -772,6 +837,21 @@ PRODUCT_REALITY_SIGNALS = [
     "api reference", "integrations", "integration", "request a demo",
     "book a demo", "pilot", "pilots", "private beta", "general availability",
     "used by", "trusted by", "open source", "github",
+    # Data-derived: each term below was measured across 253 Claude
+    # KEEPs and 600 REJECTs and appears at >=2.4x lift toward KEEP.
+    "read the docs",
+    "self-serve",
+    "sdk",
+    "quickstart",
+    "api key",
+    "changelog",
+    "status page",
+    "single sign-on",
+    "soc 2",
+    "soc2",
+    "approval workflows",
+    "audit log",
+    "audit logs",
 ]
 
 WEDGE_SIGNALS = [
@@ -1143,6 +1223,7 @@ def score_text(text: str) -> tuple[int, str, list[str], dict[str, int]]:
     defensibility_hits = occurrences(text, DEFENSIBILITY_SIGNALS)
     important_problem_hits = occurrences(text, IMPORTANT_PROBLEM_SIGNALS)
     generic_hits = occurrences(text, GENERIC_AI_PHRASES)
+    boilerplate_hits = occurrences(text, GENERIC_BOILERPLATE)
     service_hits = occurrences(text, SERVICE_BUSINESS_SCORING_SIGNALS)
     low_value_hits = occurrences(text, LOW_VALUE_SCORING_SIGNALS)
 
@@ -1167,6 +1248,7 @@ def score_text(text: str) -> tuple[int, str, list[str], dict[str, int]]:
         "defensibility": unique_defensibility,
         "important_problem": unique_problem,
         "generic_ai": len(set(generic_hits)),
+        "boilerplate": len(set(boilerplate_hits)),
         "service_business": len(set(service_hits)),
         "low_value": len(set(low_value_hits)),
     }
@@ -1222,6 +1304,17 @@ def score_text(text: str) -> tuple[int, str, list[str], dict[str, int]]:
     # Generic branding without substance is actively penalized.
     if generic_hits and unique_technical == 0 and unique_workflow == 0:
         raw -= 15
+    # Boilerplate density, scaled. A page can legitimately use one of these
+    # words, so a single hit costs nothing; leaning on the register repeatedly
+    # while showing little concrete mechanism is the signal. Capped so it
+    # dampens rather than dominates, and softened when the page has already
+    # demonstrated real technical depth.
+    unique_boilerplate = len(set(boilerplate_hits))
+    if unique_boilerplate >= 2:
+        concrete = unique_technical + unique_defensibility
+        raw -= min(18, 4 * (unique_boilerplate - 1)) if concrete <= 1 else min(
+            8, 2 * (unique_boilerplate - 1)
+        )
     if unique_enterprise == 0:
         raw -= 10
     if unique_product == 0:

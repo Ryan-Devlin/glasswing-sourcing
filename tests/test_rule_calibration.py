@@ -787,3 +787,63 @@ class SubstantiveSiteFloorTests(unittest.TestCase):
         # It must land in the human queue, not be presented as a denial.
         _, reason = self._route(50)
         self.assertNotIn(reason, screening_filter.HARD_DENIAL_REASONS)
+
+
+class ConcreteMechanismOutranksBoilerplateTests(unittest.TestCase):
+    """Concrete technical mechanism must outscore marketing register.
+
+    Measured against Claude's own verdicts on 253 KEEPs and 600 REJECTs, the
+    scorer started at AUC 0.480 -- worse than chance at telling them apart,
+    with REJECTs averaging a *higher* score than KEEPs. The discriminating
+    signal was register, not topic: companies describing a concrete mechanism
+    were kept, companies describing themselves in marketing or academic
+    language were rejected. "machine learning" appeared in 22.0% of REJECTs
+    against 5.5% of KEEPs, so naming the field is not evidence of building in
+    it. These cases pin that relationship down.
+    """
+
+    CONCRETE = (
+        "Runtime verification for AI coding agents. Every change an agent "
+        "proposes is executed in sandboxed execution against production "
+        "traffic, and each verdict is cryptographically signed and traced so "
+        "the result is deterministic and reproducible. Ships as an MCP server "
+        "with an SDK, audit logs, approval workflows and SOC 2 reporting."
+    )
+    BOILERPLATE = (
+        "We leverage artificial intelligence and machine learning algorithms "
+        "to empower businesses of all sizes with innovative solutions. Our "
+        "professional services deliver excellence through best practices, "
+        "cutting-edge technology and tailored end-to-end solutions that "
+        "seamlessly drive digital transformation and unlock the power of data."
+    )
+
+    def test_concrete_mechanism_scores_higher(self):
+        concrete, _, _, _ = screening_filter.score_text(self.CONCRETE)
+        boiler, _, _, _ = screening_filter.score_text(self.BOILERPLATE)
+        self.assertGreater(
+            concrete, boiler,
+            f"concrete mechanism ({concrete}) must outscore boilerplate ({boiler})",
+        )
+
+    def test_boilerplate_density_is_counted(self):
+        _, _, _, counts = screening_filter.score_text(self.BOILERPLATE)
+        self.assertGreaterEqual(counts.get("boilerplate", 0), 2)
+
+    def test_a_single_common_word_is_not_penalised(self):
+        # One ordinary use of the register must cost nothing; leaning on it
+        # repeatedly with no mechanism is the signal.
+        mild = (
+            "Kubernetes-native observability with eval harness, guardrails and "
+            "deterministic replay. We leverage telemetry from every workload."
+        )
+        _, _, _, counts = screening_filter.score_text(mild)
+        self.assertLessEqual(counts.get("boilerplate", 0), 1)
+
+    def test_naming_the_field_alone_does_not_signal_depth(self):
+        naming = (
+            "An artificial intelligence company applying machine learning "
+            "algorithms and advanced computing to real problems."
+        )
+        score, _, _, _ = screening_filter.score_text(naming)
+        concrete, _, _, _ = screening_filter.score_text(self.CONCRETE)
+        self.assertLess(score, concrete)
