@@ -91,6 +91,53 @@ def test_positive_transitions_backfill_evidence_green_flags(tmp_path, transition
     assert row["website_green_flags"][0]["label"] == "Ex-Google"
 
 
+def test_tracking_stage_changes_preserve_green_flag_metadata(tmp_path):
+    database = tmp_path / "classifications.sqlite3"
+    upsert_classifications(pd.DataFrame([{
+        "domain": "stages.ai", "routing_bucket": "priority",
+        "homepage_excerpt": "Our founder previously worked at Nvidia building AI infrastructure.",
+    }]), path=database)
+    track_domains(["stages.ai"], path=database)
+    before = query_classifications_by_domains(["stages.ai"], path=database)[0]
+    assert set_tracking_status("stages.ai", "reached_out", path=database)
+    assert set_tracking_status("stages.ai", "meeting", path=database)
+    after = query_classifications_by_domains(["stages.ai"], path=database)[0]
+
+    assert after["website_green_flags"] == before["website_green_flags"]
+    assert after["green_flags_checked_at"] == before["green_flags_checked_at"]
+
+
+def test_all_delivered_flags_have_supported_type_and_concrete_evidence(tmp_path):
+    database = tmp_path / "classifications.sqlite3"
+    upsert_classifications(pd.DataFrame([{
+        "domain": "quality.ai", "routing_bucket": "priority",
+    }]), path=database)
+    with connect_store(database) as conn:
+        row = conn.execute(
+            "SELECT record_json FROM classifications WHERE domain='quality.ai'"
+        ).fetchone()
+        record = json.loads(row["record_json"])
+        record["website_green_flags"] = [
+            {"type": "big_tech", "label": "Ex-Google founders", "evidence": "Founder previously built core infrastructure at Google."},
+            {"type": "made_up", "label": "Amazing team", "evidence": "This unsupported type should never reach the UI."},
+            {"type": "patents", "label": "Patents", "evidence": "unverified"},
+        ]
+        conn.execute(
+            "UPDATE classifications SET record_json=? WHERE domain='quality.ai'",
+            (json.dumps(record),),
+        )
+        conn.commit()
+    classification_store.enrich_green_flags(["quality.ai"], path=database)
+    flags = query_classifications_by_domains(["quality.ai"], path=database)[0]["website_green_flags"]
+
+    assert flags == [{
+        "type": "ex_big_tech",
+        "label": "Ex-Google",
+        "evidence": "Founder previously built core infrastructure at Google.",
+    }]
+    assert all(len(flag["evidence"].split()) >= 4 for flag in flags)
+
+
 def test_discard_uninvestable_keeps_only_priority_and_human_truth(tmp_path):
     database = tmp_path / "classifications.sqlite3"
     upsert_classifications(
@@ -233,6 +280,74 @@ def test_claude_decision_routes_company_and_training_bucket_atomically(tmp_path)
     # The deployment-time reconciliation repairs previously inconsistent
     # rows using the same canonical decisions.
     assert classification_store.reconcile_claude_routing(path=database) == 1
+
+
+def test_human_yes_survives_later_claude_reject(tmp_path):
+    database = tmp_path / "classifications.sqlite3"
+    upsert_classifications(pd.DataFrame([{
+        "domain": "override.ai", "routing_bucket": "review", "fit_score": 84,
+        "homepage_excerpt": "Our founder previously built infrastructure at Google.",
+    }]), path=database)
+    upsert_training_labels([{
+        "domain": "override.ai", "label": "yes", "rating": 84,
+        "source": "human",
+    }], path=database)
+    record_manual_move(
+        ["override.ai"], target_label="yes", target_bucket="priority",
+        scores={"override.ai": 84}, path=database,
+    )
+    upsert_claude_diligence([{
+        "domain": "override.ai", "llm_decision": "REJECT",
+        "llm_fit_score": 22, "llm_reasoning": "Weak standalone product evidence.",
+    }], path=database)
+
+    row = query_classifications_by_domains(["override.ai"], path=database)[0]
+    label = classification_store.training_label_rows(path=database)[0]
+    assert row["routing_bucket"] == "priority"
+    assert row["manual_override_target"] == "yes"
+    assert label["label"] == "yes"
+    assert label["source"] == "human"
+
+
+def test_claude_reject_can_be_tracked_without_changing_denial(tmp_path):
+    database = tmp_path / "classifications.sqlite3"
+    upsert_classifications(pd.DataFrame([{
+        "domain": "edge.ai", "routing_bucket": "review", "fit_score": 75,
+        "homepage_excerpt": "The founder previously worked at Microsoft on enterprise systems.",
+    }]), path=database)
+    upsert_claude_diligence([{
+        "domain": "edge.ai", "llm_decision": "REJECT", "llm_fit_score": 44,
+    }], path=database)
+    track_domains(["edge.ai"], path=database)
+
+    row = query_classifications_by_domains(["edge.ai"], path=database)[0]
+    assert row["routing_bucket"] == "reject"
+    assert tracked_domain_set(["edge.ai"], path=database) == {"edge.ai"}
+    assert row["website_green_flags"][0]["label"] == "Ex-Microsoft"
+    assert row["green_flags_checked_at"]
+
+
+def test_scraper_refresh_cannot_undo_claude_or_human_routing(tmp_path):
+    database = tmp_path / "classifications.sqlite3"
+    upsert_classifications(pd.DataFrame([
+        {"domain": "claude.ai", "routing_bucket": "review", "fit_score": 80},
+        {"domain": "human.ai", "routing_bucket": "review", "fit_score": 81},
+    ]), path=database)
+    upsert_claude_diligence([{
+        "domain": "claude.ai", "llm_decision": "REJECT", "llm_fit_score": 20,
+    }], path=database)
+    record_manual_move(
+        ["human.ai"], target_label="yes", target_bucket="priority",
+        scores={"human.ai": 81}, path=database,
+    )
+    upsert_classifications(pd.DataFrame([
+        {"domain": "claude.ai", "routing_bucket": "priority", "fit_score": 99},
+        {"domain": "human.ai", "routing_bucket": "reject", "fit_score": 5},
+    ]), path=database)
+
+    assert classification_map(path=database) == {
+        "claude.ai": "reject", "human.ai": "priority",
+    }
 
 
 def test_historical_claude_results_backfill_baskets_without_overwriting_human(tmp_path):
