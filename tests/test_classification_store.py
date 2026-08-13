@@ -1030,3 +1030,31 @@ def test_postgres_connections_pin_the_public_schema():
         store.migrate = original_migrate
         store.classification_database_env_var = original_env
         store._MIGRATED_POSTGRES_TARGETS.discard("PIPELINE_DATABASE_URL")
+
+
+def test_explicit_domain_query_returns_persisted_green_flags(tmp_path):
+    database = tmp_path / "classifications.sqlite3"
+    classification_store.upsert_classifications(pd.DataFrame([{
+        "domain": "tracked.ai",
+        "page_title": "Tracked",
+        "routing_bucket": "priority",
+    }]), path=database)
+    with classification_store.connect_store(database) as conn:
+        stored = json.loads(conn.execute(
+            "SELECT record_json FROM classifications WHERE domain='tracked.ai'"
+        ).fetchone()["record_json"])
+        stored["website_green_flags"] = [{
+            "type": "ex_big_tech",
+            "label": "Ex-Google",
+            "evidence": "Founder previously worked at Google.",
+            "source": "https://tracked.ai/about",
+        }]
+        conn.execute(
+            "UPDATE classifications SET record_json=? WHERE domain='tracked.ai'",
+            (json.dumps(stored),),
+        )
+        conn.commit()
+    rows = classification_store.query_classifications_by_domains(
+        ["tracked.ai"], path=database
+    )
+    assert rows[0]["website_green_flags"][0]["label"] == "Ex-Google"
