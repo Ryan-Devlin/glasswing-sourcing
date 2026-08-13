@@ -594,9 +594,9 @@ function Table({
                       >
                         Yes
                       </button>
-                      <button className="no" disabled={bucketed} title={bucketed ? `Already bucketed ${bucketLabel}` : "Reject to Hard Denied and NO"} onClick={() => onReject ? onReject(row) : onLabel(row, "no")}>
-                        No
-                      </button>
+                      {!onReject && <button className="no" disabled={bucketed} title={bucketed ? `Already bucketed ${bucketLabel}` : "Reject to Hard Denied and NO"} onClick={() => onLabel(row, "no")}>
+                        Reject
+                      </button>}
                     </>
                   )}
                   {onReject && (
@@ -718,8 +718,11 @@ const companyCols = [
   { key: "description", label: "Description" },
 ];
 function LabelModal({ target, onClose, onSaved }) {
-  const [rating, setRating] = useState(target.label === "yes" ? 85 : 10);
+  const [rating, setRating] = useState(target.rating ?? (target.label === "yes" ? 85 : 10));
+  const [reason, setReason] = useState("wrong_fit");
+  const [note, setNote] = useState("");
   const [saving, setSaving] = useState(false);
+  const rejecting = target.label === "no";
   return (
     <div className="modal-bg">
       <div className="modal">
@@ -736,6 +739,26 @@ function LabelModal({ target, onClose, onSaved }) {
             onChange={(e) => setRating(e.target.value)}
           />
         </label>
+        {rejecting && <>
+          <label>
+            Why are you rejecting it?
+            <select value={reason} onChange={(e) => setReason(e.target.value)}>
+              <option value="wrong_fit">Wrong thesis fit</option>
+              <option value="consumer">Consumer company</option>
+              <option value="services_consulting">Services or consulting</option>
+              <option value="too_late_stage">Too late-stage</option>
+              <option value="portfolio_conflict">Too close to portfolio</option>
+              <option value="weak_product">Weak or unclear product</option>
+              <option value="wrong_geography">Wrong geography</option>
+              <option value="not_a_company">Not a real company</option>
+              <option value="other">Other</option>
+            </select>
+          </label>
+          <label>
+            Short note <small>optional, one sentence</small>
+            <textarea rows="2" maxLength="240" value={note} onChange={(e) => setNote(e.target.value)} placeholder="What specifically made this a no?" />
+          </label>
+        </>}
         <div className="modal-actions">
           <button onClick={onClose}>Cancel</button>
           <button
@@ -749,6 +772,7 @@ function LabelModal({ target, onClose, onSaved }) {
                   domain: target.domain,
                   label: target.label,
                   rating: Number(rating),
+                  reason: rejecting ? `manual_reject:${reason}${note.trim() ? ` — ${note.trim()}` : ""}` : "react_review",
                 }),
               });
               onSaved();
@@ -760,6 +784,23 @@ function LabelModal({ target, onClose, onSaved }) {
       </div>
     </div>
   );
+}
+
+function RejectButton({ row, onSaved, className = "card-dismiss" }) {
+  const { admin, requestLogin } = useAdmin();
+  const [target, setTarget] = useState(null);
+  return <>
+    <button className={className} title="Reject to Hard Denied and NO" onClick={() => {
+      if (!admin) return requestLogin();
+      setTarget({ domain: row.domain, label: "no", rating: Number(row.fit_score || row.rating || row.score || 0) });
+    }}>Reject</button>
+    {target && (
+      <LabelModal target={target} onClose={() => setTarget(null)} onSaved={() => {
+        setTarget(null);
+        onSaved?.();
+      }}/>
+    )}
+  </>;
 }
 
 function HomePage() {
@@ -847,20 +888,9 @@ function GlobalSearchPage() {
   };
 
   const save = (row, chosen) => setLabel({ domain: row.domain, label: chosen });
-  const reject = async (row) => {
-    if (!admin) return requestLogin();
-    await api("/api/labels", {
-      method: "POST",
-      body: JSON.stringify({
-        domain: row.domain,
-        label: "no",
-        rating: Number(row.fit_score || row.score || 0),
-        reason: "manual_reject",
-      }),
-    });
-    flash(`${row.domain} moved to Hard Denied and NO`);
-    refresh();
-  };
+  const reject = (row) => admin
+    ? setLabel({ domain: row.domain, label: "no", rating: Number(row.fit_score || row.score || 0) })
+    : requestLogin();
   const sendClaude = async (row, overrideDailyLimit = false) => {
     if (!admin) return requestLogin();
     setClaudeBusy(row.domain);
@@ -1005,17 +1035,6 @@ function GoodDeals() {
     .filter((row) => !row.hidden && !row.tracked)
     .slice(0, 8);
   if (!rows.length) return null;
-  const reject = async (row) => {
-    if (!admin) return requestLogin();
-    await api("/api/labels", {
-      method: "POST",
-      body: JSON.stringify({
-        domain: row.domain, label: "no", rating: Number(row.fit_score || 0),
-        reason: "manual_reject",
-      }),
-    });
-    setRefresh((value) => value + 1);
-  };
   const sendClaude = async (row, overrideDailyLimit = false) => {
     if (!admin) return requestLogin();
     setClaudeBusy(row.domain);
@@ -1043,7 +1062,7 @@ function GoodDeals() {
       <div className="top-pick-grid">
         {rows.map((row) => (
           <article className="top-pick" key={row.domain}>
-            <button className="card-dismiss" title="Reject to Hard Denied and NO" onClick={() => reject(row)}>Reject</button>
+            <RejectButton row={row} onSaved={() => setRefresh((value) => value + 1)} />
             <TrackButton row={row} />
             <span className="deal-age" title={row.classified_at || row.updated_at}>{dealAgeLabel(row.classified_at || row.updated_at)}</span>
             <div className="top-pick-head">
@@ -1293,17 +1312,7 @@ function ClaudeTopPicks() {
           return (
             <article className="top-pick" key={row.domain}>
               <span className="deal-age" title={row.classified_at || row.updated_at}>{dealAgeLabel(row.classified_at || row.updated_at)}</span>
-              <button className="card-dismiss" title="Reject to Hard Denied and NO" onClick={async () => {
-                if (!admin) return requestLogin();
-                await api("/api/labels", {
-                  method: "POST",
-                  body: JSON.stringify({
-                    domain: row.domain, label: "no", rating: Number(row.fit_score || 0),
-                    reason: "manual_reject",
-                  }),
-                });
-                setRefresh((value) => value + 1);
-              }}>Reject</button>
+              <RejectButton row={row} onSaved={() => setRefresh((value) => value + 1)} />
               <TrackButton row={row} />
               <div className="top-pick-head">
                 <span className="score-ring">
@@ -1465,18 +1474,9 @@ function CompaniesTable({ showRunScope = false }) {
     sort.direction,
   ]);
   const save = (row, label) => setLabel({ domain: row.domain, label });
-  const reject = async (row) => {
-    await api("/api/labels", {
-      method: "POST",
-      body: JSON.stringify({
-        domain: row.domain, label: "no", rating: Number(row.fit_score || row.rating || 0),
-        reason: "manual_reject",
-      }),
-    });
-    setToast(`${row.domain} moved to Hard Denied and NO`);
-    setRefresh((x) => x + 1);
-    setTimeout(() => setToast(""), 2500);
-  };
+  const reject = (row) => setLabel({
+    domain: row.domain, label: "no", rating: Number(row.fit_score || row.rating || 0),
+  });
   const sendClaude = async (row, overrideDailyLimit = false) => {
     if (!admin) return requestLogin();
     setClaudeBusy(row.domain);
@@ -1947,18 +1947,9 @@ function CorpusCompanies({ kind }) {
   const [claudeBusy, setClaudeBusy] = useState("");
   const [claudeOverride, setClaudeOverride] = useState(null);
   const [toast, setToast] = useState("");
-  const reject = async (row) => {
-    if (!admin) return requestLogin();
-    await api("/api/labels", {
-      method: "POST",
-      body: JSON.stringify({
-        domain: row.domain, label: "no", rating: Number(row.fit_score || row.rating || 0),
-        reason: "manual_reject",
-      }),
-    });
-    setToast(`${row.domain} moved to Hard Denied and NO`);
-    setRefresh((value) => value + 1);
-  };
+  const reject = (row) => admin
+    ? setLabel({ domain: row.domain, label: "no", rating: Number(row.fit_score || row.rating || 0) })
+    : requestLogin();
   const basket = bucket === "yes" || bucket === "no";
   const pageSize = 25;
   const result = useApi(
@@ -2112,19 +2103,6 @@ function CrawlerDiscoveries() {
   const rows = (result.data?.rows || [])
     .filter((row) => !row.hidden && !row.tracked)
     .slice(0, 8);
-  const reject = async (row) => {
-    if (!admin) return requestLogin();
-    await api("/api/labels", {
-      method: "POST",
-      body: JSON.stringify({
-        domain: row.domain,
-        label: "no",
-        rating: Number(row.fit_score || 0),
-        reason: "manual_reject",
-      }),
-    });
-    setRefresh((value) => value + 1);
-  };
   const sendClaude = async (row, overrideDailyLimit = false) => {
     if (!admin) return requestLogin();
     setClaudeBusy(row.domain);
@@ -2160,7 +2138,7 @@ function CrawlerDiscoveries() {
         <div className="top-pick-grid">
           {rows.map((row) => (
             <article className="top-pick" key={row.domain}>
-              <button className="card-dismiss" onClick={() => reject(row)}>Reject</button>
+              <RejectButton row={row} onSaved={() => setRefresh((value) => value + 1)} />
               <TrackButton row={row} onChanged={() => setRefresh((value) => value + 1)} />
               <span className="deal-age">{dealAgeLabel(row.classified_at || row.updated_at)}</span>
               <div className="top-pick-head">

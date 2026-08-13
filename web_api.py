@@ -722,7 +722,12 @@ def labels(
 def set_label(update: LabelUpdate):
     # NO and Reject are the same human decision. Normalize the negative path
     # here so every client produces identical training truth and routing.
-    reason = "manual_reject" if update.label == "no" else update.reason
+    supplied_reason = str(update.reason or "").strip()
+    reason = (
+        supplied_reason if update.label == "no" and supplied_reason.startswith("manual_reject")
+        else "manual_reject" if update.label == "no"
+        else supplied_reason
+    )
     save_basket_entry(update.domain, update.label, update.rating, source="human", reason=reason)
     record_manual_move(
         [update.domain],

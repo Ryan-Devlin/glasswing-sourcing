@@ -207,6 +207,15 @@ def test_human_label_endpoint_uses_protected_human_source(monkeypatch):
     assert movement["note"] == "manual_reject"
     assert captured["reason"] == "manual_reject"
 
+    response = client.post(
+        "/api/labels",
+        json={"domain": "Detailed.ai", "label": "no", "rating": 20,
+              "reason": "manual_reject:services_consulting — Agency model"},
+    )
+    assert response.status_code == 200
+    assert captured["reason"] == "manual_reject:services_consulting — Agency model"
+    assert movement["note"] == "manual_reject:services_consulting — Agency model"
+
     # Even an older client using the generic default reason must produce the
     # exact same negative decision as the explicit Reject action.
     response = client.post(
