@@ -95,7 +95,7 @@ from continuous_pipeline import (
     connect_db as connect_pipeline_db,
     read_status as read_local_pipeline_status,
 )
-from diligence_logic import DILIGENCE_VERSION
+from diligence_logic import DILIGENCE_VERSION, normalize_green_flags
 from health_monitor import health_report
 from runtime_control import (
     SERVICES,
@@ -463,13 +463,7 @@ def _with_claude(rows: list[dict]) -> list[dict]:
     ]
     for row in enriched:
         for key in ("claude_green_flags", "website_green_flags"):
-            value = row.get(key, [])
-            if isinstance(value, str):
-                try:
-                    value = json.loads(value)
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    value = []
-            row[key] = value if isinstance(value, list) else []
+            row[key] = normalize_green_flags(row.get(key, []))
     return enriched
 
 

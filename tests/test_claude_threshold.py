@@ -11,6 +11,7 @@ from diligence_logic import (
     dimension_score,
     parse_assessment,
     parse_green_flags,
+    normalize_green_flags,
 )
 
 
@@ -21,8 +22,30 @@ def test_green_flags_require_allowed_type_and_evidence():
     )
     assert flags == [{
         "type": "ex_big_tech",
-        "label": "Ex-Meta founders",
+        "label": "Ex-Meta",
         "evidence": "Two founders previously led Meta infrastructure teams",
+    }]
+
+
+def test_green_flags_normalize_legacy_types_labels_and_evidence():
+    flags = normalize_green_flags([
+        {
+            "type": "big_tech", "label": "Ex-Google founders",
+            "evidence": "Both founders previously built infrastructure products at Google.",
+            "source": "https://example.ai/team",
+        },
+        {
+            "type": "ex_big_tech", "label": "Ex-Google team",
+            "evidence": "Duplicate signal with enough evidence words to otherwise pass.",
+        },
+        {"type": "patents", "label": "Patents", "evidence": "unverified"},
+        {"type": "made_up", "label": "Famous", "evidence": "A long but invalid claim that must be removed."},
+    ])
+    assert flags == [{
+        "type": "ex_big_tech",
+        "label": "Ex-Google",
+        "evidence": "Both founders previously built infrastructure products at Google.",
+        "source": "https://example.ai/team",
     }]
 
 

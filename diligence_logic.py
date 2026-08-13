@@ -98,28 +98,96 @@ GREEN_FLAG_LABELS = {
     "deep_tech_ip": "Defensible IP",
 }
 
+GREEN_FLAG_TYPE_ALIASES = {
+    "university_spinout": "top_university_spinout",
+    "big_tech": "ex_big_tech",
+    "serial_founder": "repeat_founder",
+    "accelerator": "top_accelerator",
+    "enterprise_customers": "enterprise_traction",
+    "patents": "deep_tech_ip",
+}
+
+_EMPTY_FLAG_EVIDENCE = {
+    "none", "unknown", "unverified", "not verified", "n/a",
+    "no evidence", "no evidence found", "website",
+}
+
+
+def _canonical_green_flag_label(kind: str, label: str) -> str:
+    """Keep useful specifics while removing cosmetic model variations."""
+    value = clamp_words(label or GREEN_FLAG_LABELS[kind], 5)
+    if kind == "ex_big_tech":
+        value = re.sub(
+            r"\s+(?:founders?|team|executives?|engineers?)$", "", value,
+            flags=re.IGNORECASE,
+        )
+        if value and not value.lower().startswith("ex-"):
+            value = f"Ex-{value}"
+    elif kind in {"ivy_league_spinout", "top_university_spinout"}:
+        value = re.sub(r"\s+(?:founders?|graduates?|alumni)$", " team", value, flags=re.IGNORECASE)
+    return value or GREEN_FLAG_LABELS[kind]
+
+
+def normalize_green_flags(value: Any, *, limit: int = 4) -> list[dict[str, str]]:
+    """Return only canonical, evidence-backed flags from stored/model data."""
+    if isinstance(value, str):
+        try:
+            import json
+            parsed = json.loads(value)
+            value = parsed if isinstance(parsed, list) else []
+        except (TypeError, ValueError):
+            value = []
+    if not isinstance(value, list):
+        return []
+    flags: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for original in value:
+        if not isinstance(original, dict):
+            continue
+        kind = clean(original.get("type", "")).lower()
+        kind = GREEN_FLAG_TYPE_ALIASES.get(kind, kind)
+        evidence = clamp_words(clean(original.get("evidence", "")), 24)
+        if (
+            kind not in GREEN_FLAG_LABELS
+            or kind in seen
+            or evidence.lower() in _EMPTY_FLAG_EVIDENCE
+            or len(evidence.split()) < 4
+        ):
+            continue
+        seen.add(kind)
+        flag = {
+            "type": kind,
+            "label": _canonical_green_flag_label(
+                kind, clean(original.get("label", ""))
+            ),
+            "evidence": evidence,
+        }
+        source = clean(original.get("source", ""))
+        if source:
+            flag["source"] = source
+        flags.append(flag)
+        if len(flags) >= max(1, min(int(limit), 4)):
+            break
+    return flags
+
 
 def parse_green_flags(value: str) -> list[dict[str, str]]:
     """Parse bounded, evidence-backed positive signals from model output."""
-    flags: list[dict[str, str]] = []
-    seen: set[str] = set()
+    candidates: list[dict[str, str]] = []
     for item in clean(value).split("|"):
         parts = [clean(part) for part in item.split("::", 2)]
         if len(parts) != 3:
             continue
         kind, label, evidence = parts
         kind = kind.lower()
-        if kind not in GREEN_FLAG_LABELS or kind in seen or not evidence:
+        if kind not in GREEN_FLAG_LABELS:
             continue
-        seen.add(kind)
-        flags.append({
+        candidates.append({
             "type": kind,
-            "label": clamp_words(label or GREEN_FLAG_LABELS[kind], 5),
-            "evidence": clamp_words(evidence, 18),
+            "label": label,
+            "evidence": evidence,
         })
-        if len(flags) == 4:
-            break
-    return flags
+    return normalize_green_flags(candidates)
 
 
 def recursively_collect_urls(value: Any, urls: set[str]) -> None:

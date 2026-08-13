@@ -20,6 +20,7 @@ import pandas as pd
 from psycopg import Error as PostgresError
 
 from common import DATA, FILTERED, atomic_write_csv, clean, stable_domain
+from diligence_logic import normalize_green_flags
 from db_backend import (
     PostgresConnection,
     acquire_advisory_lock_with_timeout,
@@ -124,14 +125,9 @@ def _enrich_green_flags_in_connection(
                 record = json.loads(str(row["record_json"] or "{}"))
             except (TypeError, ValueError, json.JSONDecodeError):
                 record = {}
-            existing = record.get("website_green_flags", [])
-            if isinstance(existing, str):
-                try:
-                    existing = json.loads(existing)
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    existing = []
-            if not isinstance(existing, list):
-                existing = []
+            existing = normalize_green_flags(
+                record.get("website_green_flags", [])
+            )
             evidence_text = " ".join(clean(value) for value in (
                 record.get("page_title", ""),
                 record.get("meta_description", ""),
@@ -145,18 +141,7 @@ def _enrich_green_flags_in_connection(
             for flag in derived:
                 if flag.get("source") == "website":
                     flag["source"] = source
-            merged = []
-            seen = set()
-            for flag in [*existing, *derived]:
-                if not isinstance(flag, dict):
-                    continue
-                key = (clean(flag.get("type", "")), clean(flag.get("label", "")).lower())
-                if not all(key) or key in seen or not clean(flag.get("evidence", "")):
-                    continue
-                seen.add(key)
-                merged.append(flag)
-                if len(merged) == 4:
-                    break
+            merged = normalize_green_flags([*existing, *derived])
             record["website_green_flags"] = merged
             record["green_flags_checked_at"] = checked_at
             conn.execute(
