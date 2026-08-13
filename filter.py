@@ -3438,7 +3438,7 @@ def is_retryable_inaccessible_reason(reason: object) -> bool:
 # A substantive site scoring at or above this still reaches Needs Review even
 # with no explicit thesis keyword match.
 #
-# Set to 20 from direct inspection, not intuition. Sampling live discards in the
+# Set to 10 from direct inspection, not intuition. Sampling live discards in the
 # 12-24 band and re-reading their homepages found roughly 40% were real,
 # thesis-relevant companies: kerno.io at 23 ("the self-healing loop for AI coding
 # agents... independent runtime verification layer"), axfolio.io at 24
@@ -3446,13 +3446,23 @@ def is_retryable_inaccessible_reason(reason: object) -> bool:
 # self-hosted OTA infrastructure). The rest were personal portfolios and
 # marketing consultancies, which have their own detectors.
 #
-# The underlying problem is that score_text badly under-rates concise technical
-# copy -- a crisp three-sentence landing page cannot hit enough lexicon terms
-# across enough dimensions, while keyword-dense security copy clears 60 easily.
-# Until that is addressed, this floor is what keeps those companies out of the
-# bin. 84.5% of discards still score 0-9 and are unaffected.
+# The underlying problem is that score_text cannot rank this traffic at all.
+# Reproduced in isolation: kerno.io's real pitch scores 3, axfolio.io's scores 1
+# with zero signals detected, and a lecturer's personal homepage also scores 3.
+# The lexicon has no vocabulary for how modern AI companies write -- "runtime
+# verification", "AI coding agents", "portfolio intelligence", "registered
+# investment advisors" all contribute nothing -- while keyword-dense security
+# copy clears 60 comfortably. No threshold can fix that; a floor can only stop
+# the scorer deleting what it failed to understand.
+#
+# So the floor sits just above the band that is genuinely empty rather than
+# merely unrecognised: discards scoring 0-9 average 1.3 and are real junk (84.5%
+# of all discards, still dropped), while everything above that is a substantive,
+# reachable, non-disqualified website whose only fault is vocabulary the lexicon
+# does not know. Those now reach Needs Review, where a human or Claude can judge
+# them. Raise GLASSWING_SUBSTANTIVE_REVIEW_FLOOR if the queue gets unmanageable.
 SUBSTANTIVE_REVIEW_FLOOR = max(
-    0, min(100, int(os.getenv("GLASSWING_SUBSTANTIVE_REVIEW_FLOOR", "20")))
+    0, min(100, int(os.getenv("GLASSWING_SUBSTANTIVE_REVIEW_FLOOR", "10")))
 )
 
 
