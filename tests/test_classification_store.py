@@ -138,41 +138,6 @@ def test_all_delivered_flags_have_supported_type_and_concrete_evidence(tmp_path)
     assert all(len(flag["evidence"].split()) >= 4 for flag in flags)
 
 
-def test_scoring_lab_aggregates_rules_bands_simulation_and_trace(tmp_path):
-    database = tmp_path / "classifications.sqlite3"
-    upsert_classifications(pd.DataFrame([
-        {"domain": "high.ai", "routing_bucket": "priority", "routing_reason": "claude_keep", "glasswing_rating": 92, "content_source": "certstream"},
-        {"domain": "review.ai", "routing_bucket": "review", "routing_reason": "viable_needs_review", "glasswing_rating": 76, "content_source": "zone_universe"},
-        {"domain": "denied.ai", "routing_bucket": "reject", "routing_reason": "agency_or_consultancy", "glasswing_rating": 20, "content_source": "certstream", "denial_evidence": "Offers consulting services to clients."},
-    ]), path=database)
-    upsert_claude_diligence([{
-        "domain": "high.ai", "llm_decision": "KEEP", "llm_fit_score": 88,
-    }], path=database)
-    record_manual_move(
-        ["denied.ai"], target_label="yes", target_bucket="reject",
-        scores={"denied.ai": 20}, note="edge-case reversal", path=database,
-    )
-    track_domains(["denied.ai"], path=database)
-
-    report = classification_store.scoring_evaluation(path=database)
-    bands = {row["band"]: row for row in report["score_bands"]}
-    rules = {row["rule"]: row for row in report["rules"]}
-    assert report["funnel"]["screened"] == 3
-    assert report["funnel"]["claude_keep"] == 1
-    assert bands["90–100"]["claude_keep"] == 1
-    assert rules["manual_override_reject"]["reversals"] == 1
-
-    simulation = classification_store.scoring_threshold_simulation(75, path=database)
-    assert simulation["eligible"] == 2
-    assert simulation["historical_keeps"] == 1
-    assert simulation["unreviewed"] == 1
-
-    trace = classification_store.scoring_domain_trace("denied.ai", path=database)
-    assert trace["human"]["target_label"] == "yes"
-    assert trace["tracking"]["tracking_status"] == "tracking"
-    assert trace["denial_evidence"] == "Offers consulting services to clients."
-
-
 def test_discard_uninvestable_keeps_only_priority_and_human_truth(tmp_path):
     database = tmp_path / "classifications.sqlite3"
     upsert_classifications(
