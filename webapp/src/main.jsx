@@ -120,7 +120,11 @@ function ClaudePendingBadge({ row }) {
 }
 function GreenFlagTags({ row }) {
   const investable = String(row.routing_bucket || "").toLowerCase() === "priority";
-  if (String(row.claude_decision || row.decision || "").toUpperCase() !== "KEEP" && !investable) return null;
+  if (
+    String(row.claude_decision || row.decision || "").toUpperCase() !== "KEEP"
+    && !investable
+    && !row.tracked
+  ) return null;
   const claudeFlags = Array.isArray(row.claude_green_flags)
     ? row.claude_green_flags
     : Array.isArray(row.green_flags) ? row.green_flags : [];

@@ -1442,14 +1442,24 @@ def query_classifications_by_domains(
                 # updated_at is refreshed by every re-screen, so omitting
                 # classified_at made every tracked deal read "Today" no
                 # matter how long ago it was actually discovered.
-                "SELECT domain,company_name,final_url,description,"
+                "SELECT domain,company_name,final_url,description,record_json,"
                 "routing_bucket,routing_reason,fit_score,priority_score,"
                 "thesis_pillar,content_source,manual_override,"
                 "manual_override_target,classified_at,updated_at "
                 f"FROM classifications WHERE domain IN ({marks})",
                 batch,
             ).fetchall())
-    return [dict(row) for row in rows]
+    results = []
+    for row in rows:
+        result = dict(row)
+        try:
+            record = json.loads(str(result.pop("record_json", "") or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            record = {}
+        result["website_green_flags"] = record.get("website_green_flags", [])
+        result["scorecard"] = record.get("scorecard", {})
+        results.append(result)
+    return results
 
 
 def record_automated_exclusions(
