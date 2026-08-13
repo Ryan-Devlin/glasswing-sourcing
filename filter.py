@@ -3044,6 +3044,53 @@ def commodity_wrapper_assessment(text: str) -> tuple[bool, list[str]]:
     generic_agent_hits = [
         term for term in generic_agent_signals if term in lower
     ]
+    # Cybersecurity is an exceptionally crowded category. Broad category
+    # claims are not a venture signal; retain a security company only when the
+    # page names a concrete mechanism, a narrow operational workflow, or a
+    # defensible technical asset. This deliberately does not punish a single
+    # incidental use of "security" elsewhere on a company's site.
+    generic_cyber_signals = [
+        "ai cybersecurity platform", "ai cyber security platform",
+        "ai-powered cybersecurity", "ai powered cybersecurity",
+        "ai-powered security platform", "cybersecurity platform",
+        "cyber security platform", "next-generation cybersecurity",
+        "next generation cybersecurity", "advanced threat protection",
+        "protect against evolving threats", "protects against evolving threats",
+        "comprehensive security solution", "end-to-end cybersecurity",
+    ]
+    concrete_cyber_signals = [
+        "prompt injection", "runtime verification", "runtime control",
+        "protocol-aware", "dynamic masking", "zero-knowledge proof",
+        "zero-knowledge proofs", "mpc co-signing", "sandboxed execution",
+        "egress control", "identity enforcement", "attack corpus",
+        "malware reverse engineering", "memory forensics",
+        "software supply chain", "sbom", "secrets detection",
+        "cloud misconfiguration", "lateral movement", "data exfiltration",
+        "autonomous remediation", "incident response", "threat hunting",
+        "vulnerability prioritization", "policy engine", "security protocol",
+        "programmable guardrails", "model firewall", "secure access",
+    ]
+    cyber_workflow_signals = [
+        "security operations center", "security operations", "soc analyst",
+        "identity and access", "application security", "cloud security",
+        "endpoint security", "email security", "data security",
+        "detection engineering", "incident response workflow",
+        "vulnerability management", "security engineering",
+    ]
+    generic_cyber_hits = [
+        term for term in generic_cyber_signals if term in leading_copy
+    ]
+    concrete_cyber_hits = [
+        term for term in concrete_cyber_signals if term in lower
+    ]
+    cyber_workflow_hits = [
+        term for term in cyber_workflow_signals if term in lower
+    ]
+    generic_cyber_slop = bool(
+        generic_cyber_hits
+        and not concrete_cyber_hits
+        and not cyber_workflow_hits
+    )
     explicit_low_value_hits = [
         term for term in (
             "ai-powered cold email",
@@ -3072,6 +3119,7 @@ def commodity_wrapper_assessment(text: str) -> tuple[bool, list[str]]:
     )
     is_commodity = (
         bool(explicit_low_value_hits)
+        or generic_cyber_slop
         or unmistakable
         or (
             len(strong_hits) >= 2
@@ -3091,7 +3139,8 @@ def commodity_wrapper_assessment(text: str) -> tuple[bool, list[str]]:
     evidence = list(
         dict.fromkeys(
             strong_hits + generic_agent_hits + vertical_hits + hits
-            + explicit_low_value_hits
+            + explicit_low_value_hits + generic_cyber_hits
+            + concrete_cyber_hits + cyber_workflow_hits
         )
     )[:10]
     return is_commodity, evidence

@@ -67,6 +67,30 @@ class GlasswingFitScoringTests(unittest.TestCase):
         self.assertGreaterEqual(score, 60)
         self.assertEqual(pillar, "intelligent_enterprise_defense")
 
+    def test_generic_ai_cybersecurity_slop_is_filtered(self):
+        is_wrapper, evidence = commodity_wrapper_assessment(
+            "Our AI-powered cybersecurity platform provides advanced threat "
+            "protection and a comprehensive security solution that protects "
+            "businesses against evolving threats."
+        )
+        self.assertTrue(is_wrapper)
+        self.assertIn("ai-powered cybersecurity", evidence)
+
+    def test_concrete_security_product_survives_crowded_market_filter(self):
+        is_wrapper, _ = commodity_wrapper_assessment(
+            "AI-powered cybersecurity platform for security operations. Its "
+            "protocol-aware proxy applies dynamic masking and identity "
+            "enforcement to stop data exfiltration in production."
+        )
+        self.assertFalse(is_wrapper)
+
+    def test_incidental_security_word_does_not_trigger_cyber_filter(self):
+        is_wrapper, _ = commodity_wrapper_assessment(
+            "Robotics runtime for warehouse fleets with deterministic motion "
+            "planning, telemetry, and enterprise security controls."
+        )
+        self.assertFalse(is_wrapper)
+
     def test_video_security_company_gets_defense_not_physical_ai_pillar(self):
         # "physical security"/"video security" used to appear in both
         # physical_ai's and intelligent_enterprise_defense's term lists --
