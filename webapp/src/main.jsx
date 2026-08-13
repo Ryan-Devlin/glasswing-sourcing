@@ -594,9 +594,6 @@ function Table({
                       >
                         Yes
                       </button>
-                      {!onReject && <button className="no" disabled={bucketed} title={bucketed ? `Already bucketed ${bucketLabel}` : "Reject to Hard Denied and NO"} onClick={() => onLabel(row, "no")}>
-                        Reject
-                      </button>}
                     </>
                   )}
                   {onReject && (

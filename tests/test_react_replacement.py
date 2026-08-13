@@ -118,7 +118,7 @@ def test_compiled_react_assets_exist():
 def test_search_results_carry_the_same_review_actions():
     """Search must be actionable, not just a lookup.
 
-    The Table component already renders Yes/No/Reject/Send-to-Claude whenever
+    The Table component already renders Yes/Reject/Send-to-Claude whenever
     the handlers are supplied, so the search page wires the same ones the
     review tables use rather than duplicating that UI.
     """
@@ -136,6 +136,15 @@ def test_search_results_carry_the_same_review_actions():
     # The modals the handlers depend on must be mounted on this page too.
     assert "<LabelModal" in page
     assert "<ClaudeOverrideModal" in page
+
+
+def test_tables_render_only_one_negative_action():
+    source = Path("webapp/src/main.jsx").read_text(encoding="utf-8")
+    table = source.split("function Table(", 1)[1].split("\nfunction ", 1)[0]
+    assert "onLabel(row, \"no\")" not in table
+    assert "aria-label={`Reject ${row.domain}`}" in table
+    assert table.count("onClick={() => onReject(row)}") == 1
+    assert table.count(">\n                      Reject\n") == 1
 
 
 def test_search_rows_include_the_state_the_action_buttons_read():

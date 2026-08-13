@@ -629,7 +629,7 @@ def global_search(q: str = Query(min_length=1, max_length=200)):
         if not existing.get("score") and row.get("score"):
             existing["score"] = row["score"]
     rows = list(merged.values())
-    # Search results carry the same Yes/No/Reject/Send-to-Claude actions as the
+    # Search results carry the same Yes/Reject/Send-to-Claude actions as the
     # review tables, so they need the same state those buttons key off: whether
     # a human already bucketed the domain, and whether Claude has reviewed or
     # queued it. Without this the buttons render enabled on a company that was
