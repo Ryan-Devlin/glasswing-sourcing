@@ -51,6 +51,7 @@ from classification_store import (
     claude_review_queue_rows,
     connect_store,
     enqueue_claude_review,
+    enrich_green_flags,
     defer_claude_review,
     finish_claude_review,
     classification_bucket_counts,
@@ -784,6 +785,29 @@ def set_tracking(update: TrackingUpdate):
     track_domains([domain])
     record_admin_audit("company_tracked", domain)
     return {"ok": True, "domain": domain, "tracked": True}
+
+
+@app.post("/api/tracking/green-flags/refresh", dependencies=[Depends(_require_admin)])
+def refresh_tracking_green_flags():
+    domains = [row["domain"] for row in list_tracked_domains(limit=500)]
+    changed = enrich_green_flags(domains)
+    record_admin_audit(
+        "green_flags_refreshed", "tracked_companies", f"checked={changed}"
+    )
+    return {"ok": True, "checked": changed, "total": len(domains)}
+
+
+@app.post("/api/green-flags/{domain}/refresh", dependencies=[Depends(_require_admin)])
+def refresh_domain_green_flags(domain: str):
+    target = stable_domain(domain)
+    if not target:
+        raise HTTPException(400, "Invalid domain")
+    if not classification_record_for_domain(target):
+        raise HTTPException(404, "Company not found")
+    changed = enrich_green_flags([target])
+    record_admin_audit("green_flags_refreshed", target, f"checked={changed}")
+    rows = query_classifications_by_domains([target])
+    return {"ok": True, "row": _with_claude(rows)[0] if rows else None}
 
 
 @app.delete("/api/tracking/{domain}", dependencies=[Depends(_require_admin)])

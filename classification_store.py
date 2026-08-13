@@ -1252,6 +1252,9 @@ def query_classifications(
             except (TypeError, ValueError, json.JSONDecodeError):
                 flags = []
         result["website_green_flags"] = flags if isinstance(flags, list) else []
+        result["green_flags_checked_at"] = clean(
+            record.get("green_flags_checked_at", "")
+        )
         result["scorecard"] = record.get("scorecard", {})
         results.append(result)
     return results
@@ -1568,6 +1571,9 @@ def query_classifications_by_domains(
             except (TypeError, ValueError, json.JSONDecodeError):
                 flags = []
         result["website_green_flags"] = flags if isinstance(flags, list) else []
+        result["green_flags_checked_at"] = clean(
+            record.get("green_flags_checked_at", "")
+        )
         result["scorecard"] = record.get("scorecard", {})
         results.append(result)
     return results
@@ -1968,6 +1974,9 @@ def query_classifications_by_domains(
             except (TypeError, ValueError, json.JSONDecodeError):
                 flags = []
         result["website_green_flags"] = flags if isinstance(flags, list) else []
+        result["green_flags_checked_at"] = clean(
+            record.get("green_flags_checked_at", "")
+        )
         result["scorecard"] = record.get("scorecard", {})
         results.append(result)
     return results

@@ -166,6 +166,12 @@ function GreenFlagTags({ row }) {
     </div>
   );
 }
+function signalCheckedLabel(value) {
+  if (!value) return "Signals not checked";
+  const checked = new Date(value);
+  if (Number.isNaN(checked.getTime())) return "Signals checked";
+  return `Signals checked ${dealAgeLabel(value).toLowerCase()}`;
+}
 function scorecardTitle(row) {
   const card = row.scorecard && typeof row.scorecard === "object" ? row.scorecard : {};
   const labels = {
@@ -1092,6 +1098,7 @@ function TrackingDeals() {
   const { admin, requestLogin } = useAdmin();
   const [refresh, setRefresh] = useState(0);
   const [trackingView, setTrackingView] = useState("tracking");
+  const [signalBusy, setSignalBusy] = useState("");
   useEffect(() => {
     const refreshTracking = () => setRefresh((value) => value + 1);
     window.addEventListener("tracking-changed", refreshTracking);
@@ -1111,6 +1118,21 @@ function TrackingDeals() {
     setRefresh((value) => value + 1);
     window.dispatchEvent(new CustomEvent("tracking-changed"));
   };
+  const refreshSignals = async (domain = "") => {
+    if (!admin) return requestLogin();
+    setSignalBusy(domain || "all");
+    try {
+      await api(
+        domain
+          ? `/api/green-flags/${encodeURIComponent(domain)}/refresh`
+          : "/api/tracking/green-flags/refresh",
+        { method: "POST" },
+      );
+      refreshTracking();
+    } finally {
+      setSignalBusy("");
+    }
+  };
   return (
     <section className="top-picks tracking-view">
       <div className="section-title">
@@ -1118,7 +1140,18 @@ function TrackingDeals() {
           <h2>Tracking</h2>
           <p>Companies the team wants to follow, saved across sessions.</p>
         </div>
-        <span className="pill">{fmt(result.data?.total || 0)} tracked</span>
+        <div className="tracking-header-actions">
+          <span className="pill">{fmt(result.data?.total || 0)} tracked</span>
+          <button
+            className="signal-refresh-all"
+            disabled={Boolean(signalBusy)}
+            onClick={() => refreshSignals()}
+            title="Recheck retained evidence for every tracked company"
+          >
+            <RefreshCw className={signalBusy === "all" ? "spin" : ""} size={13} />
+            {signalBusy === "all" ? "Checking…" : "Refresh all signals"}
+          </button>
+        </div>
       </div>
       <BucketTabs
         value={trackingView}
@@ -1204,6 +1237,17 @@ function TrackingDeals() {
                 <div className="deal-claude-review"><ClaudeReviewBadge row={row} prefix="Claude " /></div>
               )}
               <GreenFlagTags row={row} />
+              <div className="signal-check-row">
+                <span title={row.green_flags_checked_at || ""}>{signalCheckedLabel(row.green_flags_checked_at)}</span>
+                <button
+                  disabled={Boolean(signalBusy)}
+                  onClick={() => refreshSignals(row.domain)}
+                  title="Recheck this company's retained evidence"
+                >
+                  <RefreshCw className={signalBusy === row.domain ? "spin" : ""} size={11} />
+                  {signalBusy === row.domain ? "Checking…" : "Refresh"}
+                </button>
+              </div>
               <p className="clamp-text" title={row.description || row.claude_summary || row.claude_reasoning || "Company description is being enriched."}>{row.description || row.claude_summary || shortClaudeReason(row.claude_reasoning) || "Company description is being enriched."}</p>
               <span className="top-pick-category">{String(row.thesis_pillar || "enterprise technology").replaceAll("_", " ")}</span>
             </article>

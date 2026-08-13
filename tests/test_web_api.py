@@ -251,6 +251,41 @@ def test_tracking_endpoints_persist_and_return_company_details(monkeypatch):
     assert listing["rows"][0]["tracked"] is True
 
 
+def test_green_flag_refresh_endpoints_are_admin_scoped(monkeypatch):
+    checked = []
+    monkeypatch.setattr(
+        web_api, "enrich_green_flags",
+        lambda domains: checked.extend(domains) or len(domains),
+    )
+    monkeypatch.setattr(
+        web_api, "classification_record_for_domain",
+        lambda domain: {"domain": domain} if domain == "example.ai" else None,
+    )
+    monkeypatch.setattr(
+        web_api, "query_classifications_by_domains",
+        lambda domains: [{"domain": domain, "green_flags_checked_at": "now"} for domain in domains],
+    )
+    monkeypatch.setattr(
+        web_api, "list_tracked_domains",
+        lambda limit=500: [{"domain": "one.ai"}, {"domain": "two.ai"}],
+    )
+    monkeypatch.setattr(web_api, "_with_claude", lambda rows: rows)
+    monkeypatch.setattr(web_api, "record_admin_audit", lambda *args: None)
+
+    response = client.post("/api/green-flags/example.ai/refresh")
+    assert response.status_code == 200
+    assert response.json()["row"]["green_flags_checked_at"] == "now"
+    assert checked == ["example.ai"]
+
+    checked.clear()
+    response = client.post("/api/tracking/green-flags/refresh")
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "checked": 2, "total": 2}
+    assert checked == ["one.ai", "two.ai"]
+
+    assert client.post("/api/green-flags/missing.ai/refresh").status_code == 404
+
+
 def test_tracking_status_and_kill_workflow(monkeypatch):
     status_change = {}
     basket = {}

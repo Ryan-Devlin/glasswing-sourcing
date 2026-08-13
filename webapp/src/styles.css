@@ -273,6 +273,48 @@ header p {
 .tracking-view {
   background: linear-gradient(135deg, #f7faf9, #fff);
 }
+.tracking-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.signal-refresh-all {
+  width: auto;
+  min-height: 29px;
+  padding: 5px 9px;
+  border-color: #d9c8c8;
+  color: var(--gw-red-dark);
+  background: #fff;
+  font-size: 10px;
+  font-weight: 650;
+}
+.signal-check-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 5px;
+  color: #81908d;
+  font-size: 9px;
+  line-height: 1.2;
+}
+.signal-check-row button {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  width: auto;
+  min-height: 22px;
+  padding: 2px 6px;
+  border: 0;
+  color: #6d7e7a;
+  background: transparent;
+  font-size: 9px;
+  font-weight: 650;
+}
+.signal-check-row button:hover:not(:disabled) {
+  color: var(--gw-red-dark);
+  background: #f8eeee;
+}
 .empty-tracking {
   margin: 0;
   padding: 18px;
