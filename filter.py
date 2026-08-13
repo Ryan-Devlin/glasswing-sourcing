@@ -1908,6 +1908,38 @@ def media_newsletter_assessment(text: str) -> tuple[bool, list[str]]:
     if newsletter_identity:
         strong_hits.append("newsletter/news identity")
 
+    # Reference libraries and personal futurist pages can be extremely dense
+    # with thesis vocabulary while having no operating company or product.
+    # Keep these patterns narrow and require the absence of commercial company
+    # framing so a real regulatory/compliance product is not suppressed.
+    reference_identity = bool(
+        any(term in leading_copy for term in (
+            "working reference for",
+            "regulatory playbook",
+            "compliance playbook",
+            "reference guide for",
+        ))
+        and any(term in lower for term in (
+            "regulation", "regulatory", "standards", "framework", "guide",
+        ))
+        and not any(term in lower for term in (
+            "our platform", "our product", "book a demo", "request a demo",
+            "customers", "pricing",
+        ))
+    )
+    if reference_identity:
+        strong_hits.append("reference/playbook identity")
+
+    personal_exploration_identity = bool(
+        re.search(r"\bexploring\b.{0,80}\b(?:technology|innovation|the future)\b", leading_copy)
+        and not any(term in lower for term in (
+            "our platform", "our product", "our company", "our customers",
+            "book a demo", "request a demo", "pricing",
+        ))
+    )
+    if personal_exploration_identity:
+        strong_hits.append("personal technology exploration page")
+
     # A personal site/portfolio, not an operating company -- distinct from
     # the media/newsletter case above but the same underlying problem: no
     # company to invest in. Requires an explicit personal-site
@@ -1987,6 +2019,8 @@ def media_newsletter_assessment(text: str) -> tuple[bool, list[str]]:
         bool(education_identity_hits)
         or bool(directory_identity_hits)
         or newsletter_identity
+        or reference_identity
+        or personal_exploration_identity
         or is_personal_site
         or
         (
@@ -2659,6 +2693,22 @@ def placeholder_assessment(
 
     if not cleaned or word_count == 0:
         return False, "ghost_or_inaccessible_site", ["no_visible_content"]
+
+    anti_bot_hits = [
+        phrase for phrase in (
+            "checking your browser before accessing",
+            "checking your browser before accessing. just a moment",
+            "please wait for up to 5 seconds",
+            "verify you are human to continue",
+        )
+        if phrase in lower
+    ]
+    if anti_bot_hits:
+        return (
+            True,
+            "anti_bot_interstitial_no_company_content",
+            anti_bot_hits,
+        )
 
     if only_generic_coming_soon_content(cleaned):
         return (

@@ -902,3 +902,38 @@ class PersonalAndAcademicPagesAreNotCompaniesTests(unittest.TestCase):
             "ships with pricing, book a demo, enterprise SOC 2, our customers."
         )
         self.assertFalse(detected)
+
+    def test_personal_technology_exploration_page_is_not_a_company(self):
+        detected, evidence = screening_filter.media_newsletter_assessment(
+            "Futuristic Tech — Joshua Akunna. Exploring AI, technology, "
+            "and the future of innovation."
+        )
+        self.assertTrue(detected)
+        self.assertIn("personal technology exploration page", evidence)
+
+    def test_regulatory_playbook_is_reference_content(self):
+        detected, evidence = screening_filter.media_newsletter_assessment(
+            "AI SaMD Playbook. Working reference for AI/ML medical device "
+            "regulation: FDA PCCP, EU AI Act, MHRA, Health Canada and PMDA."
+        )
+        self.assertTrue(detected)
+        self.assertIn("reference/playbook identity", evidence)
+
+    def test_real_compliance_platform_is_not_reference_content(self):
+        detected, _ = screening_filter.media_newsletter_assessment(
+            "Our platform automates regulatory compliance and evidence "
+            "collection for enterprise customers. Request a demo."
+        )
+        self.assertFalse(detected)
+
+
+class AntiBotInterstitialTests(unittest.TestCase):
+    def test_browser_check_is_placeholder_not_company_content(self):
+        detected, reason, evidence = screening_filter.placeholder_assessment(
+            "Checking your browser before accessing. Just a moment... "
+            "Please wait for up to 5 seconds.",
+            word_count=13,
+        )
+        self.assertTrue(detected)
+        self.assertEqual(reason, "anti_bot_interstitial_no_company_content")
+        self.assertTrue(evidence)
