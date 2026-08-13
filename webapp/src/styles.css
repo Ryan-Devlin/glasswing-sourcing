@@ -291,9 +291,46 @@ header p {
 }
 .top-pick-head {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
+  gap: 10px;
   margin-bottom: 11px;
+}
+.deal-status {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+  max-width: 68%;
+}
+.deal-status .pill {
+  padding: 3px 7px;
+  font-size: 9px;
+  font-weight: 650;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+.platform-investable,
+.human-yes {
+  color: #176847;
+  background: #e7f4ee;
+}
+.platform-review {
+  color: #6c5f5f;
+  background: #f0ebea;
+}
+.platform-denied {
+  color: #a7182b;
+  background: #fbe7e9;
+}
+.workflow-status {
+  color: #6b1420;
+  background: #f8e9eb;
+}
+.human-override {
+  color: #8b5200;
+  background: #fff1d6;
+  border: 1px solid #edcf94;
 }
 .score-ring {
   color: #087365;

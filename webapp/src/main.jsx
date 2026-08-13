@@ -118,6 +118,27 @@ function ClaudePendingBadge({ row }) {
     </span>
   );
 }
+function platformRecommendation(row) {
+  const bucket = String(row.routing_bucket || "").toLowerCase();
+  if (bucket === "priority") return ["investable", "Platform · Investable"];
+  if (["reject", "hard_denied", "screened_out"].includes(bucket)) return ["denied", "Platform · Denied"];
+  return ["review", "Platform · Review"];
+}
+function DealStatus({ row, workflow = false }) {
+  const [platformClass, platformLabel] = platformRecommendation(row);
+  const claudeReject = String(row.claude_decision || row.decision || "").toUpperCase() === "REJECT";
+  const humanYes = String(row.manual_override_target || row.label || "").toLowerCase() === "yes";
+  const stage = String(row.tracking_status || "tracking").toLowerCase();
+  const stageLabel = stage === "reached_out" ? "Reached out" : stage === "meeting" ? "Meeting" : "Tracking";
+  return (
+    <div className="deal-status" aria-label="Deal status">
+      {workflow && <span className={`pill workflow-status workflow-${stage}`}>{stageLabel}</span>}
+      {!workflow && humanYes && <span className="pill human-yes">Human · YES</span>}
+      <span className={`pill platform-status platform-${platformClass}`}>{platformLabel}</span>
+      {workflow && claudeReject && <span className="pill human-override">Human override</span>}
+    </div>
+  );
+}
 function GreenFlagTags({ row }) {
   const claudeVerifiedYes = String(row.claude_decision || row.decision || "").toUpperCase() === "KEEP";
   const humanYes = String(row.manual_override_target || row.label || "").toLowerCase() === "yes";
@@ -1021,7 +1042,7 @@ function GoodDeals() {
             <span className="deal-age" title={row.classified_at || row.updated_at}>{dealAgeLabel(row.classified_at || row.updated_at)}</span>
             <div className="top-pick-head">
               <span className="score-ring" title={scorecardTitle(row)}>{row.fit_score}<small>/100</small></span>
-              <span className="pill">Investable</span>
+              <DealStatus row={row} />
             </div>
             <h3>{row.company_name || row.domain}</h3>
             <a href={row.final_url || `https://${row.domain}`} target="_blank">{row.domain}</a>
@@ -1175,7 +1196,7 @@ function TrackingDeals() {
               </span>
               <div className="top-pick-head">
                 <span className="score-ring" title={scorecardTitle(row)}>{row.fit_score}<small>/100</small></span>
-                <span className="pill">{String(row.routing_bucket || "tracked").replaceAll("_", " ")}</span>
+                <DealStatus row={row} workflow />
               </div>
               <h3>{row.company_name || row.domain}</h3>
               <a href={row.final_url || `https://${row.domain}`} target="_blank">{row.domain}</a>
@@ -1245,7 +1266,7 @@ function ClaudeTopPicks() {
                   {row.fit_score}
                   <small>/100</small>
                 </span>
-                <span className="pill claude-keep">Claude KEEP</span>
+                <DealStatus row={row} />
               </div>
               <h3>{row.company_name || row.domain}</h3>
               <a
@@ -1254,6 +1275,9 @@ function ClaudeTopPicks() {
               >
                 {row.domain}
               </a>
+              <div className="deal-claude-review">
+                <ClaudeReviewBadge row={row} prefix="Claude " />
+              </div>
               <GreenFlagTags row={row} />
               <p className="clamp-text" title={reason}>
                 {reason}
@@ -2097,7 +2121,7 @@ function CrawlerDiscoveries() {
               <span className="deal-age">{dealAgeLabel(row.classified_at || row.updated_at)}</span>
               <div className="top-pick-head">
                 <span className="score-ring" title={scorecardTitle(row)}>{row.fit_score}<small>/100</small></span>
-                <span className="pill">{row.routing_bucket === "priority" ? "Investable" : "Needs Review"}</span>
+                <DealStatus row={row} />
               </div>
               <h3>{row.company_name || row.domain}</h3>
               <a href={row.final_url || `https://${row.domain}`} target="_blank">{row.domain}</a>
