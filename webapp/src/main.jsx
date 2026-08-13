@@ -1724,6 +1724,14 @@ function CertStreamPage() {
     return () => clearInterval(id);
   }, []);
   const s = status.data || {};
+  // Before the first response there is no data, and rendering fmt(undefined)
+  // showed a confident "0" in every funnel tile that then jumped to the real
+  // number -- indistinguishable from the run actually resetting. Show a
+  // placeholder until real numbers exist.
+  const metric = (value) =>
+    status.data === null || value === undefined || value === null
+      ? "—"
+      : fmt(value);
   const desiredRunning = requestedState ?? s.desired_running ?? s.running;
   useEffect(() => {
     if (s.desired_running === requestedState) setRequestedState(null);
@@ -1796,32 +1804,34 @@ function CertStreamPage() {
       <div className="metrics">
         <Metric
           label="Domains discovered"
-          value={fmt(s.new_domains_received || s.domains_received)}
+          value={metric(s.new_domains_received ?? s.domains_received)}
         />
-        <Metric label="Screening complete" value={fmt(s.current_run_queue?.complete)} />
+        <Metric label="Screening complete" value={metric(s.current_run_queue?.complete)} />
         <Metric
           label="Candidates retained"
-          value={fmt(s.retained_in_buckets)}
+          value={metric(s.retained_in_buckets)}
         />
         <Metric
           label="Filtered out"
-          value={fmt(s.discarded_after_screening)}
+          value={metric(s.discarded_after_screening)}
         />
         <Metric
           label="Still processing"
-          value={fmt(
-            Number(s.current_run_queue?.awaiting_first_attempt || 0) +
-            Number(s.current_run_queue?.processing || 0) +
-            Number(s.current_run_queue?.retrying || 0)
+          value={metric(
+            s.current_run_queue
+              ? Number(s.current_run_queue.awaiting_first_attempt || 0) +
+                Number(s.current_run_queue.processing || 0) +
+                Number(s.current_run_queue.retrying || 0)
+              : undefined
           )}
         />
       </div>
       <p className="notice certstream-funnel">
-        <strong>{fmt(s.current_run_queue?.complete)} screening decisions</strong>
+        <strong>{metric(s.current_run_queue?.complete)} screening decisions</strong>
         {" = "}
-        <strong>{fmt(s.retained_in_buckets)} candidates in the charts</strong>
+        <strong>{metric(s.retained_in_buckets)} candidates in the charts</strong>
         {" + "}
-        <strong>{fmt(s.discarded_after_screening)} low-signal domains discarded</strong>.
+        <strong>{metric(s.discarded_after_screening)} low-signal domains discarded</strong>.
         Worker attempts can be higher because failed fetches are retried. Only retained
         candidates appear below.
       </p>

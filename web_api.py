@@ -829,6 +829,14 @@ def kill_tracked_company(domain: str):
     }
 
 
+# A transient pipeline-database read must not publish zeros. These counters
+# feed the CertStream funnel tiles, and the endpoint used to initialise them to
+# zero and swallow read errors, so one failed query rendered "Screening complete
+# 0 / Candidates retained 0" as though the run had genuinely reset -- the tiles
+# visibly flickered to zero and back. Keep the last good answer per run instead.
+_run_queue_cache: dict[str, tuple[dict[str, int], int]] = {}
+
+
 @app.get("/api/certstream/status")
 def certstream_status():
     if shared_pipeline_backend_available():
@@ -840,6 +848,7 @@ def certstream_status():
     else:
         status = read_local_pipeline_status()
     run_id = str(status.get("run_id", "") or "")
+    queue_is_live = False
     current_run_queue = {
         "total": 0,
         "awaiting_first_attempt": 0,
@@ -878,6 +887,7 @@ def certstream_status():
                     key: int(row[key] or 0)
                     for key in current_run_queue
                 }
+                queue_is_live = True
         except Exception:
             # Worker status remains available during a transient queue read.
             pass
@@ -889,13 +899,26 @@ def certstream_status():
     # confirmed live: a run reporting 13 "candidates retained" was 7 ghost rows
     # plus 6 rejects, i.e. zero real candidates. Overstating retention hid the
     # fact that nothing was surviving screening.
-    retained_in_buckets = (
-        sum(
-            int(_bucket_counts_for_run(run_id).get(name, 0))
-            for name in ("investable", "review")
-        )
-        if run_id else 0
-    )
+    if run_id:
+        if queue_is_live:
+            retained = sum(
+                int(_bucket_counts_for_run(run_id).get(name, 0))
+                for name in ("investable", "review")
+            )
+            _run_queue_cache[run_id] = (dict(current_run_queue), retained)
+            _run_queue_cache.pop("__previous__", None)
+            retained_in_buckets = retained
+        else:
+            # Serve the last good numbers for this run rather than zeros. A
+            # freshly restarted run legitimately has none yet, which is why this
+            # is keyed per run and never falls back across runs.
+            cached_queue, cached_retained = _run_queue_cache.get(
+                run_id, (current_run_queue, 0)
+            )
+            current_run_queue = dict(cached_queue)
+            retained_in_buckets = cached_retained
+    else:
+        retained_in_buckets = 0
     # A completed domain is not necessarily a retained company. Most certificate
     # domains are screened out and intentionally discarded; expose that side of
     # the funnel explicitly so the UI never implies that every completed screen
@@ -908,6 +931,8 @@ def certstream_status():
         "current_run_queue": current_run_queue,
         "retained_in_buckets": retained_in_buckets,
         "discarded_after_screening": discarded_after_screening,
+        # Lets the UI distinguish "no data yet" from a real zero.
+        "queue_counts_live": bool(queue_is_live or run_id in _run_queue_cache),
         "desired_running": desired,
         "pause_requested": not desired,
     }

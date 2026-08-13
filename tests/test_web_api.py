@@ -763,3 +763,81 @@ def test_search_shows_the_claude_recommendation():
     assert 'label: "Claude review"' in page
     assert "<ClaudeReviewBadge" in page
     assert "claudePending(row)" in page
+
+
+def test_transient_queue_read_does_not_publish_zeros(monkeypatch):
+    """A failed pipeline read must not look like the run reset.
+
+    The funnel tiles read straight from these counters. The endpoint used to
+    initialise them to zero and swallow read errors, so one failed query
+    rendered "Screening complete 0 / Candidates retained 0" as though the run
+    had genuinely restarted -- the tiles flickered to zero and back.
+    """
+    class GoodConnection:
+        def execute(self, *_args, **_kwargs):
+            class Result:
+                def fetchone(self_inner):
+                    return {
+                        "total": 500, "awaiting_first_attempt": 10,
+                        "processing": 4, "retrying": 5, "complete": 471,
+                        "failed": 10, "attempts": 600,
+                    }
+            return Result()
+
+        def close(self):
+            pass
+
+    class BrokenConnection:
+        def execute(self, *_args, **_kwargs):
+            raise RuntimeError("connection reset")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(web_api, "shared_pipeline_backend_available", lambda: True)
+    monkeypatch.setattr(
+        web_api, "read_pipeline_status",
+        lambda: {"running": True, "stage": "screening", "run_id": "run-flicker"},
+    )
+    monkeypatch.setattr(web_api, "read_control", lambda: {"desired": {"pipeline": True}})
+    monkeypatch.setattr(
+        web_api, "_bucket_counts_for_run",
+        lambda _run: {"all": 60, "investable": 8, "review": 42, "denied": 10,
+                      "unreadable": 0},
+    )
+    web_api._run_queue_cache.clear()
+
+    monkeypatch.setattr(web_api, "connect_pipeline_db", GoodConnection)
+    good = client.get("/api/certstream/status").json()
+    assert good["current_run_queue"]["complete"] == 471
+    assert good["retained_in_buckets"] == 50
+    assert good["queue_counts_live"] is True
+
+    # Same run, database now unreachable: serve the last good numbers.
+    monkeypatch.setattr(web_api, "connect_pipeline_db", BrokenConnection)
+    degraded = client.get("/api/certstream/status").json()
+    assert degraded["current_run_queue"]["complete"] == 471, "flickered to zero"
+    assert degraded["retained_in_buckets"] == 50, "flickered to zero"
+
+    # A genuinely new run must start from zero, never inherit another run's.
+    monkeypatch.setattr(
+        web_api, "read_pipeline_status",
+        lambda: {"running": True, "stage": "screening", "run_id": "run-brand-new"},
+    )
+    fresh = client.get("/api/certstream/status").json()
+    assert fresh["current_run_queue"]["complete"] == 0
+    assert fresh["retained_in_buckets"] == 0
+    web_api._run_queue_cache.clear()
+
+
+def test_funnel_tiles_show_a_placeholder_before_data_arrives():
+    from pathlib import Path
+
+    source = Path("webapp/src/main.jsx").read_text(encoding="utf-8")
+    page = source.split("function CertStreamPage()", 1)[1].split("\nfunction ", 1)[0]
+    assert "const metric = (value) =>" in page
+    # Every funnel tile must go through it, not raw fmt().
+    for label in ("Domains discovered", "Screening complete", "Candidates retained",
+                  "Filtered out", "Still processing"):
+        block = page.split(label, 1)[1][:220]
+        assert "metric(" in block, label
