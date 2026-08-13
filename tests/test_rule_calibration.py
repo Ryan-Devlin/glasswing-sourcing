@@ -375,7 +375,11 @@ class RuleCalibrationTests(unittest.TestCase):
             location_status="UNKNOWN",
             maturity_risk=0,
             qualified_for_llm=False,
-            score=12,
+            # Below SUBSTANTIVE_REVIEW_FLOOR: the genuinely-empty band, which
+            # averages a score of 1.3 in live traffic. Above the floor these now
+            # reach Needs Review instead, because the scorer cannot distinguish
+            # "no signal" from "vocabulary it does not know".
+            score=5,
             potential_glasswing_fit=False,
             substantive_no_fit_evidence=True,
         )
