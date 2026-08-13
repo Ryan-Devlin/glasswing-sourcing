@@ -22,7 +22,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
@@ -718,8 +718,29 @@ def labels(
     }
 
 
+def _finish_label_side_effects(update: LabelUpdate, reason: str) -> None:
+    """Mirror/export a committed decision without delaying the reviewer."""
+    try:
+        save_basket_entry(
+            update.domain, update.label, update.rating,
+            source="human", reason=reason,
+        )
+    except Exception as exc:
+        print(f"Training-basket mirror deferred for {update.domain}: {exc}", file=sys.stderr)
+    try:
+        record_admin_audit("label_set", update.domain, f"{update.label} score {update.rating}")
+    except Exception as exc:
+        print(f"Label audit deferred for {update.domain}: {exc}", file=sys.stderr)
+    try:
+        from model_evaluation import write_performance_metrics
+
+        write_performance_metrics()
+    except Exception as exc:
+        print(f"Model metrics refresh deferred for {update.domain}: {exc}", file=sys.stderr)
+
+
 @app.post("/api/labels", dependencies=[Depends(_require_admin)])
-def set_label(update: LabelUpdate):
+def set_label(update: LabelUpdate, background_tasks: BackgroundTasks):
     # NO and Reject are the same human decision. Normalize the negative path
     # here so every client produces identical training truth and routing.
     supplied_reason = str(update.reason or "").strip()
@@ -728,7 +749,8 @@ def set_label(update: LabelUpdate):
         else "manual_reject" if update.label == "no"
         else supplied_reason
     )
-    save_basket_entry(update.domain, update.label, update.rating, source="human", reason=reason)
+    # Commit routing/manual truth first. CSV exports, backups, and the audit log
+    # are compatibility side effects and must never hold the Save button open.
     record_manual_move(
         [update.domain],
         target_label=update.label,
@@ -736,8 +758,9 @@ def set_label(update: LabelUpdate):
         scores={stable_domain(update.domain): update.rating},
         note=reason,
         source="human",
+        refresh_artifacts=False,
     )
-    record_admin_audit("label_set", update.domain, f"{update.label} score {update.rating}")
+    background_tasks.add_task(_finish_label_side_effects, update, reason)
     return {"ok": True, "domain": stable_domain(update.domain), "label": update.label}
 
 

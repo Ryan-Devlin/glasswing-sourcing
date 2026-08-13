@@ -2696,6 +2696,7 @@ def record_manual_move(
     scores: dict[str, int] | None = None,
     note: str = "",
     source: str = "human",
+    refresh_artifacts: bool = True,
     path: Path | str = CLASSIFICATION_DB,
 ) -> int:
     normalized = list(
@@ -2813,7 +2814,7 @@ def record_manual_move(
                 conn, normalized, checked_at=now
             )
         conn.commit()
-    if Path(path).resolve() == Path(CLASSIFICATION_DB).resolve():
+    if refresh_artifacts and Path(path).resolve() == Path(CLASSIFICATION_DB).resolve():
         from manual_truth_backup import create_manual_snapshot
 
         try:

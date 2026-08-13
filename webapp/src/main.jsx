@@ -188,15 +188,26 @@ async function api(path, options = {}) {
   const request = async () => {
     const attempts = method === "GET" ? 2 : 1;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
-      const r = await fetch(path, {
-        headers: {
-          ...(options.body instanceof FormData
-            ? {}
-            : { "Content-Type": "application/json" }),
-          ...(options.headers || {}),
-        },
-        ...options,
-      });
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), method === "GET" ? 15000 : 12000);
+      let r;
+      try {
+        r = await fetch(path, {
+          headers: {
+            ...(options.body instanceof FormData
+              ? {}
+              : { "Content-Type": "application/json" }),
+            ...(options.headers || {}),
+          },
+          ...options,
+          signal: options.signal || controller.signal,
+        });
+      } catch (error) {
+        if (error.name === "AbortError") throw new Error("The server took too long to save. Please retry.");
+        throw error;
+      } finally {
+        window.clearTimeout(timeout);
+      }
       if (r.ok) return r.json();
       const text = await r.text();
       let payload;
