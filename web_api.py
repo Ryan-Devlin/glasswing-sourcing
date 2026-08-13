@@ -720,13 +720,16 @@ def labels(
 
 @app.post("/api/labels", dependencies=[Depends(_require_admin)])
 def set_label(update: LabelUpdate):
-    save_basket_entry(update.domain, update.label, update.rating, source="human", reason=update.reason)
+    # NO and Reject are the same human decision. Normalize the negative path
+    # here so every client produces identical training truth and routing.
+    reason = "manual_reject" if update.label == "no" else update.reason
+    save_basket_entry(update.domain, update.label, update.rating, source="human", reason=reason)
     record_manual_move(
         [update.domain],
         target_label=update.label,
         target_bucket="priority" if update.label == "yes" else "reject",
         scores={stable_domain(update.domain): update.rating},
-        note=update.reason,
+        note=reason,
         source="human",
     )
     record_admin_audit("label_set", update.domain, f"{update.label} score {update.rating}")

@@ -594,7 +594,7 @@ function Table({
                       >
                         Yes
                       </button>
-                      <button className="no" disabled={bucketed} title={bucketed ? `Already bucketed ${bucketLabel}` : "Move to NO"} onClick={() => onLabel(row, "no")}>
+                      <button className="no" disabled={bucketed} title={bucketed ? `Already bucketed ${bucketLabel}` : "Reject to Hard Denied and NO"} onClick={() => onReject ? onReject(row) : onLabel(row, "no")}>
                         No
                       </button>
                     </>

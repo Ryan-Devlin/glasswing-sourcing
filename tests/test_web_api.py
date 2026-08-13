@@ -204,6 +204,21 @@ def test_human_label_endpoint_uses_protected_human_source(monkeypatch):
     assert response.status_code == 200
     assert movement["target_bucket"] == "reject"
     assert movement["target_label"] == "no"
+    assert movement["note"] == "manual_reject"
+    assert captured["reason"] == "manual_reject"
+
+    # Even an older client using the generic default reason must produce the
+    # exact same negative decision as the explicit Reject action.
+    response = client.post(
+        "/api/labels",
+        json={"domain": "Legacy-no.ai", "label": "no", "rating": 25},
+    )
+    assert response.status_code == 200
+    assert captured["label"] == "no"
+    assert captured["reason"] == "manual_reject"
+    assert movement["target_label"] == "no"
+    assert movement["target_bucket"] == "reject"
+    assert movement["note"] == "manual_reject"
 
 
 def test_tracking_endpoints_persist_and_return_company_details(monkeypatch):
