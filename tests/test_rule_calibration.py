@@ -847,3 +847,58 @@ class ConcreteMechanismOutranksBoilerplateTests(unittest.TestCase):
         score, _, _, _ = screening_filter.score_text(naming)
         concrete, _, _, _ = screening_filter.score_text(self.CONCRETE)
         self.assertLess(score, concrete)
+
+
+class PersonalAndAcademicPagesAreNotCompaniesTests(unittest.TestCase):
+    """An academic CV or personal portfolio is not an investable company.
+
+    Confirmed live: a senior lecturer's homepage reached the candidate list
+    scoring 61 -- higher than kerno.io, a real AI-agent infrastructure company,
+    at 23. A verbose academic page incidentally hits many lexicon terms
+    ("machine learning", "data science", "cloud computing") without being a
+    company, which is how keyword volume outranks a concise real pitch.
+    """
+
+    ACADEMIC_CV = (
+        "Dr. Nirmal Acharya | Senior Lecturer and Researcher. Publications, "
+        "teaching, research interests in machine learning and data science. "
+        "Curriculum vitae, conference papers, journal articles, my students."
+    )
+    PORTFOLIO = (
+        "Mohini Kishore - Analytics Engineer. About me. My work. I am an "
+        "analytics engineer based in Toronto. Resume, blog, get in touch."
+    )
+    SOLO_FOUNDER = (
+        "Acme builds deterministic agent infrastructure. About me: I founded "
+        "Acme after years of experience at Stripe. Our product is used by "
+        "enterprise customers. Pricing. Book a demo."
+    )
+
+    def test_academic_cv_is_detected(self):
+        detected, evidence = screening_filter.media_newsletter_assessment(
+            self.ACADEMIC_CV
+        )
+        self.assertTrue(detected)
+        self.assertTrue(evidence)
+
+    def test_personal_portfolio_without_the_word_portfolio_is_detected(self):
+        detected, _ = screening_filter.media_newsletter_assessment(self.PORTFOLIO)
+        self.assertTrue(detected)
+
+    def test_a_solo_founders_real_startup_survives(self):
+        """The company-signal escape hatch must outweigh personal phrasing.
+
+        A real founder's site says "about me" too; what distinguishes it is
+        pricing, a demo, a product and customers.
+        """
+        detected, _ = screening_filter.media_newsletter_assessment(
+            self.SOLO_FOUNDER
+        )
+        self.assertFalse(detected)
+
+    def test_a_real_product_page_is_untouched(self):
+        detected, _ = screening_filter.media_newsletter_assessment(
+            "Kerno | Runtime verification for AI coding agents. Our platform "
+            "ships with pricing, book a demo, enterprise SOC 2, our customers."
+        )
+        self.assertFalse(detected)

@@ -1806,6 +1806,23 @@ def media_newsletter_assessment(text: str) -> tuple[bool, list[str]]:
         # phrase with real company_signals (pricing/enterprise/customers).
         "open-source", "open source project", "fully open-source",
         "is open source", "an open-source alternative",
+        # An academic CV. Confirmed live: a senior lecturer's homepage reached
+        # the candidate list scoring 61 -- higher than kerno.io, a real
+        # AI-agent infrastructure company, at 23. A verbose academic page
+        # incidentally hits many lexicon terms ("machine learning", "data
+        # science", "cloud computing") without being a company at all, which
+        # is exactly how keyword volume outranks a concise real pitch.
+        "curriculum vitae", "publications", "conference papers",
+        "journal articles", "research interests", "senior lecturer",
+        "associate professor", "phd student", "phd candidate",
+        "google scholar", "orcid", "my students", "courses i teach",
+        "teaching experience", "peer-reviewed",
+        # A personal portfolio that never says "portfolio". Confirmed live:
+        # an analytics engineer's site scored 42.
+        "about me", "my work", "my projects", "my writing", "my blog",
+        "get in touch", "years of experience", "i'm a developer",
+        "i am a developer", "i'm an engineer", "i am an engineer",
+        "creative technologist", "based in",
     ]
     company_signals = [
         "our platform", "our product", "our customers", "our team",
