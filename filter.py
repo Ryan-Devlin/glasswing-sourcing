@@ -3036,6 +3036,11 @@ def commodity_wrapper_assessment(text: str) -> tuple[bool, list[str]]:
         "sales agent", "marketing agent", "customer support agent",
         "ai assistant for everyone", "all-in-one ai assistant",
         "your ai workforce", "ai workforce",
+        "enterprise ai agent platform", "enterprise agent platform",
+        "agentic ai platform", "multi-agent platform",
+        "build test and run ai agents", "build, test, and run ai agents",
+        "deploy autonomous ai agents", "custom llm solutions",
+        "custom ai solutions", "ai integration services",
     ]
 
     strong_hits = [term for term in strong if term in lower]
@@ -3044,6 +3049,22 @@ def commodity_wrapper_assessment(text: str) -> tuple[bool, list[str]]:
     generic_agent_hits = [
         term for term in generic_agent_signals if term in lower
     ]
+    generic_agent_platform = bool(
+        generic_agent_hits
+        and any(term in generic_agent_hits for term in (
+            "enterprise ai agent platform", "enterprise agent platform",
+            "agentic ai platform", "multi-agent platform",
+            "build test and run ai agents", "build, test, and run ai agents",
+            "deploy autonomous ai agents", "custom llm solutions",
+            "custom ai solutions", "ai integration services",
+        ))
+        and not any(term in lower for term in (
+            "manufacturing", "factory", "industrial", "robotics",
+            "satellite imagery", "agriculture", "crop", "semiconductor",
+            "pcb", "clinical", "drug discovery", "insurance claims",
+            "food cost", "inventory management",
+        ))
+    )
     # Cybersecurity is an exceptionally crowded category. Broad category
     # claims are not a venture signal; retain a security company only when the
     # page names a concrete mechanism, a narrow operational workflow, or a
@@ -3057,6 +3078,17 @@ def commodity_wrapper_assessment(text: str) -> tuple[bool, list[str]]:
         "next generation cybersecurity", "advanced threat protection",
         "protect against evolving threats", "protects against evolving threats",
         "comprehensive security solution", "end-to-end cybersecurity",
+        "ai governance platform", "agent governance platform",
+        "ai agent governance", "non-human identity governance",
+        "ai compliance platform", "ai-native grc", "ai native grc",
+        "compliance automation", "compliance-as-code",
+        "compliance as code", "automated compliance",
+        "ai red teaming", "automated red teaming",
+        "autonomous penetration testing", "generative penetration testing",
+        "ai pentest", "ai pentesting", "pentest appliance",
+        "xdr", "siem", "soar", "soc analyst",
+        "security awareness training", "phishing defense program",
+        "prompt management", "ai dlp",
     ]
     concrete_cyber_signals = [
         "prompt injection", "runtime verification", "runtime control",
@@ -3088,8 +3120,25 @@ def commodity_wrapper_assessment(text: str) -> tuple[bool, list[str]]:
     ]
     generic_cyber_slop = bool(
         generic_cyber_hits
-        and not concrete_cyber_hits
-        and not cyber_workflow_hits
+        and (
+            # These are explicit user-rejected crowded categories even when
+            # the site supplies technical detail. They are not current
+            # sourcing targets.
+            any(term in generic_cyber_hits for term in (
+                "ai governance platform", "agent governance platform",
+                "ai agent governance", "non-human identity governance",
+                "ai compliance platform", "ai-native grc", "ai native grc",
+                "compliance automation", "compliance-as-code",
+                "compliance as code", "automated compliance",
+                "ai red teaming", "automated red teaming",
+                "autonomous penetration testing",
+                "generative penetration testing", "ai pentest",
+                "ai pentesting", "pentest appliance", "xdr", "siem",
+                "soar", "soc analyst", "security awareness training",
+                "phishing defense program", "prompt management", "ai dlp",
+            ))
+            or (not concrete_cyber_hits and not cyber_workflow_hits)
+        )
     )
     explicit_low_value_hits = [
         term for term in (
@@ -3120,6 +3169,7 @@ def commodity_wrapper_assessment(text: str) -> tuple[bool, list[str]]:
     is_commodity = (
         bool(explicit_low_value_hits)
         or generic_cyber_slop
+        or generic_agent_platform
         or unmistakable
         or (
             len(strong_hits) >= 2

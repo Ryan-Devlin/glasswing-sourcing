@@ -91,6 +91,46 @@ class GlasswingFitScoringTests(unittest.TestCase):
         )
         self.assertFalse(is_wrapper)
 
+    def test_crowded_agent_governance_is_filtered_even_with_mechanism(self):
+        is_wrapper, evidence = commodity_wrapper_assessment(
+            "AI agent governance platform with non-bypassable policy "
+            "enforcement, cryptographic proof, immutable audit logs, and "
+            "runtime control for every tool call."
+        )
+        self.assertTrue(is_wrapper)
+        self.assertIn("ai agent governance", evidence)
+
+    def test_red_team_and_pentest_category_is_out_of_scope(self):
+        is_wrapper, evidence = commodity_wrapper_assessment(
+            "Autonomous penetration testing uses specialized AI agents to "
+            "find and prove exploitable vulnerabilities for security teams."
+        )
+        self.assertTrue(is_wrapper)
+        self.assertIn("autonomous penetration testing", evidence)
+
+    def test_grc_compliance_automation_is_filtered(self):
+        is_wrapper, evidence = commodity_wrapper_assessment(
+            "AI-native GRC platform with compliance automation, continuous "
+            "control monitoring, evidence collection, and audit trails."
+        )
+        self.assertTrue(is_wrapper)
+        self.assertIn("ai-native grc", evidence)
+
+    def test_generic_enterprise_agent_platform_is_filtered(self):
+        is_wrapper, evidence = commodity_wrapper_assessment(
+            "Enterprise AI agent platform to build, test, and run AI agents "
+            "with governance, memory, guardrails, and workflow automation."
+        )
+        self.assertTrue(is_wrapper)
+        self.assertIn("enterprise ai agent platform", evidence)
+
+    def test_specific_industrial_agent_product_survives(self):
+        is_wrapper, _ = commodity_wrapper_assessment(
+            "Enterprise AI agent platform for PCB manufacturing that tracks "
+            "factory materials, production equipment, and quality inspection."
+        )
+        self.assertFalse(is_wrapper)
+
     def test_video_security_company_gets_defense_not_physical_ai_pillar(self):
         # "physical security"/"video security" used to appear in both
         # physical_ai's and intelligent_enterprise_defense's term lists --
