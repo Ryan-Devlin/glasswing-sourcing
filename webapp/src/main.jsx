@@ -719,6 +719,7 @@ function LabelModal({ target, onClose, onSaved }) {
   const [reason, setReason] = useState("wrong_fit");
   const [note, setNote] = useState("");
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
   const rejecting = target.label === "no";
   return (
     <div className="modal-bg">
@@ -763,21 +764,29 @@ function LabelModal({ target, onClose, onSaved }) {
             disabled={saving}
             onClick={async () => {
               setSaving(true);
-              await api("/api/labels", {
-                method: "POST",
-                body: JSON.stringify({
-                  domain: target.domain,
-                  label: target.label,
-                  rating: Number(rating),
-                  reason: rejecting ? `manual_reject:${reason}${note.trim() ? ` — ${note.trim()}` : ""}` : "react_review",
-                }),
-              });
-              onSaved();
+              setError("");
+              try {
+                await api("/api/labels", {
+                  method: "POST",
+                  body: JSON.stringify({
+                    domain: target.domain,
+                    label: target.label,
+                    rating: Number(rating),
+                    reason: rejecting ? `manual_reject:${reason}${note.trim() ? ` — ${note.trim()}` : ""}` : "react_review",
+                  }),
+                });
+                onSaved();
+              } catch (requestError) {
+                setError(requestError.payload?.detail || requestError.message || "Decision could not be saved. Please retry.");
+              } finally {
+                setSaving(false);
+              }
             }}
           >
             Save decision
           </button>
         </div>
+        {error && <p className="error inline-notice">{error}</p>}
       </div>
     </div>
   );

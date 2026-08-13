@@ -2816,13 +2816,19 @@ def record_manual_move(
     if Path(path).resolve() == Path(CLASSIFICATION_DB).resolve():
         from manual_truth_backup import create_manual_snapshot
 
-        create_manual_snapshot(
-            reason=f"manual_move:{clean(source) or 'human'}",
-            classification_db=path,
-        )
-        from model_evaluation import write_performance_metrics
+        try:
+            create_manual_snapshot(
+                reason=f"manual_move:{clean(source) or 'human'}",
+                classification_db=path,
+            )
+        except Exception as exc:
+            print(f"Manual truth snapshot deferred: {exc}")
+        try:
+            from model_evaluation import write_performance_metrics
 
-        write_performance_metrics()
+            write_performance_metrics()
+        except Exception as exc:
+            print(f"Model metrics refresh deferred: {exc}")
     return len(normalized)
 
 

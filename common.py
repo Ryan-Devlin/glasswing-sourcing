@@ -386,7 +386,13 @@ def save_basket_entries(
     ):
         from manual_truth_backup import create_manual_snapshot
 
-        create_manual_snapshot(reason=f"training_label:{normalized_basket}")
+        try:
+            create_manual_snapshot(reason=f"training_label:{normalized_basket}")
+        except Exception as exc:
+            # The human decision is already durably committed. A transient
+            # backup-store failure must not turn a successful review action
+            # into a 500 or prevent the canonical classification move.
+            print(f"Manual truth snapshot deferred: {exc}")
     return len(normalized_entries)
 
 

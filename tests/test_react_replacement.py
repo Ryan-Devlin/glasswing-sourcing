@@ -147,6 +147,14 @@ def test_tables_render_only_one_negative_action():
     assert table.count(">\n                      Reject\n") == 1
 
 
+def test_decision_modal_recovers_from_api_failure():
+    source = Path("webapp/src/main.jsx").read_text(encoding="utf-8")
+    modal = source.split("function LabelModal(", 1)[1].split("\nfunction ", 1)[0]
+    assert "catch (requestError)" in modal
+    assert "setSaving(false)" in modal
+    assert 'error && <p className="error inline-notice"' in modal
+
+
 def test_search_rows_include_the_state_the_action_buttons_read():
     """Buttons key off bucket/label/Claude state, so the API must supply it.
 
