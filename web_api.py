@@ -444,6 +444,8 @@ def _with_claude(rows: list[dict]) -> list[dict]:
             "claude_concerns": decisions.get(row.get("domain", ""), {}).get("concerns", ""),
             "claude_unknowns": decisions.get(row.get("domain", ""), {}).get("unknowns", ""),
             "claude_green_flags": decisions.get(row.get("domain", ""), {}).get("green_flags", []),
+            "website_green_flags": row.get("website_green_flags", []),
+            "scorecard": row.get("scorecard", {}),
             "claude_dimensions": {
                 name: decisions.get(row.get("domain", ""), {}).get(name, "")
                 for name in ("thesis_fit", "enterprise_value", "product_depth", "technical_moat", "stage_fit", "evidence_confidence")

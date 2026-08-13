@@ -3015,6 +3015,10 @@ def query_corpus_classifications(
         "venture_wedge_evidence",
         "venture_moat_evidence",
         "venture_founder_evidence",
+        "website_green_flags",
+        "scorecard",
+        "semantic_score",
+        "semantic_scoring_mode",
     )
     for row in rows:
         result = dict(row)

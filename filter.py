@@ -1204,6 +1204,128 @@ def occurrences(text: str, terms: list[str]) -> list[str]:
     ]
 
 
+# Enough for a normal homepage's hero, product, buyer, and technical sections,
+# while still excluding long documentation/blog/legal tails. Production-label
+# calibration showed 6k cut away too much substantive evidence (AUC 0.509).
+SCORING_LEAD_CHARS = 15000
+
+
+def high_signal_scoring_text(
+    title: str,
+    description: str,
+    body: str,
+    *,
+    limit: int = SCORING_LEAD_CHARS,
+) -> str:
+    """Bound cheap screening to the page's highest-signal copy.
+
+    Long docs, blogs, legal pages, and keyword-heavy footers used to expose far
+    more vocabulary than a concise startup homepage.  That rewarded page
+    volume instead of company quality.  Title and metadata are retained once,
+    followed by only the leading visible copy needed to identify the product.
+    """
+    lead = clean(body)[: max(0, int(limit))]
+    return clean(" ".join(part for part in (title, description, lead) if part))
+
+
+def founder_green_flags(text: str) -> list[dict[str, str]]:
+    """Return conservative, evidence-backed pedigree tags from team copy."""
+    cleaned = clean(text)
+    if not cleaned:
+        return []
+    sentences = [
+        clean(item)
+        for item in re.split(r"(?<=[.!?])\s+|\s*[|•]\s*", cleaned)
+        if clean(item)
+    ]
+    founder_terms = tuple(FOUNDER_VISIBILITY_SIGNALS + [
+        "founder", "cofounder", "co-founder", "our team", "leadership",
+        "previously at", "formerly at", "alumni", "graduate",
+    ])
+    contexts = [
+        sentence for sentence in sentences
+        if any(term in sentence.lower() for term in founder_terms)
+    ]
+    # Keep the evidence close to founder/team language. This prevents customer
+    # logos and integration lists from creating fake pedigree tags.
+    context = " ".join(contexts[:12])
+    if not context:
+        return []
+
+    flags: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(kind: str, label: str, evidence: str) -> None:
+        key = (kind, label.lower())
+        if key in seen or len(flags) >= 4:
+            return
+        seen.add(key)
+        flags.append({
+            "type": kind,
+            "label": label,
+            "evidence": clean(evidence)[:220],
+            "source": "website",
+        })
+
+    school_hits = occurrences(context, STRONG_US_SCHOOLS)
+    ivy = {
+        "harvard", "yale", "princeton", "columbia",
+        "upenn", "cornell", "brown", "dartmouth",
+    }
+    for school in school_hits[:2]:
+        kind = (
+            "ivy_league_spinout"
+            if school.lower() in ivy
+            else "top_university_spinout"
+        )
+        evidence = next(
+            (s for s in contexts if school.lower() in s.lower()), context
+        )
+        school_label = school.upper() if school.lower() == "mit" else school.title()
+        add(kind, f"{school_label} team", evidence)
+
+    employer_hits = occurrences(context, STRONG_WORK_EXPERIENCE)
+    for employer in employer_hits[:2]:
+        evidence = next((s for s in contexts if employer.lower() in s.lower()), context)
+        add("ex_big_tech", f"Ex-{employer.title()}", evidence)
+
+    if occurrences(context, ["repeat founder", "previously founded", "former founder"]):
+        evidence = next((s for s in contexts if "found" in s.lower()), context)
+        add("repeat_founder", "Repeat founder", evidence)
+    if occurrences(context, [
+        "previous exit", "prior exit", "acquired his company",
+        "acquired her company", "company was acquired",
+    ]):
+        evidence = next(
+            (s for s in contexts if "acquir" in s.lower() or "exit" in s.lower()),
+            context,
+        )
+        add("prior_exit", "Prior founder exit", evidence)
+    return flags
+
+
+def scorecard_from_evidence(
+    *,
+    counts: dict[str, int],
+    dimensions: dict[str, int],
+    venture_quality: dict[str, object],
+) -> dict[str, int]:
+    """Stable, bounded explanation for the displayed 0-100 score."""
+    return {
+        "thesis": int(venture_quality.get("thesis_score", 0) or 0),
+        "product": int(venture_quality.get("product_score", 0) or 0),
+        "wedge": int(venture_quality.get("wedge_score", 0) or 0),
+        "moat": int(venture_quality.get("moat_score", 0) or 0),
+        "team": int(venture_quality.get("founder_score", 0) or 0),
+        "buyer": min(100, int(dimensions.get("buyer", 0)) * 35),
+        "technical_depth": min(
+            100,
+            int(dimensions.get("technical", 0)) * 22
+            + int(counts.get("defensibility", 0)) * 18,
+        ),
+    }
+
+
 def score_text(text: str) -> tuple[int, str, list[str], dict[str, int]]:
     """Conservative website-only Glasswing score.
 
@@ -3322,7 +3444,17 @@ async def fetch(
     base_host = urlparse(homepage.url).netloc.lower().removeprefix("www.")
     selected: list[str] = []
 
-    for link in links:
+    def evidence_link_rank(link: str) -> tuple[int, int]:
+        path = urlparse(link).path.lower().strip("/")
+        if any(term in path for term in ("team", "founder", "leadership")):
+            return (0, len(path))
+        if any(term in path for term in ("about", "company")):
+            return (1, len(path))
+        if any(term in path for term in ("product", "technology", "platform")):
+            return (2, len(path))
+        return (3, len(path))
+
+    for link in sorted(links, key=evidence_link_rank):
         parsed = urlparse(link)
         link_host = parsed.netloc.lower().removeprefix("www.")
         if parsed.scheme not in {"http", "https"}:
@@ -3696,6 +3828,15 @@ async def process(
         # The live CertStream pass only needs enough homepage evidence to
         # route a company. Scoring 40 x 45k-character pages concurrently is
         # pure GIL contention and previously stopped the event loop itself.
+        # Cheap rejection checks use only the highest-signal leading copy.
+        # Final scoring still gets the complete substantive evidence: the
+        # production Claude-labelled benchmark shows that cutting it off loses
+        # real product differentiation.
+        early_text = high_signal_scoring_text(
+            page.title,
+            page.description,
+            page.text,
+        )
         scoring_text = page.text[:15000] if homepage_only else page.text
         combined = clean(f"{page.title} {page.description} {scoring_text}")
         lower = combined.lower()
@@ -3707,9 +3848,9 @@ async def process(
             is_placeholder,
             placeholder_reason,
             placeholder_evidence,
-        ) = placeholder_assessment(combined, word_count=word_count)
+        ) = placeholder_assessment(early_text, word_count=len(early_text.split()))
         is_parked = placeholder_reason == "parked_or_for_sale"
-        is_agency, agency_evidence = agency_assessment(combined)
+        is_agency, agency_evidence = agency_assessment(early_text)
 
         score, pillar, evidence, counts = score_text(scoring_copy)
         dimensions = glasswing_dimensions(scoring_copy)
@@ -3719,17 +3860,17 @@ async def process(
         high_conviction_fit, high_conviction_evidence = (
             high_conviction_fit_assessment(combined)
         )
-        is_consumer_junk, b2c_score, b2c_evidence = b2c_assessment(combined)
-        is_media_newsletter, media_evidence = media_newsletter_assessment(combined)
-        is_non_english, language_evidence = language_assessment(combined)
-        is_commodity_wrapper, commodity_evidence = commodity_wrapper_assessment(combined)
+        is_consumer_junk, b2c_score, b2c_evidence = b2c_assessment(early_text)
+        is_media_newsletter, media_evidence = media_newsletter_assessment(early_text)
+        is_non_english, language_evidence = language_assessment(early_text)
+        is_commodity_wrapper, commodity_evidence = commodity_wrapper_assessment(early_text)
         is_hosting_provider, hosting_evidence = hosting_provider_assessment(
-            combined
+            early_text
         )
         (
             is_non_operating_investor,
             investor_evidence,
-        ) = non_operating_investor_assessment(combined)
+        ) = non_operating_investor_assessment(early_text)
         maturity_risk, maturity_evidence = maturity_score(combined)
         investment_label, investment_label_reason, disclosed_funding_m = (
             investment_profile_label(combined, maturity_risk)
@@ -3773,6 +3914,12 @@ async def process(
             counts=counts,
             dimensions=dimensions,
             high_conviction_fit=high_conviction_fit,
+        )
+        website_green_flags = founder_green_flags(page.text[:20000])
+        scorecard = scorecard_from_evidence(
+            counts=counts,
+            dimensions=dimensions,
+            venture_quality=venture_quality,
         )
         potential_glasswing_fit = bool(venture_quality["thesis_fit"])
 
@@ -3923,6 +4070,15 @@ async def process(
         preference_model_ready = bool(
             preference is not None and preference.training_ready
         )
+        semantic_score = (
+            round(float(preference_yes_probability) * 100)
+            if preference_yes_probability is not None
+            else None
+        )
+        # Human-trained semantics can rank viable companies only after its
+        # validation gate passes. It never creates a hard denial.
+        if preference_model_ready and semantic_score is not None:
+            rank_score = round(rank_score * 0.45 + semantic_score * 0.55)
 
         # The learned layer may promote a strongly matching, otherwise plausible
         # enterprise company. It may not invent a Hard Denial: the current
@@ -4131,6 +4287,8 @@ async def process(
             "venture_founder_evidence": "; ".join(
                 venture_quality["founder_evidence"]
             ),
+            "website_green_flags": website_green_flags,
+            "scorecard": scorecard,
             "venture_slop_evidence": "; ".join(
                 venture_quality["slop_evidence"]
             ),
@@ -4201,6 +4359,12 @@ async def process(
             ),
             "preference_evidence": preference_evidence,
             "preference_model_ready": preference_model_ready,
+            "semantic_score": (
+                semantic_score if semantic_score is not None else ""
+            ),
+            "semantic_scoring_mode": (
+                "active_human_model" if preference_model_ready else "shadow_only"
+            ),
             "learned_positive_fit": learned_positive_fit,
             "routing_bucket": bucket,
             "routing_reason": reason,

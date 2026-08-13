@@ -119,10 +119,17 @@ function ClaudePendingBadge({ row }) {
   );
 }
 function GreenFlagTags({ row }) {
-  if (String(row.claude_decision || row.decision || "").toUpperCase() !== "KEEP") return null;
-  const flags = Array.isArray(row.claude_green_flags)
+  const investable = String(row.routing_bucket || "").toLowerCase() === "priority";
+  if (String(row.claude_decision || row.decision || "").toUpperCase() !== "KEEP" && !investable) return null;
+  const claudeFlags = Array.isArray(row.claude_green_flags)
     ? row.claude_green_flags
     : Array.isArray(row.green_flags) ? row.green_flags : [];
+  const websiteFlags = Array.isArray(row.website_green_flags) ? row.website_green_flags : [];
+  const flags = [...claudeFlags, ...websiteFlags].filter((flag, index, all) =>
+    index === all.findIndex((candidate) =>
+      String(candidate.type || candidate.label) === String(flag.type || flag.label)
+    )
+  );
   if (!flags.length) return null;
   return (
     <div className="green-flag-tags" aria-label="Positive diligence signals">
@@ -133,6 +140,17 @@ function GreenFlagTags({ row }) {
       ))}
     </div>
   );
+}
+function scorecardTitle(row) {
+  const card = row.scorecard && typeof row.scorecard === "object" ? row.scorecard : {};
+  const labels = {
+    thesis: "Thesis", product: "Product", buyer: "Buyer",
+    technical_depth: "Technical", wedge: "Wedge", moat: "Moat", team: "Team",
+  };
+  const parts = Object.entries(labels)
+    .filter(([key]) => Number.isFinite(Number(card[key])))
+    .map(([key, label]) => `${label}: ${Number(card[key])}/100`);
+  return parts.length ? parts.join(" · ") : "Glasswing evidence score";
 }
 async function api(path, options = {}) {
   const method = String(options.method || "GET").toUpperCase();
@@ -998,7 +1016,7 @@ function GoodDeals() {
             <TrackButton row={row} />
             <span className="deal-age" title={row.classified_at || row.updated_at}>{dealAgeLabel(row.classified_at || row.updated_at)}</span>
             <div className="top-pick-head">
-              <span className="score-ring">{row.fit_score}<small>/100</small></span>
+              <span className="score-ring" title={scorecardTitle(row)}>{row.fit_score}<small>/100</small></span>
               <span className="pill">Investable</span>
             </div>
             <h3>{row.company_name || row.domain}</h3>
@@ -1152,7 +1170,7 @@ function TrackingDeals() {
                 {dealAgeLabel(row.classified_at || row.updated_at)}
               </span>
               <div className="top-pick-head">
-                <span className="score-ring">{row.fit_score}<small>/100</small></span>
+                <span className="score-ring" title={scorecardTitle(row)}>{row.fit_score}<small>/100</small></span>
                 <span className="pill">{String(row.routing_bucket || "tracked").replaceAll("_", " ")}</span>
               </div>
               <h3>{row.company_name || row.domain}</h3>
@@ -2074,7 +2092,7 @@ function CrawlerDiscoveries() {
               <TrackButton row={row} onChanged={() => setRefresh((value) => value + 1)} />
               <span className="deal-age">{dealAgeLabel(row.classified_at || row.updated_at)}</span>
               <div className="top-pick-head">
-                <span className="score-ring">{row.fit_score}<small>/100</small></span>
+                <span className="score-ring" title={scorecardTitle(row)}>{row.fit_score}<small>/100</small></span>
                 <span className="pill">{row.routing_bucket === "priority" ? "Investable" : "Needs Review"}</span>
               </div>
               <h3>{row.company_name || row.domain}</h3>

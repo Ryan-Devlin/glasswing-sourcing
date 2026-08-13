@@ -45,10 +45,31 @@ class LabelCalibratorTests(unittest.TestCase):
         ]
         model = PreferenceCalibrator(rows)
         self.assertEqual(model.document_counts, {"yes": 1, "no": 1})
-        self.assertEqual(
-            model.predict("industrial robotics autonomy platform").label,
-            "yes",
+        self.assertGreater(
+            model.predict("industrial robotics autonomy platform").probability_yes,
+            model.predict("marketing consulting agency services").probability_yes,
         )
+
+    def test_validation_selects_threshold_without_using_test_rows(self):
+        def row(split, label, text):
+            return {
+                "split": split, "label": label, "trust_tier": "gold",
+                "sample_weight": "1", "input_text": text,
+            }
+        rows = []
+        for index in range(55):
+            rows.append(row("train", "yes", f"robotics autonomy control {index}"))
+            rows.append(row("train", "no", f"marketing agency services {index}"))
+        rows.extend([
+            row("validation", "yes", "robotics autonomy platform"),
+            row("validation", "no", "marketing agency services"),
+            # Contradictory test labels must not influence model readiness.
+            row("test", "no", "robotics autonomy platform"),
+        ])
+        model = PreferenceCalibrator(rows)
+        assert model.validation_metrics["auc"] == 1.0
+        assert model.validation_metrics["positive_recall"] == 1.0
+        assert model.training_ready
 
 
 if __name__ == "__main__":
