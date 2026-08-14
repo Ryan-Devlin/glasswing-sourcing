@@ -660,46 +660,6 @@ def save_success(
             now,
         ),
     )
-    page_id = conn.execute(
-        "SELECT id FROM pages WHERE domain=?",
-        (outcome.domain,),
-    ).fetchone()["id"]
-    if isinstance(conn, PostgresConnection):
-        # Postgres has no FTS5-style contentless index table; the ranked
-        # text lives directly on the row instead, as a weighted tsvector.
-        # Weights mirror ai_search's translation: domain (A) > title (B) >
-        # description (C) > headings/body (D).
-        conn.execute("""
-            UPDATE pages SET search_vector =
-                setweight(to_tsvector('english', coalesce(?, '')), 'A') ||
-                setweight(to_tsvector('english', coalesce(?, '')), 'B') ||
-                setweight(to_tsvector('english', coalesce(?, '')), 'C') ||
-                setweight(to_tsvector('english', coalesce(?, '')), 'D')
-            WHERE id = ?
-        """, (
-            outcome.domain, outcome.page.title, outcome.page.description,
-            outcome.page.headings, page_id,
-        ))
-    else:
-        conn.execute(
-            "DELETE FROM page_search WHERE page_id=?",
-            (page_id,),
-        )
-        conn.execute(
-            """
-            INSERT INTO page_search(
-                page_id,domain,title,description,headings,body
-            ) VALUES (?,?,?,?,?,?)
-            """,
-            (
-                page_id,
-                outcome.domain,
-                outcome.page.title,
-                outcome.page.description,
-                outcome.page.headings,
-                "",
-            ),
-        )
 
 
 def discard_cached_pages(conn, domains: list[str]) -> int:

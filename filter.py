@@ -1393,6 +1393,71 @@ def founder_pedigree_score(flags: list[dict[str, str]]) -> int:
     return min(100, score)
 
 
+def aiaas_green_flags(text: str) -> list[dict[str, str]]:
+    """Return evidence-backed infrastructure-as-a-service deal tags."""
+    cleaned = clean(text)
+    if not cleaned:
+        return []
+    sentences = [
+        clean(item)
+        for item in re.split(r"(?<=[.!?])\s+|\s*[|•]\s*", cleaned)
+        if clean(item)
+    ]
+    groups = (
+        ("gpu_infrastructure", "GPU infrastructure", (
+            "gpu as a service", "gpu cloud", "gpu cluster",
+            "gpu orchestration", "ai compute platform",
+        )),
+        ("serverless_inference", "Serverless inference", (
+            "serverless inference", "managed inference",
+            "inference as a service",
+        )),
+        ("model_serving", "Model serving", (
+            "model serving", "model serving api", "inference api",
+        )),
+        ("training_infrastructure", "Training infrastructure", (
+            "training as a service", "distributed training",
+            "training infrastructure", "training cluster",
+        )),
+        ("inference_optimization", "Inference optimization", (
+            "inference optimization", "inference throughput",
+            "reduce inference costs", "lower inference costs",
+            "gpu autoscaling", "gpu utilization",
+        )),
+    )
+    flags: list[dict[str, str]] = []
+    for kind, label, terms in groups:
+        evidence = next(
+            (sentence for sentence in sentences if any(
+                term in sentence.lower() for term in terms
+            )),
+            "",
+        )
+        if evidence:
+            flags.append({
+                "type": kind,
+                "label": label,
+                "evidence": evidence[:220],
+                "source": "website",
+            })
+    return flags[:4]
+
+
+def deal_green_flags(text: str) -> list[dict[str, str]]:
+    """Combine founder pedigree and high-value market/product signals."""
+    combined = [*founder_green_flags(text), *aiaas_green_flags(text)]
+    seen: set[str] = set()
+    flags: list[dict[str, str]] = []
+    for flag in combined:
+        if flag["type"] in seen:
+            continue
+        seen.add(flag["type"])
+        flags.append(flag)
+        if len(flags) == 6:
+            break
+    return flags
+
+
 def scorecard_from_evidence(
     *,
     counts: dict[str, int],
@@ -4180,7 +4245,7 @@ async def process(
             dimensions=dimensions,
             high_conviction_fit=high_conviction_fit,
         )
-        website_green_flags = founder_green_flags(page.text[:20000])
+        website_green_flags = deal_green_flags(page.text[:20000])
         scorecard = scorecard_from_evidence(
             counts=counts,
             dimensions=dimensions,

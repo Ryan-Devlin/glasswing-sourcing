@@ -50,7 +50,7 @@ def test_unquoted_multiword_input_becomes_an_exact_phrase() -> None:
     )
 
 
-def test_search_requires_metadata_phrase_and_raw_html_is_discarded(
+def test_retired_search_index_is_not_written_and_raw_html_is_discarded(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "universe.sqlite3"
@@ -75,7 +75,7 @@ def test_search_requires_metadata_phrase_and_raw_html_is_discarded(
         database=database,
         minimum_words=0,
     )
-    assert [row["domain"] for row in results] == ["match.app"]
+    assert results == []
     retained = raw_html("match.app", database=database)
     assert retained == ""
     conn = connect(database, read_only=True)

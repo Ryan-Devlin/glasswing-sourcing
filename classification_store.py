@@ -109,7 +109,7 @@ def _enrich_green_flags_in_connection(
     if not normalized:
         return 0
     # Local import avoids making the scoring module a store import dependency.
-    from filter import founder_green_flags
+    from filter import deal_green_flags
 
     changed = 0
     for start in range(0, len(normalized), 700):
@@ -136,7 +136,7 @@ def _enrich_green_flags_in_connection(
                 record.get("rule_evidence", ""),
                 row["description"], row["excerpt"], row["evidence"],
             ) if clean(value))
-            derived = founder_green_flags(evidence_text[:20000])
+            derived = deal_green_flags(evidence_text[:20000])
             source = clean(row["final_url"]) or f"https://{row['domain']}"
             for flag in derived:
                 if flag.get("source") == "website":

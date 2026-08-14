@@ -35,7 +35,8 @@ def test_prune_noise_removes_old_pages_and_fts_rows(
         str(row["domain"])
         for row in conn.execute("SELECT domain FROM pages")
     ] == ["normalbrand.app"]
+    # Full-text corpus search is retired; new crawls do not populate its index.
     assert conn.execute(
         "SELECT count(*) FROM page_search"
-    ).fetchone()[0] == 1
+    ).fetchone()[0] == 0
     conn.close()

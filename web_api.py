@@ -36,7 +36,7 @@ for source in (ROOT, AI_SRC, ZONE_SRC):
     if str(source) not in sys.path:
         sys.path.insert(0, str(source))
 
-from ai_search.og_bridge import enqueue_for_screening, search_companies, search_stats
+from ai_search.og_bridge import enqueue_for_screening
 from ai_search.domains import normalize_any_domain
 from ai_search.database import (
     connect as ai_connect,
@@ -67,7 +67,6 @@ from classification_store import (
     record_manual_move,
     recover_claude_review_queue,
     reconcile_claude_routing,
-    search_classifications,
     source_bucket_counts,
     list_tracked_domains,
     set_tracking_status,
@@ -107,7 +106,6 @@ from runtime_control import (
     runtime_status,
     shared_pipeline_backend_available,
 )
-from zone_universe.search import search_pages
 from zone_universe.database import (
     connect as zone_connect,
     diagnostics as zone_diagnostics,
@@ -334,29 +332,6 @@ def _current_run_id() -> str:
     return str(status.get("run_id", "") or "__no_current_run__")
 
 
-def _clean_search_row(row: dict, source: str) -> dict:
-    return {
-        "domain": row.get("domain", ""),
-        "url": row.get("final_url") or f"https://{row.get('domain', '')}",
-        "company": row.get("company_name") or row.get("title") or row.get("domain", ""),
-        "description": row.get("description") or row.get("snippet") or row.get("excerpt") or "",
-        "score": row.get("fit_score", ""),
-        "source": source,
-        "updated": row.get("updated_at") or row.get("crawled_at") or "",
-    }
-
-
-def _safe_corpus_rows(rows: list[dict]) -> list[dict]:
-    """Keep search highlighting useful without returning executable HTML."""
-    safe = []
-    for original in rows:
-        row = dict(original)
-        snippet = str(row.get("snippet", ""))
-        row["snippet"] = re.sub(r"<(?!/?mark\b)[^>]*>", "", snippet, flags=re.I)
-        safe.append(row)
-    return safe
-
-
 # Only these sources are trusted human truth. Claude decisions are signals, so
 # a Claude-reviewed company still needs a human call and its action buttons must
 # stay live. Confirmed live: training_labels held 1,664 claude-sourced rows
@@ -568,84 +543,6 @@ def save_pipeline_filters(update: PipelineFilters):
     publish_pipeline_config(payload, requested_by="react_web")
     record_admin_audit("filters_updated", detail=json.dumps(update.model_dump(), default=str))
     return payload
-
-
-@app.get("/api/search")
-def global_search(q: str = Query(min_length=1, max_length=200)):
-    company = [
-        _clean_search_row(row, classification_source_label(row.get("content_source", "")))
-        for row in search_classifications(q, limit=25)
-    ]
-    ai = [_clean_search_row(row, ".AI crawler") for row in search_companies(AI_SEARCH_DB, q, limit=25)]
-    zone = [_clean_search_row(row, f".{row.get('tld', '')} crawler") for row in search_pages(q, limit=25, database=ZONE_UNIVERSE_DB)]
-    registered = []
-    try:
-        with ai_connect(AI_SEARCH_DB, read_only=True) as conn:
-            pending_rows = conn.execute(
-                "SELECT domain,latest_crawl_status,last_seen_at,last_crawled_at "
-                "FROM domains WHERE lower(domain) LIKE ? "
-                "ORDER BY last_seen_at DESC LIMIT 25",
-                (f"%{q.strip().lower()}%",),
-            ).fetchall()
-        registered = [
-            {
-                "domain": str(row["domain"]),
-                "url": f"https://{row['domain']}",
-                "company": str(row["domain"]),
-                "description": (
-                    "Waiting for website scraping and scoring."
-                    if str(row["latest_crawl_status"] or "pending") != "success"
-                    else "Website is registered in Domain Intake."
-                ),
-                "score": "Scoring",
-                "source": f"Domain Intake · {str(row['latest_crawl_status'] or 'pending').replace('_', ' ')}",
-                "updated": str(row["last_crawled_at"] or row["last_seen_at"] or ""),
-            }
-            for row in pending_rows
-        ]
-    except Exception:
-        registered = []
-    # A company can exist in all three stores. Prefer its canonical
-    # classification record and merge corpus hits instead of showing the same
-    # domain several times in the unified search view.
-    merged: dict[str, dict] = {}
-    for row in company + ai + zone + registered:
-        domain = stable_domain(row.get("domain", ""))
-        key = domain or clean(row.get("url", "")).lower()
-        if not key:
-            continue
-        if key not in merged:
-            merged[key] = row
-            continue
-        existing = merged[key]
-        sources = list(dict.fromkeys(
-            part.strip()
-            for part in f"{existing.get('source', '')} · {row.get('source', '')}".split("·")
-            if part.strip()
-        ))
-        existing["source"] = " · ".join(sources)
-        if not existing.get("description") and row.get("description"):
-            existing["description"] = row["description"]
-        if not existing.get("score") and row.get("score"):
-            existing["score"] = row["score"]
-    rows = list(merged.values())
-    # Search results carry the same Yes/Reject/Send-to-Claude actions as the
-    # review tables, so they need the same state those buttons key off: whether
-    # a human already bucketed the domain, and whether Claude has reviewed or
-    # queued it. Without this the buttons render enabled on a company that was
-    # already decided, and acting on one would silently overwrite that call.
-    domains = [row.get("domain", "") for row in rows]
-    decided = _manual_decision_state(domains)
-    tracked = tracked_domain_set(domains)
-    for row in rows:
-        domain = stable_domain(row.get("domain", ""))
-        state = decided.get(domain, {})
-        row["manual_override"] = state.get("manual_override", 0)
-        row["manual_override_target"] = state.get("manual_override_target", "")
-        row["label"] = state.get("label", "")
-        row["fit_score"] = row.get("fit_score", row.get("score", 0))
-        row["tracked"] = domain in tracked
-    return {"rows": _with_claude(rows), "total": len(merged)}
 
 
 @app.get("/api/classifications")
@@ -1471,15 +1368,6 @@ def system_health(full: bool = False, refresh: int = 0):
     return report
 
 
-@app.get("/api/ai/search")
-def ai_search(q: str, page: int = 1, page_size: int = 100, minimum_words: int = 25):
-    rows = search_companies(
-        AI_SEARCH_DB, q, limit=min(page_size, 200),
-        offset=max(0, page - 1) * min(page_size, 200), minimum_words=minimum_words,
-    )
-    return {"rows": _safe_corpus_rows(rows), "page": page, "stats": search_stats(AI_SEARCH_DB)}
-
-
 @app.get("/api/corpus/{kind}/stats")
 def corpus_stats(kind: Literal["ai", "zone"]):
     if kind == "ai":
@@ -1489,14 +1377,13 @@ def corpus_stats(kind: Literal["ai", "zone"]):
             heartbeat = conn.execute(
                 "SELECT max(updated_at) AS updated_at FROM worker_state"
             ).fetchone()["updated_at"]
-        searchable = search_stats(AI_SEARCH_DB)
         return {
             "available": details.get("domains", 0),
             "pending": details.get("pending", 0),
             "processed": details.get("crawled", 0),
             "crawled": details.get("successful", 0),
             "failed": details.get("failed", 0),
-            "searchable": searchable.get("indexed_pages", 0),
+            "searchable": 0,
             "crawler_status": worker.get("crawler_status", "unknown"),
             "worker_status": worker.get("worker_status", "unknown"),
             "last_error": worker.get("last_crawl_error", ""),
@@ -1588,16 +1475,6 @@ def corpus_stats(kind: Literal["ai", "zone"]):
         "crawler_status": worker.get("crawler_status", "unknown"),
         "crawler_phase": worker.get("crawler_phase", "unknown"),
     }
-
-
-@app.get("/api/zone/search")
-def zone_search(q: str, tld: str = "", page: int = 1, page_size: int = 100, minimum_words: int = 25):
-    rows = search_pages(
-        q, tld=tld, limit=min(page_size, 200),
-        offset=max(0, page - 1) * min(page_size, 200),
-        minimum_words=minimum_words, database=ZONE_UNIVERSE_DB,
-    )
-    return {"rows": _safe_corpus_rows(rows), "page": page}
 
 
 @app.get("/api/corpus/{kind}")

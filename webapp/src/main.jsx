@@ -157,7 +157,7 @@ function GreenFlagTags({ row }) {
   if (!flags.length) return null;
   return (
     <div className="green-flag-tags" aria-label="Positive diligence signals">
-      {flags.slice(0, 4).map((flag) => {
+      {flags.slice(0, 6).map((flag) => {
         const source = /^https?:\/\//i.test(String(flag.source || "")) ? flag.source : "";
         const Tag = source ? "a" : "span";
         return (
@@ -1034,173 +1034,6 @@ function HomePage() {
       <DeferredContent minHeight={420}>
         <CompaniesTable showRunScope={false} />
       </DeferredContent>
-    </>
-  );
-}
-
-function GlobalSearchPage() {
-  const { admin, requestLogin } = useAdmin();
-  const [query, setQuery] = useState("");
-  const [rows, setRows] = useState([]);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [searched, setSearched] = useState(false);
-  const [toast, setToast] = useState("");
-  const [label, setLabel] = useState(null);
-  const [claudeBusy, setClaudeBusy] = useState("");
-  const [claudeOverride, setClaudeOverride] = useState(null);
-  const lastQuery = useRef("");
-
-  const runSearch = async (text) => {
-    setBusy(true);
-    setError("");
-    setSearched(true);
-    try {
-      const result = await api(`/api/search?q=${encodeURIComponent(text)}`);
-      setRows(Array.isArray(result.rows) ? result.rows : []);
-    } catch {
-      setError("Search was interrupted. Please try again.");
-    } finally {
-      setBusy(false);
-    }
-  };
-  const submit = async (event) => {
-    event.preventDefault();
-    if (!query.trim()) return;
-    lastQuery.current = query.trim();
-    await runSearch(lastQuery.current);
-  };
-  // Re-run the last search after an action so the row reflects its new state
-  // (bucketed rows grey out) instead of going stale until the next search.
-  const refresh = () => lastQuery.current && runSearch(lastQuery.current);
-  const flash = (text, ms = 2500) => {
-    setToast(text);
-    setTimeout(() => setToast(""), ms);
-  };
-
-  const save = (row, chosen) => setLabel({ domain: row.domain, label: chosen });
-  const reject = (row) => admin
-    ? setLabel({ domain: row.domain, label: "no", rating: Number(row.fit_score || row.score || 0) })
-    : requestLogin();
-  const sendClaude = async (row, overrideDailyLimit = false) => {
-    if (!admin) return requestLogin();
-    setClaudeBusy(row.domain);
-    try {
-      const response = await requestClaudeReview(row.domain, overrideDailyLimit);
-      if (overrideDailyLimit) setClaudeOverride(null);
-      if (response.status === "already_reviewed") {
-        flash(`${row.domain} was already reviewed by Claude`);
-      } else {
-        setToast(`${row.domain} queued for Claude`);
-        const decision = await waitForClaude(row.domain, (status) =>
-          setToast(
-            `${row.domain}: ${status === "reviewing" ? "Claude is reviewing…" : "queued for Claude"}`,
-          ),
-        );
-        flash(
-          `${row.domain}: Claude ${decision.decision} · score ${decision.fit_score}`,
-          5000,
-        );
-      }
-      refresh();
-    } catch (err) {
-      if (err.status === 429) setClaudeOverride(row);
-      else flash(`Claude could not review ${row.domain}: ${err.message}`, 5000);
-    } finally {
-      setClaudeBusy("");
-    }
-  };
-
-  return (
-    <>
-      <header>
-        <p className="eyebrow">Unified discovery</p>
-        <h1>Search everything</h1>
-        <p>Search every classified company and retained website across all sourcing databases.</p>
-      </header>
-      <form className="searchbar global-searchbar" onSubmit={submit}>
-        <Search />
-        <input
-          autoFocus
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder="Company, domain, product, market, founder, or customer"
-          aria-label="Search all sourcing databases"
-        />
-        <button disabled={busy}>{busy ? "Searching…" : "Search"}</button>
-      </form>
-      {error ? <p className="notice">{error}</p> : busy ? <Loading /> : searched && !rows.length ? (
-        <div className="empty">No matching company or retained website found.</div>
-      ) : rows.length ? (
-        <section>
-          <div className="section-title">
-            <h2>Results</h2>
-            <span className="pill">{fmt(rows.length)} matches</span>
-          </div>
-          <Table
-            rows={rows}
-            claudeBusy={claudeBusy}
-            onLabel={admin ? save : (_, chosen) => requestLogin(chosen)}
-            onReject={admin ? reject : requestLogin}
-            onClaude={admin ? sendClaude : requestLogin}
-            columns={[
-              { key: "company", label: "Company" },
-              { key: "domain", label: "Domain", render: (row) => <a href={row.url} target="_blank" rel="noreferrer">{row.domain}</a> },
-              { key: "score", label: "Score" },
-              { key: "source", label: "Source", render: (row) => <span className="pill">{row.source}</span> },
-              { key: "description", label: "Description" },
-              {
-                key: "claude_decision",
-                label: "Claude review",
-                render: (row) =>
-                  row.claude_decision ? (
-                    <ClaudeReviewBadge row={row} />
-                  ) : claudePending(row) ? (
-                    <span className="muted">Queued</span>
-                  ) : (
-                    <span className="muted">Not reviewed</span>
-                  ),
-              },
-              { key: "updated", label: "Updated" },
-              {
-                key: "track",
-                label: "Track",
-                render: (row) => (
-                  <TrackButton
-                    row={row}
-                    onChanged={refresh}
-                    className="track-inline"
-                  />
-                ),
-              },
-            ]}
-          />
-        </section>
-      ) : (
-        <div className="search-welcome">
-          <strong>One search across the full sourcing platform</strong>
-          <span>Try a domain, company name, technology, market, product, or customer type.</span>
-        </div>
-      )}
-      <Toast>{toast}</Toast>
-      {label && (
-        <LabelModal
-          target={label}
-          onClose={() => setLabel(null)}
-          onSaved={() => {
-            flash(`${label.domain} saved to ${label.label.toUpperCase()}`);
-            setLabel(null);
-            refresh();
-          }}
-        />
-      )}
-      {claudeOverride && (
-        <ClaudeOverrideModal
-          domain={claudeOverride.domain}
-          onClose={() => setClaudeOverride(null)}
-          onOverride={() => sendClaude(claudeOverride, true)}
-        />
-      )}
     </>
   );
 }
@@ -2533,7 +2366,6 @@ function SearchCorpusPage({ kind }) {
               <Metric label="Domains available" value={fmt(metrics.data.available)} />
               <Metric label="Waiting to scrape" value={fmt(metrics.data.pending)} />
               <Metric label="Successfully scraped" value={fmt(metrics.data.crawled)} />
-              <Metric label="Searchable pages" value={fmt(metrics.data.searchable)} />
               <Metric label="Failed" value={fmt(metrics.data.failed)} />
             </>
           ) : (

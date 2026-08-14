@@ -12,7 +12,7 @@ import aiohttp
 from db_backend import using_postgres
 
 from .config import Settings
-from .database import AI_SEARCH_DATABASE_ENV_VAR, connect, index_page, utc_now
+from .database import AI_SEARCH_DATABASE_ENV_VAR, connect, utc_now
 from .extract import (
     ExtractedPage,
     extract_page,
@@ -209,7 +209,7 @@ async def crawl_domain(
         return last_status
 
     requested, final_url, code, content_type, html, extracted = homepage
-    page_id = _save_page(
+    _save_page(
         conn,
         domain_id,
         requested,
@@ -221,7 +221,6 @@ async def crawl_domain(
         settings,
         domain,
     )
-    index_page(conn, page_id)
     seen = {final_url}
     extra_page_budget, enrichment_reason = homepage_enrichment_plan(
         extracted,
@@ -288,11 +287,10 @@ async def crawl_domain(
             if inner_final in seen and inner_final != link:
                 continue
             seen.add(inner_final)
-            inner_id = _save_page(
+            _save_page(
                 conn, domain_id, link, inner_final, inner_code, inner_type,
                 inner_html, inner, settings, domain,
             )
-            index_page(conn, inner_id)
             extra_pages_saved += 1
         except Exception as exc:
             _save_attempt(

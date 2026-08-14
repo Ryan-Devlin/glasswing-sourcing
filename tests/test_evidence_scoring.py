@@ -1,10 +1,25 @@
 from filter import (
+    aiaas_green_flags,
     founder_green_flags,
     founder_pedigree_score,
     high_signal_scoring_text,
     score_text,
     scorecard_from_evidence,
 )
+
+
+def test_aiaas_tags_require_specific_product_evidence():
+    flags = aiaas_green_flags(
+        "Our GPU as a service uses GPU autoscaling and a model serving API "
+        "to lower inference costs for production AI teams."
+    )
+    labels = {flag["label"] for flag in flags}
+    assert labels == {
+        "GPU infrastructure", "Model serving", "Inference optimization",
+    }
+    assert aiaas_green_flags(
+        "AI as a service for every business. We build custom AI solutions."
+    ) == []
 
 
 def test_long_tail_keyword_stuffing_does_not_change_score():

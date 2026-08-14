@@ -5,6 +5,7 @@ import filter as screening_filter
 from pathlib import Path
 
 from filter import (
+    aiaas_green_flags,
     agency_assessment,
     b2c_assessment,
     explicit_non_us_identity_assessment,
@@ -20,6 +21,17 @@ from filter import (
 
 
 class RuleCalibrationTests(unittest.TestCase):
+    def test_aiaas_tags_require_specific_product_evidence(self):
+        flags = aiaas_green_flags(
+            "Our GPU cloud provides managed model serving and inference "
+            "optimization that lowers inference costs for enterprise teams."
+        )
+        kinds = {flag["type"] for flag in flags}
+        self.assertIn("gpu_infrastructure", kinds)
+        self.assertIn("model_serving", kinds)
+        self.assertIn("inference_optimization", kinds)
+        self.assertEqual(aiaas_green_flags("AI as a service for everyone."), [])
+
     def test_short_keywords_do_not_match_inside_unrelated_words(self):
         _, _, _, counts = score_text(
             "Rapid capital formation capabilities for a neighborhood bakery."

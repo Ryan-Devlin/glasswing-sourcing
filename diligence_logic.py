@@ -97,6 +97,11 @@ GREEN_FLAG_LABELS = {
     "government_validation": "Government validation",
     "strategic_backing": "Strategic backing",
     "deep_tech_ip": "Defensible IP",
+    "gpu_infrastructure": "GPU infrastructure",
+    "serverless_inference": "Serverless inference",
+    "model_serving": "Model serving",
+    "training_infrastructure": "Training infrastructure",
+    "inference_optimization": "Inference optimization",
 }
 
 GREEN_FLAG_TYPE_ALIASES = {
@@ -129,7 +134,7 @@ def _canonical_green_flag_label(kind: str, label: str) -> str:
     return value or GREEN_FLAG_LABELS[kind]
 
 
-def normalize_green_flags(value: Any, *, limit: int = 4) -> list[dict[str, str]]:
+def normalize_green_flags(value: Any, *, limit: int = 6) -> list[dict[str, str]]:
     """Return only canonical, evidence-backed flags from stored/model data."""
     if isinstance(value, str):
         try:
@@ -167,7 +172,7 @@ def normalize_green_flags(value: Any, *, limit: int = 4) -> list[dict[str, str]]
         if source:
             flag["source"] = source
         flags.append(flag)
-        if len(flags) >= max(1, min(int(limit), 4)):
+        if len(flags) >= max(1, min(int(limit), 6)):
             break
     return flags
 

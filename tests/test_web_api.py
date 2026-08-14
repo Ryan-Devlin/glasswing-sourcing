@@ -546,20 +546,10 @@ def test_crawler_company_tables_are_source_scoped_and_paged(monkeypatch):
     assert captured["offset"] == 100
 
 
-def test_search_snippets_strip_untrusted_html_but_keep_highlights():
-    rows = web_api._safe_corpus_rows([{
-        "snippet": '<script>alert(1)</script><mark>match</mark><img src=x>',
-    }])
-    assert rows[0]["snippet"] == "alert(1)<mark>match</mark>"
-
-
-def test_ai_search_always_returns_a_rows_array(monkeypatch):
-    monkeypatch.setattr(web_api, "search_companies", lambda *args, **kwargs: [])
-    monkeypatch.setattr(web_api, "search_stats", lambda *args, **kwargs: {"domains": 12})
-    response = client.get("/api/ai/search?q=robotics")
-    assert response.status_code == 200
-    assert response.json()["rows"] == []
-    assert response.json()["stats"]["domains"] == 12
+def test_retired_search_endpoints_are_not_exposed():
+    for path in ("/api/search", "/api/ai/search", "/api/zone/search"):
+        response = client.get(f"{path}?q=robotics")
+        assert response.headers.get("content-type", "").startswith("text/html")
 
 
 def test_ai_corpus_metrics_expose_real_outcomes_and_worker_heartbeat(monkeypatch):
@@ -594,8 +584,6 @@ def test_ai_corpus_metrics_expose_real_outcomes_and_worker_heartbeat(monkeypatch
         "ai_worker_state",
         lambda conn: {"crawler_status": "error_retrying", "last_crawl_error": "deadlock"},
     )
-    monkeypatch.setattr(web_api, "search_stats", lambda *args: {"indexed_pages": 14})
-
     response = client.get("/api/corpus/ai/stats")
 
     assert response.status_code == 200
@@ -605,7 +593,7 @@ def test_ai_corpus_metrics_expose_real_outcomes_and_worker_heartbeat(monkeypatch
         "processed": 8,
         "crawled": 6,
         "failed": 2,
-        "searchable": 14,
+        "searchable": 0,
         "crawler_status": "error_retrying",
         "worker_status": "unknown",
         "last_error": "deadlock",
@@ -775,31 +763,6 @@ def test_only_human_sources_count_as_an_existing_decision():
     assert "manual_override,manual_override_target " not in fn
 
 
-def test_search_rows_expose_tracking_state():
-    from pathlib import Path
-
-    body = Path(web_api.__file__).read_text(encoding="utf-8")
-    search = body.split("def global_search(", 1)[1].split("\n@app.", 1)[0]
-    assert "tracked_domain_set(" in search
-    assert '"tracked"' in search
-
-
-def test_search_page_offers_a_track_action():
-    from pathlib import Path
-
-    source = Path("webapp/src/main.jsx").read_text(encoding="utf-8")
-    page = source.split("function GlobalSearchPage()", 1)[1].split("\nfunction ", 1)[0]
-    assert "<TrackButton" in page
-    assert 'label: "Track"' in page
-    # .card-track is absolutely positioned for a deal-card corner, so reusing it
-    # in a table cell put the button outside its cell and the Track column
-    # rendered empty. The table needs the inline variant.
-    assert 'className="track-inline"' in page
-    css = Path("webapp/src/polish.css").read_text(encoding="utf-8")
-    assert ".track-inline {" in css
-    assert "position: absolute" not in css.split(".track-inline {", 1)[1].split("}", 1)[0]
-
-
 def test_track_button_style_is_overridable():
     from pathlib import Path
 
@@ -807,21 +770,6 @@ def test_track_button_style_is_overridable():
     fn = source.split("function TrackButton(", 1)[1].split("\nfunction ", 1)[0]
     assert 'className = "card-track"' in fn, "card usage must keep its default"
     assert "className={className}" in fn
-
-
-def test_search_shows_the_claude_recommendation():
-    """A Claude verdict must be visible, not just implied by a disabled button.
-
-    The actions cell only rendered "Reviewed", so the actual KEEP/REJECT call
-    and its score were invisible on the search page.
-    """
-    from pathlib import Path
-
-    source = Path("webapp/src/main.jsx").read_text(encoding="utf-8")
-    page = source.split("function GlobalSearchPage()", 1)[1].split("\nfunction ", 1)[0]
-    assert 'label: "Claude review"' in page
-    assert "<ClaudeReviewBadge" in page
-    assert "claudePending(row)" in page
 
 
 def test_transient_queue_read_does_not_publish_zeros(monkeypatch):

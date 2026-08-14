@@ -71,7 +71,6 @@ def _latest_evidence() -> pd.DataFrame:
                        routing_bucket,routing_reason,fit_score,
                        confidence_score,priority_score,record_json,updated_at
                 FROM classifications
-                WHERE routing_bucket<>'reject'
                 """
             ).fetchall()
         for row in rows:

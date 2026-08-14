@@ -17,7 +17,6 @@ def test_react_app_has_every_primary_page_and_no_streamlit_dependency():
         assert bucket in source
     assert 'aria-label="Classification bucket"' not in source
     assert 'aria-label="Crawler bucket"' not in source
-    assert "Array.isArray(result.rows)" in source
     assert '"/api/ai/domain"' in source
     assert "Run through platform" in source
     assert '"Screening complete"' in Path("web_api.py").read_text(encoding="utf-8")
@@ -25,14 +24,14 @@ def test_react_app_has_every_primary_page_and_no_streamlit_dependency():
     assert 'quickBusy ? "Processing…"' in source
     assert '["search", "Search", Search]' not in source
     assert 'search: <GlobalSearchPage />' not in source
-    assert "Search everything" in source
+    assert "Search everything" not in source
     assert "Search corpus" not in source
     assert "Search basket domains" not in source
     assert "Search indexed website content" not in source
-    assert source.count("global-searchbar") == 1
-    assert ".searchbar input:focus-visible" in Path("webapp/src/polish.css").read_text(encoding="utf-8")
-    for metric in ("Domains available", "Waiting to scrape", "Searchable pages"):
+    assert "global-searchbar" not in source
+    for metric in ("Domains available", "Waiting to scrape"):
         assert metric in source
+    assert "Searchable pages" not in source
     for zone_metric in ("Investable retained", "Discarded", "Fetch failures"):
         # Legacy corpus counters were replaced with deal-funnel metrics. Match
         # the metric declaration rather than the bare word -- "Discarded" is a
@@ -99,7 +98,6 @@ def test_react_app_has_every_primary_page_and_no_streamlit_dependency():
     # Recover quickly after Railway swaps containers instead of leaving the
     # page in stacked loading placeholders for several seconds.
     assert "window.setTimeout(load, 1000)" in source
-    assert "Search was interrupted. Please try again." in source
     assert "<DeferredContent minHeight={420}>" in source
     assert "Qualified new deal candidates" in source
     assert "/api/corpus/zone/candidates?limit=25" in source
@@ -123,27 +121,10 @@ def test_compiled_react_assets_exist():
     assert any(Path("webapp/dist/assets").glob("*.css"))
 
 
-def test_search_results_carry_the_same_review_actions():
-    """Search must be actionable, not just a lookup.
-
-    The Table component already renders Yes/Reject/Send-to-Claude whenever
-    the handlers are supplied, so the search page wires the same ones the
-    review tables use rather than duplicating that UI.
-    """
+def test_retired_search_ui_is_not_shipped():
     source = Path("webapp/src/main.jsx").read_text(encoding="utf-8")
-    page = source.split("function GlobalSearchPage()", 1)[1].split(
-        "\nfunction ", 1
-    )[0]
-    for handler in ("onLabel=", "onReject=", "onClaude="):
-        assert handler in page, handler
-    # Admin gating must match the review tables: no silent no-op for guests.
-    assert "admin ?" in page
-    assert "requestLogin" in page
-    # Acting on a row has to refresh it, or the row keeps showing stale state.
-    assert "const refresh = () =>" in page
-    # The modals the handlers depend on must be mounted on this page too.
-    assert "<LabelModal" in page
-    assert "<ClaudeOverrideModal" in page
+    assert "function GlobalSearchPage()" not in source
+    assert "/api/search" not in source
 
 
 def test_tables_render_only_one_negative_action():
@@ -161,17 +142,3 @@ def test_decision_modal_recovers_from_api_failure():
     assert "catch (requestError)" in modal
     assert "setSaving(false)" in modal
     assert 'error && <p className="error inline-notice"' in modal
-
-
-def test_search_rows_include_the_state_the_action_buttons_read():
-    """Buttons key off bucket/label/Claude state, so the API must supply it.
-
-    Without this the actions render enabled on an already-decided company and
-    acting on one would silently overwrite a human call.
-    """
-    api_source = Path("web_api.py").read_text(encoding="utf-8")
-    search = api_source.split("def global_search(", 1)[1].split("\n@app.", 1)[0]
-    assert "_manual_decision_state(" in search
-    assert "_with_claude(" in search
-    for field in ("manual_override", "manual_override_target", "label", "fit_score"):
-        assert field in search, field
