@@ -322,7 +322,7 @@ class FounderSignalDecision(BaseModel):
 
 
 class FounderJobRequest(BaseModel):
-    job_type: Literal["talent_discovery", "identity_resolution", "github_collection", "full_refresh", "score_recalculation"]
+    job_type: Literal["talent_discovery", "identity_resolution", "github_collection", "full_refresh", "score_recalculation", "pedigree_enrichment"]
     candidate_id: str = ""
 
 
