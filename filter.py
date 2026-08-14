@@ -1342,6 +1342,41 @@ def founder_green_flags(text: str) -> list[dict[str, str]]:
     return flags
 
 
+def founder_pedigree_score(flags: list[dict[str, str]]) -> int:
+    """Score only verified, founder-context pedigree evidence.
+
+    Pedigree is intentionally meaningful for sparse early-stage companies,
+    but customer logos, integration lists, and generic team claims contribute
+    nothing because ``founder_green_flags`` excludes them.
+    """
+    labels_by_type: dict[str, set[str]] = {}
+    for flag in flags:
+        kind = str(flag.get("type", "")).strip()
+        label = str(flag.get("label", "")).strip().lower()
+        if kind and label:
+            labels_by_type.setdefault(kind, set()).add(label)
+
+    score = 0
+    if labels_by_type.get("founder_identity"):
+        score += 10
+    school_count = sum(
+        len(labels_by_type.get(kind, set()))
+        for kind in ("ivy_league_spinout", "top_university_spinout")
+    )
+    if school_count:
+        score += 28 + min(school_count - 1, 1) * 8
+    employer_count = len(labels_by_type.get("ex_big_tech", set()))
+    if employer_count:
+        score += 28 + min(employer_count - 1, 1) * 8
+    if labels_by_type.get("repeat_founder"):
+        score += 30
+    if labels_by_type.get("prior_exit"):
+        score += 40
+    if labels_by_type.get("deep_tech_ip"):
+        score += 25
+    return min(100, score)
+
+
 def scorecard_from_evidence(
     *,
     counts: dict[str, int],
@@ -1386,6 +1421,8 @@ def score_text(text: str) -> tuple[int, str, list[str], dict[str, int]]:
     boilerplate_hits = occurrences(text, GENERIC_BOILERPLATE)
     service_hits = occurrences(text, SERVICE_BUSINESS_SCORING_SIGNALS)
     low_value_hits = occurrences(text, LOW_VALUE_SCORING_SIGNALS)
+    founder_flags = founder_green_flags(text)
+    pedigree_score = founder_pedigree_score(founder_flags)
 
     unique_pillar = len(set(pillar_hits[best]))
     unique_ai = len(set(ai_hits))
@@ -1411,6 +1448,7 @@ def score_text(text: str) -> tuple[int, str, list[str], dict[str, int]]:
         "boilerplate": len(set(boilerplate_hits)),
         "service_business": len(set(service_hits)),
         "low_value": len(set(low_value_hits)),
+        "founder_pedigree": pedigree_score,
     }
 
     # Dimension caps prevent keyword repetition from saturating the score.
@@ -1460,6 +1498,12 @@ def score_text(text: str) -> tuple[int, str, list[str], dict[str, int]]:
         raw += 20
     elif unique_pillar >= 2 and supporting_dimensions >= 2:
         raw += 14
+
+    # A verified founder pedigree is a major early-stage signal. Keep the
+    # website score lift bounded and require both thesis and product evidence,
+    # so pedigree cannot rescue a personal page, holding company, or vaporware.
+    if pedigree_score and unique_pillar >= 1 and unique_product >= 1:
+        raw += round(pedigree_score * 0.25)
 
     # Generic branding without substance is actively penalized.
     if generic_hits and unique_technical == 0 and unique_workflow == 0:
@@ -1553,6 +1597,7 @@ def score_text(text: str) -> tuple[int, str, list[str], dict[str, int]]:
         + value_hits
         + defensibility_hits
         + important_problem_hits
+        + [str(flag.get("label", "")) for flag in founder_flags]
     ))
 
     return (
@@ -2479,6 +2524,8 @@ def venture_quality_assessment(
     mid_school_hits = occurrences(cleaned, MID_US_SCHOOLS)
     bad_school_hits = occurrences(cleaned, BAD_US_SCHOOLS)
     strong_work_experience_hits = occurrences(cleaned, STRONG_WORK_EXPERIENCE)
+    verified_founder_flags = founder_green_flags(cleaned)
+    pedigree_score = founder_pedigree_score(verified_founder_flags)
     slop_evidence = occurrences(cleaned, AI_SLOP_SIGNALS)
 
     pillar_count = int(counts.get("pillar", 0))
@@ -2529,23 +2576,20 @@ def venture_quality_assessment(
         + min(technical_count, 3) * 12
         + min(len(set(moat_evidence)), 2) * 16,
     )
-    # Slight, not decisive -- a top-tier school or employer mention nudges
-    # founder_score the way one extra credibility signal would, a
-    # diploma-mill mention nudges it back down by about the same amount.
-    # Never enough on its own to move thesis_fit/product_real or any hard
-    # gate.
+    # Pedigree is heavily weighted only when it appears in explicit founder or
+    # leadership context. Whole-page school/employer mentions remain in the
+    # evidence trail for debugging but add no score (customer logos are common).
     school_adjustment = (
-        min(len(set(strong_school_hits)), 2) * 5
-        + min(len(set(mid_school_hits)), 2) * 2
-        - min(len(set(bad_school_hits)), 2) * 5
-        + min(len(set(strong_work_experience_hits)), 2) * 5
+        min(len(set(mid_school_hits)), 2) * 3
+        - min(len(set(bad_school_hits)), 2) * 8
     )
     founder_score = min(
         100,
         max(
             0,
-            min(len(set(founder_visibility)), 2) * 18
-            + min(len(set(founder_credibility)), 3) * 20
+            pedigree_score
+            + min(len(set(founder_visibility)), 2) * 8
+            + min(len(set(founder_credibility)), 2) * 8
             + school_adjustment,
         ),
     )
@@ -2578,11 +2622,11 @@ def venture_quality_assessment(
     )
 
     overall_score = round(
-        thesis_score * 0.25
+        thesis_score * 0.22
         + product_score * 0.15
-        + wedge_score * 0.25
-        + moat_score * 0.25
-        + founder_score * 0.10
+        + wedge_score * 0.20
+        + moat_score * 0.18
+        + founder_score * 0.25
     )
     # Frontier companies often explain the technical edge in detail while
     # omitting the marketing language that our generic wedge detector expects.
@@ -2658,7 +2702,8 @@ def venture_quality_assessment(
             + occurrences(cleaned, DEFENSIBILITY_SIGNALS)
         ))[:10],
         "founder_evidence": list(dict.fromkeys(
-            founder_visibility
+            [str(flag.get("label", "")) for flag in verified_founder_flags]
+            + founder_visibility
             + founder_credibility
             + strong_school_hits
             + mid_school_hits

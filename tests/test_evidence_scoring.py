@@ -1,5 +1,6 @@
 from filter import (
     founder_green_flags,
+    founder_pedigree_score,
     high_signal_scoring_text,
     score_text,
     scorecard_from_evidence,
@@ -29,6 +30,13 @@ def test_customer_logo_does_not_create_founder_pedigree_tag():
     ) == []
 
 
+def test_customer_logos_contribute_no_founder_score():
+    text = "Trusted by Google, Meta, Stanford, and MIT customers."
+    flags = founder_green_flags(text)
+    assert founder_pedigree_score(flags) == 0
+    assert score_text(text)[3]["founder_pedigree"] == 0
+
+
 def test_founder_context_creates_evidence_backed_tags():
     flags = founder_green_flags(
         "Our founding team includes former Google engineers and Stanford graduates."
@@ -37,6 +45,7 @@ def test_founder_context_creates_evidence_backed_tags():
     assert "Ex-Google" in labels
     assert "Stanford team" in labels
     assert all(flag["evidence"] and flag["source"] == "website" for flag in flags)
+    assert founder_pedigree_score(flags) >= 50
 
 
 def test_founder_enrichment_extracts_named_founder_and_adjacent_ip():

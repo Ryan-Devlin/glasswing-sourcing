@@ -520,7 +520,7 @@ class RuleCalibrationTests(unittest.TestCase):
         self.assertFalse(profile["reviewable"])
         self.assertFalse(profile["investable_ready"])
 
-    def test_strong_school_mention_slightly_lifts_founder_score(self):
+    def test_verified_top_school_heavily_lifts_founder_score(self):
         text = (
             "Founded by a team with deep enterprise software experience. "
             "Our founders previously built and sold two companies."
@@ -537,11 +537,8 @@ class RuleCalibrationTests(unittest.TestCase):
             pillar=pillar, counts=counts,
             dimensions=glasswing_dimensions(text),
         )
-        # Slight, not decisive: a real lift, but nowhere near the ~18-20
-        # points a real founder_visibility/credibility signal is worth.
         delta = with_school["founder_score"] - baseline["founder_score"]
-        self.assertGreater(delta, 0)
-        self.assertLessEqual(delta, 10)
+        self.assertGreaterEqual(delta, 20)
 
     def test_diploma_mill_mention_slightly_lowers_founder_score(self):
         text = (
@@ -566,7 +563,7 @@ class RuleCalibrationTests(unittest.TestCase):
             with_top_school["founder_score"],
         )
 
-    def test_strong_work_experience_slightly_lifts_founder_score(self):
+    def test_verified_big_tech_experience_heavily_lifts_founder_score(self):
         text = (
             "Founded by a team with deep enterprise software experience. "
             "Our founders previously built and sold two companies."
@@ -584,8 +581,7 @@ class RuleCalibrationTests(unittest.TestCase):
             dimensions=glasswing_dimensions(text),
         )
         delta = with_faang["founder_score"] - baseline["founder_score"]
-        self.assertGreater(delta, 0)
-        self.assertLessEqual(delta, 10)
+        self.assertGreaterEqual(delta, 20)
 
     def test_school_signal_alone_never_decides_investable_ready(self):
         # "Slightly" means never decisive on its own -- a thin page with
