@@ -7,7 +7,7 @@ from zone_universe.crawler import CrawlOutcome, save_success
 from zone_universe.database import connect
 
 
-def test_identical_raw_html_shares_one_archive_blob(tmp_path: Path) -> None:
+def test_identical_raw_html_is_never_archived(tmp_path: Path) -> None:
     database = tmp_path / "universe.sqlite3"
     archive = tmp_path / "html"
     html = "<html><title>Shared</title><body>Same template</body></html>"
@@ -36,13 +36,13 @@ def test_identical_raw_html_shares_one_archive_blob(tmp_path: Path) -> None:
     ).fetchall()
     assert len(rows) == 2
     assert tuple(rows[0]) == tuple(rows[1])
-    assert conn.execute(
-        "SELECT count(*) FROM html_blobs"
-    ).fetchone()[0] == 1
+    assert conn.execute("SELECT count(*) FROM html_blobs").fetchone()[0] == 0
+    assert rows[0][1] == ""
+    assert rows[0][3] == 0
     conn.close()
 
 
-def test_deferred_save_then_backfill_ends_up_archived(tmp_path: Path) -> None:
+def test_repeated_save_never_backfills_html_archive(tmp_path: Path) -> None:
     # crawl_once's actual pattern at ~170M .com/.app names: save metadata
     # immediately with retain_raw_html=False (no archive -- too many
     # domains to archive every crawl outright), then re-save the same
@@ -82,9 +82,7 @@ def test_deferred_save_then_backfill_ends_up_archived(tmp_path: Path) -> None:
         "SELECT html_archive_path, html_archive_length "
         "FROM pages WHERE domain='winner.app'"
     ).fetchone()
-    assert backfilled_row["html_archive_path"] != ""
-    assert backfilled_row["html_archive_length"] > 0
-    assert conn.execute(
-        "SELECT count(*) FROM html_blobs"
-    ).fetchone()[0] == 1
+    assert backfilled_row["html_archive_path"] == ""
+    assert backfilled_row["html_archive_length"] == 0
+    assert conn.execute("SELECT count(*) FROM html_blobs").fetchone()[0] == 0
     conn.close()

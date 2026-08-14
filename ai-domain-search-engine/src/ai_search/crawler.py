@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import ssl
 import time
 from datetime import datetime, timedelta, timezone
@@ -20,7 +19,8 @@ from .extract import (
     homepage_enrichment_plan,
     same_site_url,
 )
-from .html_archive import ArchivePointer, append_html
+
+SCORING_TEXT_LIMIT = 15_000
 
 
 def classify_error(exc: Exception) -> str:
@@ -97,58 +97,10 @@ def _save_page(
     status: int, content_type: str, html: str, page: ExtractedPage,
     settings: Settings, domain: str,
 ) -> int:
-    raw = html.encode("utf-8", errors="replace")
-    raw_hash = hashlib.sha256(raw).hexdigest()
-    archive: ArchivePointer | None = None
-    # Parking and prelaunch templates are not worth retaining. Their
-    # searchable description and extracted evidence remain in SQLite.
-    should_archive = (
-        bool(getattr(settings, "retain_raw_html", False))
-        and not page.is_parked
-        and not page.is_coming_soon
-    )
-    if should_archive:
-        existing = conn.execute(
-            """
-            SELECT archive_path,archive_offset,archive_length,
-                   archive_codec,raw_bytes
-            FROM html_blobs
-            WHERE raw_html_hash=?
-            """,
-            (raw_hash,),
-        ).fetchone()
-        if existing is not None:
-            archive = ArchivePointer(
-                path=str(existing["archive_path"]),
-                offset=int(existing["archive_offset"]),
-                length=int(existing["archive_length"]),
-                codec=str(existing["archive_codec"]),
-                raw_bytes=int(existing["raw_bytes"]),
-            )
-        else:
-            archive = append_html(
-                settings.html_archive,
-                domain=domain,
-                html=html,
-            )
-            conn.execute(
-                """
-                INSERT INTO html_blobs(
-                    raw_html_hash,archive_path,archive_offset,
-                    archive_length,archive_codec,raw_bytes,created_at
-                ) VALUES (?,?,?,?,?,?,?)
-                ON CONFLICT (raw_html_hash) DO NOTHING
-                """,
-                (
-                    raw_hash,
-                    archive.path,
-                    archive.offset,
-                    archive.length,
-                    archive.codec,
-                    archive.raw_bytes,
-                    utc_now(),
-                ),
-            )
+    # HTML exists only for extraction during this crawl. Never archive it.
+    # Keep one bounded text window for the asynchronous scoring handoff; the
+    # unused full-text search feature must not duplicate entire websites.
+    scoring_text = page.cleaned_text[:SCORING_TEXT_LIMIT]
     conn.execute("""
         INSERT INTO pages(
             domain_id, url, final_url, title, meta_description, headings,
@@ -180,16 +132,10 @@ def _save_page(
             compressed_html_bytes=excluded.compressed_html_bytes
     """, (
         domain_id, requested, final_url, page.title, page.description,
-        page.headings, page.cleaned_text, page.canonical_url,
+        page.headings, scoring_text, page.canonical_url,
         page.language, page.emails, page.social_links, page.json_ld, status,
         content_type, page.word_count, page.content_hash, utc_now(),
-        raw_hash,
-        archive.path if archive else "",
-        archive.offset if archive else 0,
-        archive.length if archive else 0,
-        archive.codec if archive else "",
-        len(raw),
-        archive.length if archive else 0,
+        "", "", 0, 0, "", 0, 0,
     ))
     return conn.execute(
         "SELECT id FROM pages WHERE domain_id=? AND final_url=?",

@@ -5,7 +5,6 @@ def test_react_app_has_every_primary_page_and_no_streamlit_dependency():
     source = Path("webapp/src/main.jsx").read_text(encoding="utf-8")
     for label in (
         "Home",
-        "Search",
         "CertStream Scraper",
         "Form D Deal Flow",
         "Domain Intake",
@@ -24,7 +23,8 @@ def test_react_app_has_every_primary_page_and_no_streamlit_dependency():
     assert '"Screening complete"' in Path("web_api.py").read_text(encoding="utf-8")
     assert "source_run_id=source" in Path("web_api.py").read_text(encoding="utf-8")
     assert 'quickBusy ? "Processing…"' in source
-    assert 'search: <GlobalSearchPage />' in source
+    assert '["search", "Search", Search]' not in source
+    assert 'search: <GlobalSearchPage />' not in source
     assert "Search everything" in source
     assert "Search corpus" not in source
     assert "Search basket domains" not in source

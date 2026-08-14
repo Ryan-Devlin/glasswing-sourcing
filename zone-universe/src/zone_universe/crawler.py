@@ -5,7 +5,6 @@ import hashlib
 import shutil
 import sqlite3
 import time
-import zlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -24,8 +23,9 @@ from db_backend import PostgresConnection
 from .config import DATA_ROOT, Settings
 from .database import log_event, set_state, utc_now
 from .domain_quality import crawl_priority
-from .html_archive import append_html
 from .preflight import assess_homepage
+
+SCORING_TEXT_LIMIT = 15_000
 
 
 @dataclass
@@ -590,57 +590,9 @@ def save_success(
 ) -> None:
     if outcome.page is None:
         return
-    raw = outcome.html.encode("utf-8", errors="replace")
-    raw_hash = hashlib.sha256(raw).hexdigest()
-    compressed = None
-    archive = None
-    if retain_raw_html:
-        if archive_root is not None:
-            existing_blob = conn.execute(
-                """
-                SELECT archive_path,archive_offset,archive_length,
-                       archive_codec,raw_bytes
-                FROM html_blobs WHERE raw_html_hash=?
-                """,
-                (raw_hash,),
-            ).fetchone()
-            if existing_blob is not None:
-                from .html_archive import ArchivePointer
-
-                archive = ArchivePointer(
-                    path=str(existing_blob["archive_path"]),
-                    offset=int(existing_blob["archive_offset"]),
-                    length=int(existing_blob["archive_length"]),
-                    codec=str(existing_blob["archive_codec"]),
-                    raw_bytes=int(existing_blob["raw_bytes"]),
-                )
-            else:
-                archive = append_html(
-                    archive_root,
-                    domain=outcome.domain,
-                    tld=outcome.tld,
-                    html=outcome.html,
-                )
-                conn.execute(
-                    """
-                    INSERT INTO html_blobs(
-                        raw_html_hash,archive_path,archive_offset,
-                        archive_length,archive_codec,raw_bytes,created_at
-                    ) VALUES (?,?,?,?,?,?,?)
-                    ON CONFLICT (raw_html_hash) DO NOTHING
-                    """,
-                    (
-                        raw_hash,
-                        archive.path,
-                        archive.offset,
-                        archive.length,
-                        archive.codec,
-                        archive.raw_bytes,
-                        utc_now(),
-                    ),
-                )
-        else:
-            compressed = zlib.compress(raw, level=6)
+    # Raw HTML is transient extraction input, never a retained asset. Keep a
+    # bounded scoring window only; search indexing must not duplicate it.
+    scoring_text = outcome.page.cleaned_text[:SCORING_TEXT_LIMIT]
     now = utc_now()
     conn.execute(
         """
@@ -689,16 +641,13 @@ def save_success(
             outcome.page.title,
             outcome.page.description,
             outcome.page.headings,
-            outcome.page.cleaned_text,
-            compressed,
-            raw_hash,
-            len(raw),
-            archive.path if archive else "",
-            archive.offset if archive else 0,
-            archive.length if archive else 0,
-            archive.codec if archive else "",
+            scoring_text,
+            None,
+            "",
+            0,
+            "", 0, 0, "",
             max(1, outcome.document_count),
-            archive.length if archive else len(compressed or b""),
+            0,
             outcome.http_status,
             outcome.page.word_count,
             outcome.page.content_hash,
@@ -725,12 +674,11 @@ def save_success(
                 setweight(to_tsvector('english', coalesce(?, '')), 'A') ||
                 setweight(to_tsvector('english', coalesce(?, '')), 'B') ||
                 setweight(to_tsvector('english', coalesce(?, '')), 'C') ||
-                setweight(to_tsvector('english', coalesce(?, '')), 'D') ||
                 setweight(to_tsvector('english', coalesce(?, '')), 'D')
             WHERE id = ?
         """, (
             outcome.domain, outcome.page.title, outcome.page.description,
-            outcome.page.headings, outcome.page.cleaned_text, page_id,
+            outcome.page.headings, page_id,
         ))
     else:
         conn.execute(
@@ -749,7 +697,7 @@ def save_success(
                 outcome.page.title,
                 outcome.page.description,
                 outcome.page.headings,
-                outcome.page.cleaned_text,
+                "",
             ),
         )
 
@@ -1403,30 +1351,10 @@ async def crawl_once(
         classification["discarded_pages"] = discarded_pages
         classification["discarded_classifications"] = discarded_classifications
         set_state(conn, "last_python_classification", classification)
-        if settings.retain_raw_html:
-            archived = 0
-            for outcome in outcomes:
-                if outcome.status != "success":
-                    continue
-                if outcome.domain not in retained_domains:
-                    continue
-                if scores.get(outcome.domain, 0) < settings.html_archive_minimum_score:
-                    continue
-                # Re-saving with retain_raw_html=True is intentionally the
-                # same save_success() path as the initial (deferred) save
-                # -- ON CONFLICT(domain) DO UPDATE means this just fills in
-                # the archive-pointer columns that were left empty above,
-                # for this one domain that actually cleared the bar.
-                save_success(
-                    conn,
-                    outcome,
-                    retain_raw_html=True,
-                    archive_root=settings.html_archive,
-                )
-                archived += 1
-            if archived:
-                conn.commit()
-            set_state(conn, "last_batch_html_archived", archived)
+        # Raw HTML retention was removed. Classification rows carry the
+        # compact evidence needed by the product; the fetched document dies
+        # with this batch.
+        set_state(conn, "last_batch_html_archived", 0)
     except Exception as exc:
         # A classification outage must not turn temporary crawl content into
         # permanent storage. The shard/retry machinery can revisit it later.

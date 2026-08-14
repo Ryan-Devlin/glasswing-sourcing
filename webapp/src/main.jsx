@@ -36,7 +36,6 @@ import { dealAgeLabel, formatCount as fmt, pageCount } from "./domain";
 
 const NAV = [
   ["home", "Home", Home],
-  ["search", "Search", Search],
   ["certstream", "CertStream Scraper", Activity],
   ["csv", "Domain Intake", Database],
   ["domains", "Domain Crawler (.com, .app)", Globe2],
@@ -3224,7 +3223,6 @@ function App() {
   };
   const body = {
     home: <HomePage />,
-    search: <GlobalSearchPage />,
     certstream: <CertStreamPage />,
     formd: <FormDPage />,
     csv: <SearchCorpusPage kind="ai" />,

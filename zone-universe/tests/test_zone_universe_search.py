@@ -50,7 +50,7 @@ def test_unquoted_multiword_input_becomes_an_exact_phrase() -> None:
     )
 
 
-def test_search_requires_phrase_and_raw_html_is_retained(
+def test_search_requires_metadata_phrase_and_raw_html_is_discarded(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "universe.sqlite3"
@@ -77,7 +77,7 @@ def test_search_requires_phrase_and_raw_html_is_retained(
     )
     assert [row["domain"] for row in results] == ["match.app"]
     retained = raw_html("match.app", database=database)
-    assert "<title>Quantum Data Platform</title>" in retained
+    assert retained == ""
     conn = connect(database, read_only=True)
     stored = conn.execute(
         """
@@ -86,6 +86,6 @@ def test_search_requires_phrase_and_raw_html_is_retained(
         """
     ).fetchone()
     assert stored["raw_html_zlib"] is None
-    assert Path(stored["html_archive_path"]).exists()
-    assert stored["html_archive_length"] > 0
+    assert stored["html_archive_path"] == ""
+    assert stored["html_archive_length"] == 0
     conn.close()

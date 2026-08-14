@@ -113,7 +113,7 @@ def test_compaction_discards_parked_html_but_keeps_search_evidence(tmp_path):
     assert row["html_archive_path"] == ""
 
 
-def test_future_crawls_write_compact_archive_instead_of_database_html(tmp_path):
+def test_future_crawls_never_retain_database_or_archived_html(tmp_path):
     database = tmp_path / "search.sqlite3"
     archive = tmp_path / "html"
     conn = connect(database)
@@ -162,8 +162,8 @@ def test_future_crawls_write_compact_archive_instead_of_database_html(tmp_path):
     assert row["raw_html"] == ""
     assert row["visible_text"] == ""
     assert "identity security" in row["cleaned_text"]
-    assert row["html_archive_path"]
-    assert row["compressed_html_bytes"] > 0
+    assert row["html_archive_path"] == ""
+    assert row["compressed_html_bytes"] == 0
     assert [item["domain"] for item in search(conn, "identity security")] == [
         "new.ai"
     ]

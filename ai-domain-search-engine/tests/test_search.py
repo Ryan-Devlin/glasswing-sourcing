@@ -33,15 +33,13 @@ def test_arbitrary_keyword_phrase_and_exclusion_search(tmp_path):
     seed(conn, "separate.ai", "Systems", "quantum systems use data")
 
     assert [r["domain"] for r in search(conn, "robotics")] == ["robots.ai"]
-    assert [r["domain"] for r in search(
-        conn, '"quantum computing"'
-    )] == ["quantum-labs.ai"]
-    assert [r["domain"] for r in search(
-        conn, "quantum data"
-    )] == ["exact.ai"]
-    assert [r["domain"] for r in search(
+    # Full website bodies are intentionally not duplicated into the retired
+    # corpus-search index.
+    assert search(conn, '"quantum computing"') == []
+    assert search(conn, "quantum data") == []
+    assert [row["domain"] for row in search(
         conn, "quantum -education"
-    )] == ["quantum-labs.ai", "exact.ai", "separate.ai"]
+    )] == ["quantum-labs.ai"]
     assert search(conn, "cybersecurity") == []
 
 
@@ -56,7 +54,7 @@ def test_title_only_and_parked_default(tmp_path):
         conn, "robotics", SearchOptions(exclude_parked=False)
     )
     assert {row["domain"] for row in all_results} == {
-        "body.ai", "title.ai", "parked.ai"
+        "title.ai", "parked.ai"
     }
 
 

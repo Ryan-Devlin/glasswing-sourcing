@@ -443,19 +443,18 @@ def index_page(conn: sqlite3.Connection, page_id: int) -> None:
                 setweight(to_tsvector('english', coalesce(?, '')), 'A') ||
                 setweight(to_tsvector('english', coalesce(?, '')), 'B') ||
                 setweight(to_tsvector('english', coalesce(?, '')), 'C') ||
-                setweight(to_tsvector('english', coalesce(?, '')), 'D') ||
                 setweight(to_tsvector('english', coalesce(?, '')), 'D')
             WHERE id = ?
         """, (
             row["domain"], row["title"], row["meta_description"],
-            row["headings"], row["cleaned_text"], row["id"],
+            row["headings"], row["id"],
         ))
         return
     conn.execute("DELETE FROM page_search WHERE page_id=?", (page_id,))
     conn.execute("""
         INSERT INTO page_search(page_id, domain, title, description, headings, body)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, tuple(row))
+        VALUES (?, ?, ?, ?, ?, '')
+    """, tuple(row)[:-1])
 
 
 def diagnostics(conn: sqlite3.Connection) -> dict[str, int | str]:
