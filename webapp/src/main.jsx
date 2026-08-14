@@ -1997,7 +1997,6 @@ function CertStreamPage() {
   const [requestedState, setRequestedState] = useState(null);
   const [controlMessage, setControlMessage] = useState("");
   const status = useApi("/api/certstream/status", [tick]);
-  const claude = useApi("/api/claude/status", [tick]);
   useEffect(() => {
     const id = setInterval(() => {
       if (document.visibilityState === "visible") setTick((x) => x + 1);
@@ -2107,20 +2106,8 @@ function CertStreamPage() {
           )}
         />
       </div>
-      <p className="notice certstream-funnel">
-        <strong>{metric(s.current_run_queue?.complete)} screening decisions</strong>
-        {" = "}
-        <strong>{metric(s.retained_in_buckets)} candidates in the charts</strong>
-        {" + "}
-        <strong>{metric(s.discarded_after_screening)} low-signal domains discarded</strong>.
-        Worker attempts can be higher because failed fetches are retried. Only retained
-        candidates appear below.
-      </p>
       {s.classification_store_warning && (
         <p className="error inline-notice">{s.classification_store_warning}</p>
-      )}
-      {claude.data?.warning && (
-        <p className="notice">Claude: {claude.data.warning}</p>
       )}
       <RunFilters running={Boolean(desiredRunning)} />
       <CompaniesTable showRunScope />
