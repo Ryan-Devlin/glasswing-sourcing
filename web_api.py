@@ -17,7 +17,7 @@ import tempfile
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
@@ -143,6 +143,36 @@ from founder_signals import (
     update_settings as update_founder_settings,
 )
 
+
+async def _founder_signals_scheduler():
+    """Run due GitHub collection in the existing web job architecture.
+
+    The database job ledger is the cross-restart clock, so redeploying the web
+    container cannot accidentally restart a full collection immediately.
+    """
+    while True:
+        await asyncio.sleep(300)
+        if not os.getenv("GITHUB_TOKEN"):
+            continue
+        try:
+            settings = await asyncio.to_thread(founder_settings)
+            interval = max(1, int(settings.get("collection_frequency_hours", 24)))
+            jobs = await asyncio.to_thread(founder_monitoring_jobs, 100)
+            collections = [job for job in jobs if job.get("job_type") == "github_collection"]
+            if any(job.get("status") in {"queued", "running"} for job in collections):
+                continue
+            last_completed = next((job for job in collections if job.get("completed_at")), None)
+            if last_completed:
+                completed = datetime.fromisoformat(
+                    str(last_completed["completed_at"]).replace("Z", "+00:00")
+                )
+                if datetime.now(timezone.utc) - completed < timedelta(hours=interval):
+                    continue
+            job_id = await asyncio.to_thread(create_founder_job, "github_collection")
+            await asyncio.to_thread(run_founder_job, job_id)
+        except Exception as exc:
+            print(f"Founder Signals scheduled collection deferred: {exc}", file=sys.stderr)
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     await asyncio.to_thread(reconcile_claude_routing)
@@ -156,6 +186,7 @@ async def lifespan(_app: FastAPI):
         asyncio.create_task(_claude_queue_worker()),
         asyncio.create_task(_landscape_worker()),
         asyncio.create_task(_form_d_worker()),
+        asyncio.create_task(_founder_signals_scheduler()),
     ]
     try:
         yield

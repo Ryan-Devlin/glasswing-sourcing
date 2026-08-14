@@ -17,8 +17,9 @@ not probabilities or claims about private behavior.
 - `webapp/src/main.jsx` renders five views inside the existing React shell:
   Priority Signals, Talent Universe, Activity Monitor, Identity Review, and
   Settings.
-- `founder_signals_worker.py` is the rate-aware collector entrypoint. It uses
-  the same canonical Postgres database as the rest of the product.
+- The FastAPI lifespan scheduler checks hourly and starts collection only when
+  the configured interval has elapsed. `founder_signals_worker.py` remains an
+  optional dedicated-worker entrypoint for higher-volume deployments.
 - `railway.founder-signals.json` is the optional dedicated Railway worker
   configuration. No separate database is created.
 
