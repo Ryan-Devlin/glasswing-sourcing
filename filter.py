@@ -301,6 +301,10 @@ THESIS = {
         "ai gateway", "prompt management", "model distillation",
         "purpose-built models", "evaluation infrastructure",
         "reproducible evaluation", "workload reliability",
+        "ai infrastructure as a service", "ai infrastructure service",
+        "gpu as a service", "inference as a service",
+        "serverless inference", "managed inference", "model serving api",
+        "training as a service", "ai compute platform",
     ],
     "intelligent_enterprise_defense": [
         "intelligent enterprise defense", "cybersecurity", "threat detection",
@@ -649,7 +653,9 @@ BUSINESS_VALUE = [
     "coordinate response", "real-time feedback", "trusted decisions",
     "cuts costs", "cut costs", "boost productivity", "boosts productivity",
     "fabrication-ready", "in hours, not weeks", "faster iteration",
-    "reproducible results",
+    "reproducible results", "gpu utilization", "reduce inference costs",
+    "lower inference costs", "inference throughput", "training throughput",
+    "cold start latency",
 ]
 
 WORKFLOW_DEPTH = [
@@ -703,6 +709,16 @@ TECHNICAL_DEPTH = [
     "pre-trained",
     "model provider",
     "deterministic execution",
+    "ai infrastructure as a service",
+    "gpu as a service",
+    "inference as a service",
+    "serverless inference",
+    "managed inference",
+    "model serving api",
+    "training as a service",
+    "ai compute platform",
+    "gpu autoscaling",
+    "inference optimization",
 ]
 
 
@@ -2262,7 +2278,10 @@ def category_is_valid(pillar: str, text: str) -> bool:
         "ai_adaptive_infrastructure": [
             "data infrastructure", "ml infrastructure", "model monitoring",
             "observability", "data pipeline", "vector database",
-            "orchestration", "deployment", "inference", "developer platform"
+            "orchestration", "deployment", "inference", "developer platform",
+            "ai infrastructure as a service", "gpu as a service",
+            "inference as a service", "serverless inference",
+            "managed inference", "model serving api", "ai compute platform"
         ],
         "collaborative_intelligence": [
             "copilot", "collaboration", "human-in-the-loop",
@@ -2445,6 +2464,16 @@ def high_conviction_fit_assessment(text: str) -> tuple[bool, list[str]]:
             ["ai infrastructure and workloads", "reliability",
              "ai factories", "gpus", "accelerators", "uptime",
              "utilization"],
+            3,
+        ),
+        (
+            ["ai infrastructure as a service", "gpu as a service",
+             "inference as a service", "serverless inference"],
+            ["ai infrastructure as a service", "gpu as a service",
+             "inference as a service", "serverless inference",
+             "managed inference", "model serving api", "gpu autoscaling",
+             "inference optimization", "gpu utilization",
+             "inference throughput", "training throughput"],
             3,
         ),
         (

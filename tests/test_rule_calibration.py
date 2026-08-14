@@ -259,6 +259,20 @@ class RuleCalibrationTests(unittest.TestCase):
         )
         self.assertFalse(matched)
 
+    def test_specific_aiaas_infrastructure_bundle_is_high_conviction(self):
+        matched, evidence = high_conviction_fit_assessment(
+            "We provide GPU as a service with serverless inference, GPU "
+            "autoscaling, and inference optimization for production models."
+        )
+        self.assertTrue(matched)
+        self.assertIn("gpu as a service", evidence)
+
+    def test_generic_ai_as_a_service_claim_is_not_high_conviction(self):
+        matched, _ = high_conviction_fit_assessment(
+            "AI as a service for every business. We build custom AI solutions."
+        )
+        self.assertFalse(matched)
+
     def test_vertical_visual_ai_bundle_is_high_conviction(self):
         matched, evidence = high_conviction_fit_assessment(
             "Visual AI agents provide continuous vision for production line "
