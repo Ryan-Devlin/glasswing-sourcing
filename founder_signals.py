@@ -680,6 +680,10 @@ class PublicResearchClient:
         query = urllib.parse.urlencode({"query": name, "limit": 5, "fields": fields})
         return list(self._get(f"https://api.semanticscholar.org/graph/v1/author/search?{query}").get("data") or [])
 
+    def crossref_works(self, name: str) -> list[dict[str, Any]]:
+        query = urllib.parse.urlencode({"query.author": name, "rows": 20, "select": "DOI,title,author,is-referenced-by-count,published"})
+        return list((self._get(f"https://api.crossref.org/works?{query}").get("message") or {}).get("items") or [])
+
 
 def _name_is_exact(expected: str, actual: str) -> bool:
     return bool(expected and actual and _normalized_name(expected) == _normalized_name(actual))
@@ -702,9 +706,12 @@ def enrich_pedigree(candidate_id: str, *, client: PublicResearchClient | None = 
         candidate = dict(row)
     name = clean(candidate.get("full_name", ""))
     if not name: raise ValueError("Candidate has no full name")
-    now = utc_now(); evidence_rows: list[dict[str, Any]] = []
+    now = utc_now(); evidence_rows: list[dict[str, Any]] = []; provider_errors: list[dict[str, str]] = []
 
-    for author in client.openalex_authors(name):
+    try: openalex_authors = client.openalex_authors(name)
+    except Exception as exc:
+        openalex_authors = []; provider_errors.append({"provider":"openalex","error":str(exc)[:300]})
+    for author in openalex_authors:
         if not _name_is_exact(name, clean(author.get("display_name", ""))): continue
         institutions = [clean(item.get("display_name", "")) for item in (author.get("last_known_institutions") or [])]
         for affiliation in author.get("affiliations") or []:
@@ -716,7 +723,10 @@ def enrich_pedigree(candidate_id: str, *, client: PublicResearchClient | None = 
         author_id = clean(author.get("id", "")); works = int(author.get("works_count") or 0); citations = int(author.get("cited_by_count") or 0)
         evidence_rows.append({"provider":"openalex","external_id":author_id,"url":author_id,"type":"research_record","label":f"{works} publications · {citations:,} citations","evidence":f"Exact name match. Institutions: {', '.join(dict.fromkeys(institutions)) or 'not supplied'}." + (f" Matched: {', '.join(overlaps)}." if overlaps else ""),"strength":min(100, round(math.log1p(works)*10 + math.log1p(citations)*9)),"confidence":confidence,"verified":confidence >= minimum_confidence,"raw":author})
 
-    for author in client.semantic_scholar_authors(name):
+    try: semantic_authors = client.semantic_scholar_authors(name)
+    except Exception as exc:
+        semantic_authors = []; provider_errors.append({"provider":"semantic_scholar","error":str(exc)[:300]})
+    for author in semantic_authors:
         if not _name_is_exact(name, clean(author.get("name", ""))): continue
         affiliations = [clean(value) for value in (author.get("affiliations") or [])]
         overlaps = _target_overlap(candidate, affiliations)
@@ -726,10 +736,31 @@ def enrich_pedigree(candidate_id: str, *, client: PublicResearchClient | None = 
         url = clean(author.get("url", "")) or f"https://www.semanticscholar.org/author/{author_id}"
         evidence_rows.append({"provider":"semantic_scholar","external_id":author_id,"url":url,"type":"research_record","label":f"h-index {h_index} · {papers} publications · {citations:,} citations","evidence":f"Exact name match. Affiliations: {', '.join(affiliations) or 'not supplied'}." + (f" Matched: {', '.join(overlaps)}." if overlaps else ""),"strength":min(100, h_index*4 + round(math.log1p(citations)*7)),"confidence":confidence,"verified":confidence >= minimum_confidence,"raw":author})
 
+    try: crossref_works = client.crossref_works(name)
+    except Exception as exc:
+        crossref_works = []; provider_errors.append({"provider":"crossref","error":str(exc)[:300]})
+    matched_works = []; crossref_affiliations = []; crossref_orcid = ""
+    for work in crossref_works:
+        for author in work.get("author") or []:
+            author_name = clean(f'{author.get("given", "")} {author.get("family", "")}')
+            if not _name_is_exact(name, author_name): continue
+            matched_works.append(work)
+            crossref_orcid = crossref_orcid or clean(author.get("ORCID", ""))
+            crossref_affiliations.extend(clean(item.get("name", "")) for item in (author.get("affiliation") or []) if item.get("name"))
+            break
+    if matched_works:
+        overlaps = _target_overlap(candidate, crossref_affiliations)
+        confidence = min(96, 52 + (30 if overlaps else 0) + (14 if crossref_orcid else 0))
+        citations = sum(int(work.get("is-referenced-by-count") or 0) for work in matched_works)
+        external_id = crossref_orcid.replace("https://orcid.org/", "") or _normalized_name(name)
+        url = crossref_orcid or f'https://search.crossref.org/?q={urllib.parse.quote(name)}'
+        raw = {"ORCID":crossref_orcid,"works":matched_works[:20],"affiliations":crossref_affiliations}
+        evidence_rows.append({"provider":"crossref","external_id":external_id,"url":url,"type":"publication_record","label":f"{len(matched_works)} matched works · {citations:,} citations","evidence":f"Exact author-name matches. Affiliations: {', '.join(dict.fromkeys(crossref_affiliations)) or 'not supplied'}." + (f" Matched: {', '.join(overlaps)}." if overlaps else ""),"strength":min(100,round(math.log1p(len(matched_works))*15+math.log1p(citations)*8)),"confidence":confidence,"verified":confidence >= minimum_confidence,"raw":raw})
+
     # Two independent academic graphs agreeing on ORCID upgrades both records.
     orcids = defaultdict(list)
     for item in evidence_rows:
-        raw_ids = (item["raw"].get("ids") or {}) if item["provider"] == "openalex" else (item["raw"].get("externalIds") or {})
+        raw_ids = (item["raw"].get("ids") or {}) if item["provider"] == "openalex" else (item["raw"].get("externalIds") or {}) if item["provider"] == "semantic_scholar" else item["raw"]
         orcid = clean(raw_ids.get("orcid", "") or raw_ids.get("ORCID", "")).replace("https://orcid.org/", "")
         if orcid: orcids[orcid].append(item)
     for agreeing in orcids.values():
@@ -746,7 +777,9 @@ def enrich_pedigree(candidate_id: str, *, client: PublicResearchClient | None = 
             conn.execute("UPDATE founder_candidates SET talent_score=CASE WHEN talent_score>? THEN talent_score ELSE ? END,last_verified_at=?,updated_at=? WHERE candidate_id=?", (pedigree_score,pedigree_score,now,now,candidate_id))
         conn.commit()
     recalculate_scores(candidate_id)
-    return {"candidate_id":candidate_id,"matches":len(evidence_rows),"verified":sum(1 for item in evidence_rows if item["verified"])}
+    if provider_errors and len(provider_errors) == 3:
+        raise RuntimeError("All pedigree providers failed: " + "; ".join(f'{item["provider"]}: {item["error"]}' for item in provider_errors))
+    return {"candidate_id":candidate_id,"matches":len(evidence_rows),"verified":sum(1 for item in evidence_rows if item["verified"]),"provider_errors":provider_errors}
 
 
 def discover_talent(*, client: GitHubClient | None = None, maximum: int | None = None) -> dict[str, int]:

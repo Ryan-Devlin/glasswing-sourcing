@@ -112,9 +112,10 @@ def test_pedigree_enrichment_requires_affiliation_or_cross_source_identifier(mon
             return [{"id":"https://openalex.org/A1","display_name":"Jane Smith","works_count":24,"cited_by_count":900,"last_known_institutions":[{"display_name":"MIT"}],"ids":{"orcid":"https://orcid.org/0000-0001"}}]
         def semantic_scholar_authors(self, _name):
             return [{"authorId":"S1","name":"Jane Smith","url":"https://www.semanticscholar.org/author/S1","affiliations":["MIT"],"paperCount":22,"citationCount":880,"hIndex":14,"externalIds":{"ORCID":"0000-0001"}}]
+        def crossref_works(self, _name): return []
 
     result = fs.enrich_pedigree(candidate_id, client=ResearchClient())
-    assert result == {"candidate_id": candidate_id, "matches": 2, "verified": 2}
+    assert result == {"candidate_id": candidate_id, "matches": 2, "verified": 2, "provider_errors": []}
     profile = fs.candidate_profile(candidate_id)
     assert len(profile["pedigree"]) == 2
     assert all(item["verification_status"] == "verified" for item in profile["pedigree"])
@@ -130,6 +131,7 @@ def test_name_only_pedigree_match_never_auto_verifies(monkeypatch, tmp_path):
         def openalex_authors(self, _name):
             return [{"id":"https://openalex.org/A2","display_name":"Jane Smith","works_count":100,"cited_by_count":5000,"last_known_institutions":[],"ids":{}}]
         def semantic_scholar_authors(self, _name): return []
+        def crossref_works(self, _name): return []
 
     result = fs.enrich_pedigree(candidate_id, client=ResearchClient())
     assert result["verified"] == 0
