@@ -134,6 +134,7 @@ from founder_signals import (
     import_people as import_founder_people,
     list_candidates as list_founder_candidates,
     monitoring_jobs as founder_monitoring_jobs,
+    reconcile_direct_github_discoveries,
     resolve_github_identity,
     resolve_identity_manually,
     review_signal as review_founder_signal,
@@ -1878,6 +1879,13 @@ def act_on_founder_candidate(candidate_id: str, update: FounderAnalystAction):
 @app.get("/api/founder-signals/identity-review")
 def founder_identity_review():
     return {"rows": identity_review_queue()}
+
+
+@app.post("/api/founder-signals/identity-review/reconcile", dependencies=[Depends(_require_admin)])
+def reconcile_founder_discovery_identities():
+    changed = reconcile_direct_github_discoveries()
+    record_admin_audit("founder_discovery_identities_reconciled", "founder_signals", f"changed={changed}")
+    return {"ok": True, "changed": changed}
 
 
 @app.post("/api/founder-signals/candidates/{candidate_id}/resolve", dependencies=[Depends(_require_admin)])

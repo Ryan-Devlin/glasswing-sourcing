@@ -83,6 +83,26 @@ def test_multiple_plausible_accounts_are_ambiguous():
     assert fs.identity_state(60, []) == "not_found"
 
 
+def test_direct_github_discovery_identity_is_reconciled_without_monitoring(monkeypatch, tmp_path):
+    setup_store(monkeypatch, tmp_path)
+    candidate_id = fs.create_candidate(person(
+        github_username="jane-source",
+        source_type="github_official_api",
+        monitoring_status="inactive",
+    ))["candidate_id"]
+    with fs._store() as conn:
+        conn.execute(
+            "INSERT INTO github_identity_candidates(identity_id,candidate_id,username,confidence_score,resolution_status,resolution_method,created_at) VALUES (?,?,?,?,?,?,?)",
+            ("identity", candidate_id, "jane-source", 70, "needs_review", "automatic_discovery", fs.utc_now()),
+        )
+        conn.commit()
+    assert fs.reconcile_direct_github_discoveries() == 1
+    profile = fs.candidate_profile(candidate_id)
+    assert profile["identity_confidence"] == 100
+    assert profile["monitoring_status"] == "inactive"
+    assert fs.identity_review_queue() == []
+
+
 def test_github_pagination_uses_next_link():
     calls = []
     def transport(url, _headers):

@@ -661,9 +661,26 @@ def discover_talent(*, client: GitHubClient | None = None, maximum: int | None =
             if result["status"] == "created":
                 discovered += 1; candidate_id = result["candidate_id"]
                 with _store() as conn:
-                    conn.execute("INSERT INTO github_identity_candidates(identity_id,candidate_id,username,profile_url,positive_score,confidence_score,evidence_json,contradictions_json,resolution_status,resolution_method,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(candidate_id,username) DO NOTHING", (str(uuid.uuid4()), candidate_id, login, clean(profile.get("html_url", "")), 70, 70, _json([f'Public GitHub bio matched configured target: {target}']), _json([]), "needs_review", "automatic_discovery", utc_now())); conn.commit()
-                review += 1
+                    now = utc_now()
+                    conn.execute("INSERT INTO github_identity_candidates(identity_id,candidate_id,username,profile_url,positive_score,confidence_score,evidence_json,contradictions_json,resolution_status,resolution_method,resolved_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(candidate_id,username) DO NOTHING", (str(uuid.uuid4()), candidate_id, login, clean(profile.get("html_url", "")), 100, 100, _json(["The candidate record originated from this exact official GitHub API profile", f'Public GitHub bio matched configured target: {target}']), _json([]), "verified", "direct_github_source", now, now))
+                    conn.execute("INSERT INTO verified_github_identities(candidate_id,username,github_user_id,confidence_score,verification_method,verified_at) VALUES (?,?,?,?,?,?) ON CONFLICT(candidate_id) DO NOTHING", (candidate_id, login, str(profile.get("id") or ""), 100, "direct_github_source", now))
+                    conn.execute("UPDATE founder_candidates SET identity_confidence=100,monitoring_status='inactive' WHERE candidate_id=?", (candidate_id,))
+                    conn.commit()
     return {"discovered": discovered, "identity_review": review, "searched_targets": len(targets)}
+
+
+def reconcile_direct_github_discoveries() -> int:
+    """Correct legacy discovery rows whose source already proves identity."""
+    changed = 0; now = utc_now()
+    with _store() as conn:
+        rows = conn.execute("SELECT c.candidate_id,c.github_username,i.identity_id FROM founder_candidates c JOIN github_identity_candidates i ON i.candidate_id=c.candidate_id AND i.username=c.github_username WHERE c.source_type='github_official_api' AND i.resolution_method='automatic_discovery'").fetchall()
+        for row in rows:
+            conn.execute("UPDATE github_identity_candidates SET positive_score=100,confidence_score=100,resolution_status='verified',resolution_method='direct_github_source',resolved_at=? WHERE identity_id=?", (now, row["identity_id"]))
+            conn.execute("INSERT INTO verified_github_identities(candidate_id,username,confidence_score,verification_method,verified_at) VALUES (?,?,?,?,?) ON CONFLICT(candidate_id) DO UPDATE SET username=excluded.username,confidence_score=excluded.confidence_score,verification_method=excluded.verification_method,verified_at=excluded.verified_at", (row["candidate_id"], row["github_username"], 100, "direct_github_source", now))
+            conn.execute("UPDATE founder_candidates SET identity_confidence=100,monitoring_status='inactive',updated_at=? WHERE candidate_id=?", (now, row["candidate_id"]))
+            changed += 1
+        conn.commit()
+    return changed
 
 
 def resolve_github_identity(candidate_id: str, *, client: GitHubClient | None = None) -> dict[str, Any]:
