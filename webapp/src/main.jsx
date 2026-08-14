@@ -3043,7 +3043,11 @@ function FounderProfile({ candidateId, onClose, onChanged }) {
     </div>
     <h3>Signal history</h3>{row.signals?.length ? <div className="signal-list">{row.signals.map((signal) => <article key={signal.signal_id}><strong>{String(signal.signal_type).replaceAll("_"," ")}</strong><span>{new Date(signal.event_at).toLocaleDateString()}</span><p>{signal.explanation}</p><small>{signal.evidence}</small></article>)}</div> : <p className="empty">No credible founder-transition signal yet.</p>}
     <h3>Collaborators</h3>{row.relationships?.length ? <table><tbody>{row.relationships.map((item) => <tr key={item.relationship_id}><td>{item.collaborator_name || item.collaborator_username}</td><td>{item.relationship_type}</td><td>{item.strength}</td></tr>)}</tbody></table> : <p className="muted">No public collaborator links detected.</p>}
-    <div className="form-actions"><select defaultValue={row.analyst_status} onChange={(event) => act("status",event.target.value)} disabled={busy}>{["new","monitoring","priority","contact_now","watch","needs_research","false_positive","not_relevant","archived"].map((value)=><option key={value}>{value}</option>)}</select><button onClick={()=>act("outreach","completed")} disabled={busy}>Mark outreach completed</button></div>
+    <div className="form-actions">
+      <select defaultValue={row.analyst_status} onChange={(event) => act("status",event.target.value)} disabled={busy}>{["new","monitoring","priority","contact_now","watch","needs_research","false_positive","not_relevant","archived"].map((value)=><option key={value}>{value}</option>)}</select>
+      <button onClick={()=>act("monitoring",row.monitoring_status === "active" ? "inactive" : "active")} disabled={busy}>{row.monitoring_status === "active" ? "Stop monitoring" : "Start monitoring"}</button>
+      <button onClick={()=>act("outreach","completed")} disabled={busy}>Mark outreach completed</button>
+    </div>
   </div></div>;
 }
 function FounderSignalsPage() {
