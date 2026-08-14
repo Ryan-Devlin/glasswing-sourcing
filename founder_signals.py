@@ -27,6 +27,7 @@ from common import clean, stable_domain
 
 
 SIGNAL_VERSION = "founder-signals-v1"
+PEDIGREE_VERSION = "founder-pedigree-v1"
 DEFAULT_COMPANIES = [
     "OpenAI", "Anthropic", "Google DeepMind", "Google Research", "Meta FAIR",
     "NVIDIA", "Microsoft Research", "Palantir", "Anduril", "Databricks",
@@ -149,6 +150,17 @@ def migrate_founder_signals(conn, *, postgres: bool = False) -> None:
         UNIQUE(candidate_id,source_url), FOREIGN KEY(candidate_id) REFERENCES founder_candidates(candidate_id)
     );
     CREATE INDEX IF NOT EXISTS idx_founder_sources_url ON founder_sources(source_url);
+    CREATE TABLE IF NOT EXISTS founder_pedigree_evidence (
+        evidence_id TEXT PRIMARY KEY, candidate_id TEXT NOT NULL, provider TEXT NOT NULL,
+        evidence_type TEXT NOT NULL, label TEXT NOT NULL, evidence TEXT NOT NULL DEFAULT '',
+        source_url TEXT NOT NULL, strength INTEGER NOT NULL DEFAULT 0,
+        confidence INTEGER NOT NULL DEFAULT 0, verification_status TEXT NOT NULL DEFAULT 'needs_review',
+        external_id TEXT NOT NULL DEFAULT '', raw_json TEXT NOT NULL DEFAULT '{{}}',
+        checked_at TEXT NOT NULL, rule_version TEXT NOT NULL,
+        UNIQUE(candidate_id,provider,evidence_type,external_id),
+        FOREIGN KEY(candidate_id) REFERENCES founder_candidates(candidate_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_founder_pedigree_candidate ON founder_pedigree_evidence(candidate_id,verification_status,confidence DESC);
     CREATE TABLE IF NOT EXISTS github_identity_candidates (
         identity_id TEXT PRIMARY KEY, candidate_id TEXT NOT NULL, username TEXT NOT NULL,
         profile_url TEXT NOT NULL DEFAULT '', positive_score INTEGER NOT NULL DEFAULT 0,
@@ -268,6 +280,8 @@ def migrate_founder_signals(conn, *, postgres: bool = False) -> None:
         "collection_frequency_hours": 24,
         "maximum_people_per_run": 200,
         "automatic_monitoring_confidence": 90,
+        "pedigree_minimum_score": 75,
+        "pedigree_minimum_confidence": 80,
         "event_retention_days": 0,
         "notification_preferences": {"dashboard": True, "daily": False, "weekly": True, "immediate_threshold": 85},
     }
@@ -299,7 +313,8 @@ def update_settings(values: dict[str, Any], *, actor: str = "admin") -> dict[str
     allowed = {
         "target_companies", "target_universities", "target_laboratories", "technical_categories",
         "signal_weights", "score_weights", "minimum_alert_threshold", "collection_frequency_hours",
-        "maximum_people_per_run", "automatic_monitoring_confidence", "event_retention_days",
+        "maximum_people_per_run", "automatic_monitoring_confidence", "pedigree_minimum_score",
+        "pedigree_minimum_confidence", "event_retention_days",
         "notification_preferences",
     }
     now = utc_now()
@@ -516,6 +531,7 @@ def candidate_profile(candidate_id: str) -> dict[str, Any] | None:
             "activity_daily": ("founder_activity_daily", "metric_date DESC"),
             "activity_monthly": ("founder_activity_monthly", "metric_month DESC"),
             "reviews": ("founder_analyst_reviews", "created_at DESC"),
+            "pedigree": ("founder_pedigree_evidence", "confidence DESC, strength DESC"),
         }
         for key, (table, order) in tables.items():
             result[key] = [dict(item) for item in conn.execute(f"SELECT * FROM {table} WHERE candidate_id=? ORDER BY {order} LIMIT 200", (candidate_id,)).fetchall()]
@@ -634,6 +650,103 @@ class GitHubClient:
             if not match: break
             url = match.group(1)
         return output
+
+
+class PublicResearchClient:
+    """Free structured research sources; transport injection keeps it testable."""
+    def __init__(self, *, transport=None, timeout: float = 15.0):
+        self.transport = transport or self._urlopen
+        self.timeout = timeout
+
+    def _urlopen(self, url: str, headers: dict[str, str]):
+        request = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            return response.status, dict(response.headers), response.read()
+
+    def _get(self, url: str) -> dict[str, Any]:
+        headers = {"Accept": "application/json", "User-Agent": "Glasswing-Founder-Signals/1.0 (public research enrichment)"}
+        status, _, body = self.transport(url, headers)
+        if status >= 400:
+            raise RuntimeError(f"Public research provider returned HTTP {status}")
+        value = json.loads(body.decode("utf-8"))
+        return value if isinstance(value, dict) else {}
+
+    def openalex_authors(self, name: str) -> list[dict[str, Any]]:
+        query = urllib.parse.urlencode({"search": name, "per_page": 5})
+        return list(self._get(f"https://api.openalex.org/authors?{query}").get("results") or [])
+
+    def semantic_scholar_authors(self, name: str) -> list[dict[str, Any]]:
+        fields = "name,url,affiliations,paperCount,citationCount,hIndex,externalIds,papers.title,papers.year,papers.citationCount"
+        query = urllib.parse.urlencode({"query": name, "limit": 5, "fields": fields})
+        return list(self._get(f"https://api.semanticscholar.org/graph/v1/author/search?{query}").get("data") or [])
+
+
+def _name_is_exact(expected: str, actual: str) -> bool:
+    return bool(expected and actual and _normalized_name(expected) == _normalized_name(actual))
+
+
+def _target_overlap(candidate: dict[str, Any], values: Iterable[str]) -> list[str]:
+    haystack = " ".join(clean(value).lower() for value in values if value)
+    targets = [candidate.get("current_employer", ""), candidate.get("school", ""), candidate.get("research_laboratory", "")]
+    return [clean(target) for target in targets if clean(target) and clean(target).lower() in haystack]
+
+
+def enrich_pedigree(candidate_id: str, *, client: PublicResearchClient | None = None) -> dict[str, Any]:
+    """Find cited pedigree evidence without treating a name-only hit as verified."""
+    client = client or PublicResearchClient()
+    settings = founder_settings()
+    minimum_confidence = int(settings.get("pedigree_minimum_confidence", 80))
+    with _store(True) as conn:
+        row = conn.execute("SELECT * FROM founder_candidates WHERE candidate_id=?", (candidate_id,)).fetchone()
+        if not row: raise ValueError("Candidate not found")
+        candidate = dict(row)
+    name = clean(candidate.get("full_name", ""))
+    if not name: raise ValueError("Candidate has no full name")
+    now = utc_now(); evidence_rows: list[dict[str, Any]] = []
+
+    for author in client.openalex_authors(name):
+        if not _name_is_exact(name, clean(author.get("display_name", ""))): continue
+        institutions = [clean(item.get("display_name", "")) for item in (author.get("last_known_institutions") or [])]
+        for affiliation in author.get("affiliations") or []:
+            institution = affiliation.get("institution") or {}
+            if institution.get("display_name"): institutions.append(clean(institution["display_name"]))
+        overlaps = _target_overlap(candidate, institutions)
+        orcid = clean((author.get("ids") or {}).get("orcid", ""))
+        confidence = min(96, 52 + (30 if overlaps else 0) + (14 if orcid else 0))
+        author_id = clean(author.get("id", "")); works = int(author.get("works_count") or 0); citations = int(author.get("cited_by_count") or 0)
+        evidence_rows.append({"provider":"openalex","external_id":author_id,"url":author_id,"type":"research_record","label":f"{works} publications · {citations:,} citations","evidence":f"Exact name match. Institutions: {', '.join(dict.fromkeys(institutions)) or 'not supplied'}." + (f" Matched: {', '.join(overlaps)}." if overlaps else ""),"strength":min(100, round(math.log1p(works)*10 + math.log1p(citations)*9)),"confidence":confidence,"verified":confidence >= minimum_confidence,"raw":author})
+
+    for author in client.semantic_scholar_authors(name):
+        if not _name_is_exact(name, clean(author.get("name", ""))): continue
+        affiliations = [clean(value) for value in (author.get("affiliations") or [])]
+        overlaps = _target_overlap(candidate, affiliations)
+        orcid = clean((author.get("externalIds") or {}).get("ORCID", ""))
+        confidence = min(96, 52 + (30 if overlaps else 0) + (14 if orcid else 0))
+        author_id = clean(author.get("authorId", "")); papers = int(author.get("paperCount") or 0); citations = int(author.get("citationCount") or 0); h_index = int(author.get("hIndex") or 0)
+        url = clean(author.get("url", "")) or f"https://www.semanticscholar.org/author/{author_id}"
+        evidence_rows.append({"provider":"semantic_scholar","external_id":author_id,"url":url,"type":"research_record","label":f"h-index {h_index} · {papers} publications · {citations:,} citations","evidence":f"Exact name match. Affiliations: {', '.join(affiliations) or 'not supplied'}." + (f" Matched: {', '.join(overlaps)}." if overlaps else ""),"strength":min(100, h_index*4 + round(math.log1p(citations)*7)),"confidence":confidence,"verified":confidence >= minimum_confidence,"raw":author})
+
+    # Two independent academic graphs agreeing on ORCID upgrades both records.
+    orcids = defaultdict(list)
+    for item in evidence_rows:
+        raw_ids = (item["raw"].get("ids") or {}) if item["provider"] == "openalex" else (item["raw"].get("externalIds") or {})
+        orcid = clean(raw_ids.get("orcid", "") or raw_ids.get("ORCID", "")).replace("https://orcid.org/", "")
+        if orcid: orcids[orcid].append(item)
+    for agreeing in orcids.values():
+        if len({item["provider"] for item in agreeing}) >= 2:
+            for item in agreeing: item["confidence"] = max(item["confidence"], 98); item["verified"] = True
+
+    with _store() as conn:
+        for item in evidence_rows:
+            conn.execute("INSERT INTO founder_pedigree_evidence(evidence_id,candidate_id,provider,evidence_type,label,evidence,source_url,strength,confidence,verification_status,external_id,raw_json,checked_at,rule_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(candidate_id,provider,evidence_type,external_id) DO UPDATE SET label=excluded.label,evidence=excluded.evidence,source_url=excluded.source_url,strength=excluded.strength,confidence=excluded.confidence,verification_status=excluded.verification_status,raw_json=excluded.raw_json,checked_at=excluded.checked_at,rule_version=excluded.rule_version", (str(uuid.uuid4()),candidate_id,item["provider"],item["type"],item["label"],item["evidence"][:1200],item["url"],item["strength"],item["confidence"],"verified" if item["verified"] else "needs_review",item["external_id"],_json(item["raw"]),now,PEDIGREE_VERSION))
+            conn.execute("INSERT INTO founder_sources(source_id,candidate_id,source_type,source_url,raw_source_name,extraction_method,match_confidence,discovered_at) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(candidate_id,source_url) DO UPDATE SET match_confidence=excluded.match_confidence,discovered_at=excluded.discovered_at", (str(uuid.uuid4()),candidate_id,item["provider"],item["url"],item["label"],"structured_public_api",item["confidence"],now))
+        verified = [item for item in evidence_rows if item["verified"]]
+        if verified:
+            pedigree_score = max(item["strength"] for item in verified)
+            conn.execute("UPDATE founder_candidates SET talent_score=CASE WHEN talent_score>? THEN talent_score ELSE ? END,last_verified_at=?,updated_at=? WHERE candidate_id=?", (pedigree_score,pedigree_score,now,now,candidate_id))
+        conn.commit()
+    recalculate_scores(candidate_id)
+    return {"candidate_id":candidate_id,"matches":len(evidence_rows),"verified":sum(1 for item in evidence_rows if item["verified"])}
 
 
 def discover_talent(*, client: GitHubClient | None = None, maximum: int | None = None) -> dict[str, int]:
@@ -939,6 +1052,10 @@ def run_monitoring_job(job_id: str, *, client: GitHubClient | None = None) -> di
         except Exception as exc:
             attempted = 1; failed = 1; errors.append({"candidate_id": "", "error": str(exc)}); ids = []
     elif candidate_id: ids = [candidate_id]
+    elif job_type == "pedigree_enrichment":
+        with _store(True) as conn:
+            limit = int(founder_settings().get("maximum_people_per_run", 200))
+            ids = [str(row["candidate_id"]) for row in conn.execute("SELECT candidate_id FROM founder_candidates WHERE synthetic=FALSE AND archived_at='' ORDER BY last_verified_at,created_at LIMIT ?", (limit,)).fetchall()]
     else:
         with _store(True) as conn:
             limit = int(founder_settings().get("maximum_people_per_run", 200))
@@ -947,6 +1064,7 @@ def run_monitoring_job(job_id: str, *, client: GitHubClient | None = None) -> di
         attempted += 1
         try:
             if job_type == "identity_resolution": resolve_github_identity(item, client=client)
+            elif job_type == "pedigree_enrichment": enrich_pedigree(item)
             elif job_type in {"github_collection", "full_refresh"}: collect_candidate(item, client=client)
             elif job_type == "score_recalculation": recalculate_scores(item)
             else: raise ValueError("Unsupported job type")

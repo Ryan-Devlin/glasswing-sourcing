@@ -103,6 +103,41 @@ def test_direct_github_discovery_identity_is_reconciled_without_monitoring(monke
     assert fs.identity_review_queue() == []
 
 
+def test_pedigree_enrichment_requires_affiliation_or_cross_source_identifier(monkeypatch, tmp_path):
+    setup_store(monkeypatch, tmp_path)
+    candidate_id = fs.create_candidate(person(talent_score=40, monitoring_status="inactive"))["candidate_id"]
+
+    class ResearchClient:
+        def openalex_authors(self, _name):
+            return [{"id":"https://openalex.org/A1","display_name":"Jane Smith","works_count":24,"cited_by_count":900,"last_known_institutions":[{"display_name":"MIT"}],"ids":{"orcid":"https://orcid.org/0000-0001"}}]
+        def semantic_scholar_authors(self, _name):
+            return [{"authorId":"S1","name":"Jane Smith","url":"https://www.semanticscholar.org/author/S1","affiliations":["MIT"],"paperCount":22,"citationCount":880,"hIndex":14,"externalIds":{"ORCID":"0000-0001"}}]
+
+    result = fs.enrich_pedigree(candidate_id, client=ResearchClient())
+    assert result == {"candidate_id": candidate_id, "matches": 2, "verified": 2}
+    profile = fs.candidate_profile(candidate_id)
+    assert len(profile["pedigree"]) == 2
+    assert all(item["verification_status"] == "verified" for item in profile["pedigree"])
+    assert profile["talent_score"] > 40
+    assert profile["monitoring_status"] == "inactive"
+
+
+def test_name_only_pedigree_match_never_auto_verifies(monkeypatch, tmp_path):
+    setup_store(monkeypatch, tmp_path)
+    candidate_id = fs.create_candidate(person(current_employer="Anthropic", school="", talent_score=40))["candidate_id"]
+
+    class ResearchClient:
+        def openalex_authors(self, _name):
+            return [{"id":"https://openalex.org/A2","display_name":"Jane Smith","works_count":100,"cited_by_count":5000,"last_known_institutions":[],"ids":{}}]
+        def semantic_scholar_authors(self, _name): return []
+
+    result = fs.enrich_pedigree(candidate_id, client=ResearchClient())
+    assert result["verified"] == 0
+    profile = fs.candidate_profile(candidate_id)
+    assert profile["pedigree"][0]["verification_status"] == "needs_review"
+    assert profile["talent_score"] == 40
+
+
 def test_github_pagination_uses_next_link():
     calls = []
     def transport(url, _headers):
