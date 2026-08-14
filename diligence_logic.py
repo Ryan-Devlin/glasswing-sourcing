@@ -86,6 +86,7 @@ def clamp_words(value: str, limit: int) -> str:
 
 
 GREEN_FLAG_LABELS = {
+    "founder_identity": "Named founder",
     "ivy_league_spinout": "Ivy League spinout",
     "top_university_spinout": "University spinout",
     "ex_big_tech": "Ex-big tech team",

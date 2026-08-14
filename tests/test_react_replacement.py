@@ -77,6 +77,12 @@ def test_react_app_has_every_primary_page_and_no_streamlit_dependency():
     assert "<RunFilters running={Boolean(desiredRunning)} />" in source
     assert "<CompaniesTable showRunScope={false} />" in source
     assert "<CompaniesTable showRunScope />" in source
+    assert "function FastReviewQueue()" in source
+    assert "<FastReviewQueue />" in source
+    assert 'event.key.toLowerCase() === "y"' in source
+    assert 'event.key.toLowerCase() === "r"' in source
+    assert 'event.key.toLowerCase() === "t"' in source
+    assert "Decisions save immediately and advance the queue" in source
     assert "clamp-text" in source
     assert "Claude’s strongest investment recommendations" in source
     # Fetch enough candidates to backfill the eight-card view after tracked

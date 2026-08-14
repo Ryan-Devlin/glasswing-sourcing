@@ -158,11 +158,20 @@ function GreenFlagTags({ row }) {
   if (!flags.length) return null;
   return (
     <div className="green-flag-tags" aria-label="Positive diligence signals">
-      {flags.slice(0, 4).map((flag) => (
-        <span className="green-flag" key={flag.type || flag.label} title={flag.evidence || "Verified by Claude diligence"}>
-          {flag.label}
-        </span>
-      ))}
+      {flags.slice(0, 4).map((flag) => {
+        const source = /^https?:\/\//i.test(String(flag.source || "")) ? flag.source : "";
+        const Tag = source ? "a" : "span";
+        return (
+          <Tag
+            className="green-flag"
+            key={flag.type || flag.label}
+            title={flag.evidence || "Verified by diligence"}
+            {...(source ? { href: source, target: "_blank", rel: "noreferrer" } : {})}
+          >
+            {flag.label}
+          </Tag>
+        );
+      })}
     </div>
   );
 }
@@ -820,6 +829,160 @@ function RejectButton({ row, onSaved, className = "card-dismiss" }) {
   </>;
 }
 
+function FastReviewQueue() {
+  const { admin, requestLogin } = useAdmin();
+  const [wave, setWave] = useState(0);
+  const [cursor, setCursor] = useState(0);
+  const [dismissed, setDismissed] = useState([]);
+  const [reason, setReason] = useState("wrong_fit");
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState("");
+  const [message, setMessage] = useState("");
+  const result = useApi(
+    `/api/classifications?bucket=review&scope=history&page=1&page_size=25&sort=Recently%20classified&t=${wave}`,
+    [wave],
+  );
+  const rows = (result.data?.rows || []).filter((row) =>
+    !row.hidden && !row.tracked && !row.manual_override && !dismissed.includes(row.domain)
+  );
+  const activeIndex = rows.length ? Math.min(cursor, rows.length - 1) : 0;
+  const row = rows[activeIndex];
+  const flash = (value) => {
+    setMessage(value);
+    setTimeout(() => setMessage(""), 2200);
+  };
+  const finish = (domain, value) => {
+    setDismissed((current) => [...current, domain]);
+    setCursor((current) => Math.min(current, Math.max(0, rows.length - 2)));
+    setNote("");
+    flash(value);
+  };
+  const decide = async (label) => {
+    if (!row || busy) return;
+    if (!admin) return requestLogin();
+    setBusy(label);
+    try {
+      await api("/api/labels", {
+        method: "POST",
+        body: JSON.stringify({
+          domain: row.domain,
+          label,
+          rating: Number(row.fit_score || 0),
+          reason: label === "no"
+            ? `manual_reject:${reason}${note.trim() ? ` — ${note.trim()}` : ""}`
+            : "fast_review_yes",
+        }),
+      });
+      finish(row.domain, `${row.domain} saved to ${label.toUpperCase()}`);
+    } catch (error) {
+      flash(error.payload?.detail || error.message || "Decision could not be saved");
+    } finally {
+      setBusy("");
+    }
+  };
+  const track = async () => {
+    if (!row || busy) return;
+    if (!admin) return requestLogin();
+    setBusy("track");
+    try {
+      await api("/api/tracking", {
+        method: "POST",
+        body: JSON.stringify({ domain: row.domain }),
+      });
+      finish(row.domain, `${row.domain} moved to Tracking`);
+      window.dispatchEvent(new CustomEvent("tracking-changed"));
+    } catch (error) {
+      flash(error.payload?.detail || error.message || "Company could not be tracked");
+    } finally {
+      setBusy("");
+    }
+  };
+  useEffect(() => {
+    const onKeyDown = (event) => {
+      const tag = String(event.target?.tagName || "").toLowerCase();
+      if (["input", "textarea", "select"].includes(tag) || event.metaKey || event.ctrlKey || event.altKey) return;
+      if (event.key.toLowerCase() === "y") { event.preventDefault(); decide("yes"); }
+      if (event.key.toLowerCase() === "r") { event.preventDefault(); decide("no"); }
+      if (event.key.toLowerCase() === "t") { event.preventDefault(); track(); }
+      if (event.key === "ArrowLeft") { event.preventDefault(); setCursor((value) => Math.max(0, value - 1)); }
+      if (event.key === "ArrowRight") { event.preventDefault(); setCursor((value) => Math.min(rows.length - 1, value + 1)); }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [row, busy, admin, reason, note, rows.length]);
+
+  return (
+    <section className="fast-review">
+      <div className="section-title">
+        <div>
+          <h2>Fast review</h2>
+          <p>One deal at a time. Decisions save immediately and advance the queue.</p>
+        </div>
+        <div className="review-shortcuts" aria-label="Keyboard shortcuts">
+          <span><kbd>Y</kbd> YES</span><span><kbd>R</kbd> Reject</span>
+          <span><kbd>T</kbd> Track</span><span><kbd>←</kbd><kbd>→</kbd> Browse</span>
+        </div>
+      </div>
+      {message && <p className="notice inline-notice">{message}</p>}
+      {result.loading && !result.data ? <Loading /> : result.error && !result.data ? (
+        <ErrorBox>{result.error}</ErrorBox>
+      ) : !row ? (
+        <div className="empty fast-review-empty">
+          <strong>Review wave complete.</strong>
+          <button onClick={() => { setDismissed([]); setCursor(0); setWave((value) => value + 1); }}>Load next deals</button>
+        </div>
+      ) : (
+        <div className="review-focus-card">
+          <div className="review-focus-main">
+            <div className="top-pick-head">
+              <span className="score-ring" title={scorecardTitle(row)}>{row.fit_score}<small>/100</small></span>
+              <span className="pill">{activeIndex + 1} of {rows.length}</span>
+            </div>
+            <h3>{row.company_name || row.domain}</h3>
+            <a href={row.final_url || `https://${row.domain}`} target="_blank" rel="noreferrer">{row.domain}</a>
+            <div className="review-focus-meta">
+              <span>{String(row.thesis_pillar || "Uncategorized").replaceAll("_", " ")}</span>
+              {row.claude_decision && <ClaudeReviewBadge row={row} prefix="Claude " />}
+            </div>
+            <p>{row.description || "No useful description was retained."}</p>
+            <GreenFlagTags row={row} />
+          </div>
+          <div className="review-focus-controls">
+            <label>
+              Rejection reason
+              <select value={reason} onChange={(event) => setReason(event.target.value)}>
+                <option value="wrong_fit">Wrong thesis fit</option>
+                <option value="crowded_market">Crowded market</option>
+                <option value="weak_product">Weak or unclear product</option>
+                <option value="services_consulting">Services or consulting</option>
+                <option value="consumer">Consumer company</option>
+                <option value="too_late_stage">Too late-stage</option>
+                <option value="portfolio_conflict">Too close to portfolio</option>
+                <option value="wrong_geography">Wrong geography</option>
+                <option value="not_a_company">Not a real company</option>
+                <option value="other">Other</option>
+              </select>
+            </label>
+            <label>
+              Optional note
+              <input value={note} maxLength="240" onChange={(event) => setNote(event.target.value)} placeholder="One useful sentence for calibration" />
+            </label>
+            <div className="review-focus-actions">
+              <button className="yes" disabled={Boolean(busy)} onClick={() => decide("yes")}><kbd>Y</kbd> YES</button>
+              <button className="track-review" disabled={Boolean(busy)} onClick={track}><kbd>T</kbd> Track</button>
+              <button className="no" disabled={Boolean(busy)} onClick={() => decide("no")}><kbd>R</kbd> Reject</button>
+            </div>
+            <div className="review-browse-actions">
+              <button disabled={activeIndex === 0} onClick={() => setCursor((value) => Math.max(0, value - 1))}>← Previous</button>
+              <button disabled={activeIndex >= rows.length - 1} onClick={() => setCursor((value) => Math.min(rows.length - 1, value + 1))}>Skip →</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function HomePage() {
   const overview = useApi("/api/overview", []);
   const d = overview.data;
@@ -831,6 +994,7 @@ function HomePage() {
         <p>Prioritize, track, and advance the strongest new deal flow.</p>
       </header>
       <TrackingDeals />
+      <FastReviewQueue />
       <GoodDeals />
       <section>
         <div className="section-title">

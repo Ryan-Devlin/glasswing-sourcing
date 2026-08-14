@@ -1243,10 +1243,19 @@ def founder_green_flags(text: str) -> list[dict[str, str]]:
         "founder", "cofounder", "co-founder", "our team", "leadership",
         "previously at", "formerly at", "alumni", "graduate",
     ])
-    contexts = [
-        sentence for sentence in sentences
+    founder_indexes = [
+        index for index, sentence in enumerate(sentences)
         if any(term in sentence.lower() for term in founder_terms)
     ]
+    # Team pages commonly put the name, prior employer, school, and research
+    # in adjacent sentences. Keep a one-sentence neighborhood around explicit
+    # founder language while still excluding unrelated logos and testimonials.
+    context_indexes = sorted({
+        nearby
+        for index in founder_indexes[:12]
+        for nearby in range(max(0, index - 1), min(len(sentences), index + 2))
+    })
+    contexts = [sentences[index] for index in context_indexes]
     # Keep the evidence close to founder/team language. This prevents customer
     # logos and integration lists from creating fake pedigree tags.
     context = " ".join(contexts[:12])
@@ -1267,6 +1276,22 @@ def founder_green_flags(text: str) -> list[dict[str, str]]:
             "evidence": clean(evidence)[:220],
             "source": "website",
         })
+
+    # Only accept names attached to explicit founder grammar. Avoid guessing
+    # from page headings, customer quotes, or generic team-member lists.
+    founder_patterns = [
+        r"(?:founded|co-founded) by\s+([A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){1,2})",
+        r"([A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){1,2})\s*,?\s+(?:co-?founder|founder)(?:\s|[,.])",
+    ]
+    for sentence in contexts:
+        for pattern in founder_patterns:
+            match = re.search(pattern, sentence)
+            if match:
+                founder_name = match.group(1).rstrip(".,")
+                add("founder_identity", f"Founder · {founder_name}", sentence)
+                break
+        if any(flag["type"] == "founder_identity" for flag in flags):
+            break
 
     school_hits = occurrences(context, STRONG_US_SCHOOLS)
     ivy = {
@@ -1302,6 +1327,18 @@ def founder_green_flags(text: str) -> list[dict[str, str]]:
             context,
         )
         add("prior_exit", "Prior founder exit", evidence)
+    if occurrences(context, [
+        "patent holder", "patent pending", "patented", "published research",
+        "peer-reviewed", "research breakthrough",
+    ]):
+        evidence = next(
+            (s for s in contexts if any(term in s.lower() for term in (
+                "patent", "published research", "peer-reviewed",
+                "research breakthrough",
+            ))),
+            context,
+        )
+        add("deep_tech_ip", "Founder technical IP", evidence)
     return flags
 
 

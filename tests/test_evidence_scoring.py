@@ -39,6 +39,17 @@ def test_founder_context_creates_evidence_backed_tags():
     assert all(flag["evidence"] and flag["source"] == "website" for flag in flags)
 
 
+def test_founder_enrichment_extracts_named_founder_and_adjacent_ip():
+    flags = founder_green_flags(
+        "Acme was founded by Jane Smith. Jane Smith previously worked at "
+        "Google and holds patented infrastructure research."
+    )
+    labels = {flag["label"] for flag in flags}
+    assert "Founder · Jane Smith" in labels
+    assert "Ex-Google" in labels
+    assert "Founder technical IP" in labels
+
+
 def test_scorecard_is_bounded_and_explainable():
     card = scorecard_from_evidence(
         counts={"defensibility": 9},

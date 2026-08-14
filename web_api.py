@@ -731,6 +731,11 @@ def _finish_label_side_effects(update: LabelUpdate, reason: str) -> None:
         record_admin_audit("label_set", update.domain, f"{update.label} score {update.rating}")
     except Exception as exc:
         print(f"Label audit deferred for {update.domain}: {exc}", file=sys.stderr)
+    if update.label == "yes":
+        try:
+            enrich_green_flags([update.domain])
+        except Exception as exc:
+            print(f"Founder enrichment deferred for {update.domain}: {exc}", file=sys.stderr)
     try:
         from model_evaluation import write_performance_metrics
 

@@ -100,7 +100,7 @@ Return ONLY these tags, with no prose before or after:
 <funding_evidence>eighteen words maximum</funding_evidence>
 <location_evidence>eighteen words maximum</location_evidence>
 <positive_evidence>thirty-five words maximum</positive_evidence>
-<green_flags>up to four evidence-backed flags separated by | using type::short label::concrete evidence; allowed types: ivy_league_spinout, top_university_spinout, ex_big_tech, repeat_founder, prior_exit, top_accelerator, enterprise_traction, government_validation, strategic_backing, deep_tech_ip; use none when unverified</green_flags>
+<green_flags>up to four evidence-backed flags separated by | using type::short label::concrete evidence; allowed types: founder_identity, ivy_league_spinout, top_university_spinout, ex_big_tech, repeat_founder, prior_exit, top_accelerator, enterprise_traction, government_validation, strategic_backing, deep_tech_ip; use none when unverified</green_flags>
 <negative_evidence>twenty-five words maximum; "none" if none</negative_evidence>
 <unknowns>twenty-five words maximum; "none" if none</unknowns>
 """
