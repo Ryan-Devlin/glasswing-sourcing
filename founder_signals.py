@@ -969,12 +969,23 @@ def seed_demo_data() -> dict[str, int]:
     for index, (name, employer, title, talent, fit, username, status) in enumerate(scenarios):
         with _store(True) as conn:
             exists = conn.execute("SELECT candidate_id FROM founder_candidates WHERE github_username=?", (username,)).fetchone()
-        if exists: continue
-        result = create_candidate({"full_name": name, "current_employer": employer, "current_title": title, "school": "Stanford" if index % 2 else "MIT", "technical_categories": ["AI infrastructure" if index % 2 else "Robotics"], "github_username": username, "github_profile_url": f"https://github.com/{username}", "talent_score": talent, "glasswing_fit_score": fit, "identity_confidence": 96 if index != 6 else 74, "monitoring_status": "active", "analyst_status": status, "source_type": "synthetic_demo", "source_url": f"https://example.invalid/{username}", "synthetic": True})
+        if exists:
+            # Demo identities are intentionally fake and must never spend API
+            # quota when a real GitHub token is configured later.
+            with _store() as conn:
+                conn.execute(
+                    "UPDATE founder_candidates SET monitoring_status='inactive' "
+                    "WHERE candidate_id=? AND synthetic=TRUE",
+                    (exists["candidate_id"],),
+                )
+                conn.commit()
+            continue
+        result = create_candidate({"full_name": name, "current_employer": employer, "current_title": title, "school": "Stanford" if index % 2 else "MIT", "technical_categories": ["AI infrastructure" if index % 2 else "Robotics"], "github_username": username, "github_profile_url": f"https://github.com/{username}", "talent_score": talent, "glasswing_fit_score": fit, "identity_confidence": 96 if index != 6 else 74, "monitoring_status": "inactive", "analyst_status": status, "source_type": "synthetic_demo", "source_url": f"https://example.invalid/{username}", "synthetic": True})
         if result["status"] != "created": continue
         candidate_id = result["candidate_id"]; created += 1
         with _store() as conn:
             verify_identity(conn, candidate_id, username, 96 if index != 6 else 74, "synthetic")
+            conn.execute("UPDATE founder_candidates SET monitoring_status='inactive' WHERE candidate_id=?", (candidate_id,))
             if index == 6:
                 conn.execute("INSERT INTO github_identity_candidates(identity_id,candidate_id,username,profile_url,positive_score,confidence_score,evidence_json,contradictions_json,resolution_status,resolution_method,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)", (str(uuid.uuid4()), candidate_id, "avery-alt-synthetic", "https://github.com/avery-alt-synthetic", 73, 73, _json(["Name matches"]), _json(["Employer unavailable"]), "ambiguous", "synthetic", utc_now()))
             conn.commit()
