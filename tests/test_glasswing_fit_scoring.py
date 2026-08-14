@@ -131,6 +131,14 @@ class GlasswingFitScoringTests(unittest.TestCase):
         )
         self.assertFalse(is_wrapper)
 
+    def test_generic_executive_ai_mentor_is_filtered(self):
+        is_wrapper, evidence = commodity_wrapper_assessment(
+            "The executive AI mentor for leaders. Turn any initiative into a "
+            "structured execution plan with document analysis and prompts."
+        )
+        self.assertTrue(is_wrapper)
+        self.assertIn("executive ai mentor", evidence)
+
     def test_video_security_company_gets_defense_not_physical_ai_pillar(self):
         # "physical security"/"video security" used to appear in both
         # physical_ai's and intelligent_enterprise_defense's term lists --

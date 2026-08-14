@@ -992,6 +992,16 @@ tbody tr:hover {
   color: #76676a;
   font-size: 11px;
 }
+.keyboard-toggle {
+  min-height: 30px;
+  padding: 5px 10px;
+  font-size: 11px;
+}
+.keyboard-toggle.active {
+  color: #176847;
+  border-color: #bfe4d3;
+  background: #eaf7f0;
+}
 kbd {
   display: inline-flex;
   min-width: 22px;

@@ -3078,6 +3078,8 @@ def commodity_wrapper_assessment(text: str) -> tuple[bool, list[str]]:
         "build test and run ai agents", "build, test, and run ai agents",
         "deploy autonomous ai agents", "custom llm solutions",
         "custom ai solutions", "ai integration services",
+        "executive ai mentor", "ai mentor", "ai executive coach",
+        "ai leadership coach", "ai business coach", "ai career coach",
     ]
 
     strong_hits = [term for term in strong if term in lower]
@@ -3094,6 +3096,8 @@ def commodity_wrapper_assessment(text: str) -> tuple[bool, list[str]]:
             "build test and run ai agents", "build, test, and run ai agents",
             "deploy autonomous ai agents", "custom llm solutions",
             "custom ai solutions", "ai integration services",
+            "executive ai mentor", "ai mentor", "ai executive coach",
+            "ai leadership coach", "ai business coach", "ai career coach",
         ))
         and not any(term in lower for term in (
             "manufacturing", "factory", "industrial", "robotics",

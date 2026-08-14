@@ -838,6 +838,7 @@ function FastReviewQueue() {
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState("");
   const [message, setMessage] = useState("");
+  const [keyboardEnabled, setKeyboardEnabled] = useState(false);
   const result = useApi(
     `/api/classifications?bucket=review&scope=history&page=1&page_size=25&sort=Recently%20classified&t=${wave}`,
     [wave],
@@ -898,6 +899,7 @@ function FastReviewQueue() {
     }
   };
   useEffect(() => {
+    if (!keyboardEnabled) return undefined;
     const onKeyDown = (event) => {
       const tag = String(event.target?.tagName || "").toLowerCase();
       if (["input", "textarea", "select"].includes(tag) || event.metaKey || event.ctrlKey || event.altKey) return;
@@ -909,7 +911,7 @@ function FastReviewQueue() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [row, busy, admin, reason, note, rows.length]);
+  }, [row, busy, admin, reason, note, rows.length, keyboardEnabled]);
 
   return (
     <section className="fast-review">
@@ -919,8 +921,17 @@ function FastReviewQueue() {
           <p>One deal at a time. Decisions save immediately and advance the queue.</p>
         </div>
         <div className="review-shortcuts" aria-label="Keyboard shortcuts">
-          <span><kbd>Y</kbd> YES</span><span><kbd>R</kbd> Reject</span>
-          <span><kbd>T</kbd> Track</span><span><kbd>←</kbd><kbd>→</kbd> Browse</span>
+          <button
+            className={keyboardEnabled ? "keyboard-toggle active" : "keyboard-toggle"}
+            aria-pressed={keyboardEnabled}
+            onClick={() => setKeyboardEnabled((value) => !value)}
+          >
+            Keyboard {keyboardEnabled ? "on" : "off"}
+          </button>
+          {keyboardEnabled && <>
+            <span><kbd>Y</kbd> YES</span><span><kbd>R</kbd> Reject</span>
+            <span><kbd>T</kbd> Track</span><span><kbd>←</kbd><kbd>→</kbd> Browse</span>
+          </>}
         </div>
       </div>
       {message && <p className="notice inline-notice">{message}</p>}
