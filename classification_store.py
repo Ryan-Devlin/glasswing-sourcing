@@ -435,6 +435,11 @@ def migrate(conn: sqlite3.Connection | PostgresConnection) -> None:
             ON admin_audit_log(created_at DESC);
         """
     )
+    # Founder Signals is a native module in this same canonical store. Keep its
+    # additive schema isolated in its domain module while running it under the
+    # existing migration lock and transaction conventions.
+    from founder_signals import migrate_founder_signals
+    migrate_founder_signals(conn, postgres=postgres)
     if postgres:
         movement_columns = table_columns_postgres(conn, "movement_log")
     else:

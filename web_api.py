@@ -123,6 +123,25 @@ from competitive_landscape import (
     recover_jobs as recover_landscape_jobs,
     retry_job as retry_landscape_job,
 )
+from founder_signals import (
+    analyst_action as founder_analyst_action,
+    candidate_profile as founder_candidate_profile,
+    create_candidate as create_founder_candidate,
+    create_monitoring_job as create_founder_job,
+    founder_overview,
+    founder_settings,
+    identity_review_queue,
+    import_people as import_founder_people,
+    list_candidates as list_founder_candidates,
+    monitoring_jobs as founder_monitoring_jobs,
+    resolve_github_identity,
+    resolve_identity_manually,
+    review_signal as review_founder_signal,
+    run_monitoring_job as run_founder_job,
+    seed_demo_data as seed_founder_demo_data,
+    update_candidate as update_founder_candidate,
+    update_settings as update_founder_settings,
+)
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -248,6 +267,35 @@ class PipelineFilters(BaseModel):
 
 class DomainIntakeRequest(BaseModel):
     domain: str = Field(min_length=1, max_length=2048)
+
+
+class FounderCandidateUpdate(BaseModel):
+    values: dict[str, object]
+
+
+class FounderAnalystAction(BaseModel):
+    action: str
+    value: str = ""
+    note: str = ""
+
+
+class FounderIdentityDecision(BaseModel):
+    username: str
+    accepted: bool = True
+
+
+class FounderSignalDecision(BaseModel):
+    disposition: Literal["confirmed", "dismissed"]
+    note: str = ""
+
+
+class FounderJobRequest(BaseModel):
+    job_type: Literal["talent_discovery", "identity_resolution", "github_collection", "full_refresh", "score_recalculation"]
+    candidate_id: str = ""
+
+
+class FounderSettingsUpdate(BaseModel):
+    values: dict[str, object]
 
 
 def _admin_password() -> str:
@@ -1720,6 +1768,141 @@ async def upload_domains(file: UploadFile = File(...)):
         **result,
         "message": "New domains are queued automatically and become searchable after the crawler finishes.",
     }
+
+
+# Founder Signals ---------------------------------------------------------
+
+@app.get("/api/founder-signals/overview")
+def founder_signals_overview():
+    return founder_overview()
+
+
+@app.get("/api/founder-signals/candidates")
+def founder_candidates(
+    q: str = "", status: str = "", employer: str = "", category: str = "",
+    monitoring: str = "", minimum_score: int = Query(0, ge=0, le=100),
+    sort: str = "priority", page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=250),
+):
+    result = list_founder_candidates(
+        query=q, status=status, employer=employer, category=category,
+        monitoring=monitoring, minimum_score=minimum_score, sort=sort,
+        limit=page_size, offset=(page - 1) * page_size,
+    )
+    return {**result, "page": page, "page_size": page_size}
+
+
+@app.get("/api/founder-signals/candidates/{candidate_id}")
+def founder_candidate(candidate_id: str):
+    result = founder_candidate_profile(candidate_id)
+    if not result:
+        raise HTTPException(404, "Founder candidate not found")
+    return result
+
+
+@app.post("/api/founder-signals/candidates", dependencies=[Depends(_require_admin)])
+def add_founder_candidate(update: FounderCandidateUpdate):
+    try:
+        return create_founder_candidate(update.values)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.patch("/api/founder-signals/candidates/{candidate_id}", dependencies=[Depends(_require_admin)])
+def edit_founder_candidate(candidate_id: str, update: FounderCandidateUpdate):
+    try:
+        return update_founder_candidate(candidate_id, update.values)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/founder-signals/import", dependencies=[Depends(_require_admin)])
+async def import_founder_candidates(file: UploadFile = File(...)):
+    try:
+        return import_founder_people(await file.read(), file.filename or "")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/founder-signals/export")
+def export_founder_candidates():
+    rows = list_founder_candidates(limit=10000)["rows"]
+    output = io.StringIO()
+    columns = ["full_name", "current_employer", "current_title", "school", "research_laboratory", "geographic_location", "github_username", "talent_score", "founder_transition_score", "glasswing_fit_score", "overall_priority_score", "identity_confidence", "monitoring_status", "analyst_status", "source_url", "updated_at"]
+    writer = csv.DictWriter(output, fieldnames=columns); writer.writeheader()
+    for row in rows: writer.writerow({key: row.get(key, "") for key in columns})
+    return StreamingResponse(iter([output.getvalue()]), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=founder-signals.csv"})
+
+
+@app.post("/api/founder-signals/candidates/{candidate_id}/action", dependencies=[Depends(_require_admin)])
+def act_on_founder_candidate(candidate_id: str, update: FounderAnalystAction):
+    try:
+        result = founder_analyst_action(candidate_id, update.action, update.value, update.note)
+        record_admin_audit("founder_candidate_action", candidate_id, f"{update.action}:{update.value}")
+        return result
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/founder-signals/identity-review")
+def founder_identity_review():
+    return {"rows": identity_review_queue()}
+
+
+@app.post("/api/founder-signals/candidates/{candidate_id}/resolve", dependencies=[Depends(_require_admin)])
+def request_founder_identity_resolution(candidate_id: str, background_tasks: BackgroundTasks):
+    job_id = create_founder_job("identity_resolution", candidate_id)
+    background_tasks.add_task(run_founder_job, job_id)
+    return {"job_id": job_id, "status": "queued"}
+
+
+@app.post("/api/founder-signals/candidates/{candidate_id}/identity", dependencies=[Depends(_require_admin)])
+def decide_founder_identity(candidate_id: str, update: FounderIdentityDecision):
+    try:
+        resolve_identity_manually(candidate_id, update.username, accepted=update.accepted)
+        record_admin_audit("founder_identity_decision", candidate_id, f"{update.username}:{update.accepted}")
+        return {"ok": True}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/founder-signals/signals/{signal_id}", dependencies=[Depends(_require_admin)])
+def decide_founder_signal(signal_id: str, update: FounderSignalDecision):
+    try:
+        review_founder_signal(signal_id, update.disposition, update.note)
+        return {"ok": True}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/founder-signals/settings")
+def get_founder_settings():
+    settings = founder_settings()
+    return {**settings, "github_api_configured": bool(os.getenv("GITHUB_TOKEN"))}
+
+
+@app.put("/api/founder-signals/settings", dependencies=[Depends(_require_admin)])
+def save_founder_settings(update: FounderSettingsUpdate):
+    return update_founder_settings(update.values)
+
+
+@app.get("/api/founder-signals/jobs")
+def get_founder_jobs():
+    return {"rows": founder_monitoring_jobs()}
+
+
+@app.post("/api/founder-signals/jobs", dependencies=[Depends(_require_admin)])
+def start_founder_job(update: FounderJobRequest, background_tasks: BackgroundTasks):
+    job_id = create_founder_job(update.job_type, update.candidate_id)
+    background_tasks.add_task(run_founder_job, job_id)
+    return {"job_id": job_id, "status": "queued"}
+
+
+@app.post("/api/founder-signals/seed-demo", dependencies=[Depends(_require_admin)])
+def seed_founder_signals_demo():
+    result = seed_founder_demo_data()
+    record_admin_audit("founder_demo_seeded", "founder_signals", f"created={result['created']}")
+    return result
 
 
 DIST = ROOT / "webapp" / "dist"

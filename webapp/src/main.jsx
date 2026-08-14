@@ -26,6 +26,7 @@ import {
   Search,
   Trash2,
   Upload,
+  Users,
   XCircle,
 } from "lucide-react";
 import "./styles.css";
@@ -36,6 +37,7 @@ import { dealAgeLabel, formatCount as fmt, pageCount } from "./domain";
 
 const NAV = [
   ["home", "Home", Home],
+  ["founders", "Founder Signals", Users],
   ["certstream", "CertStream Scraper", Activity],
   ["csv", "Domain Intake", Database],
   ["domains", "Domain Crawler (.com, .app)", Globe2],
@@ -3006,6 +3008,79 @@ function CompetitiveLandscapePage() {
   </section>;
 }
 
+const FOUNDER_VIEWS = [
+  ["priority", "Priority Signals"],
+  ["universe", "Talent Universe"],
+  ["activity", "Activity Monitor"],
+  ["identity", "Identity Review"],
+  ["settings", "Settings"],
+];
+function FounderProfile({ candidateId, onClose, onChanged }) {
+  const { admin, requestLogin } = useAdmin();
+  const profile = useApi(`/api/founder-signals/candidates/${candidateId}`, [candidateId]);
+  const [busy, setBusy] = useState(false);
+  if (profile.loading && !profile.data) return <div className="modal-backdrop"><div className="modal"><Loading /></div></div>;
+  const row = profile.data;
+  if (!row) return null;
+  const act = async (action, value = "") => {
+    if (!admin) return requestLogin();
+    setBusy(true);
+    try {
+      await api(`/api/founder-signals/candidates/${candidateId}/action`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, value }) });
+      onChanged(); onClose();
+    } finally { setBusy(false); }
+  };
+  return <div className="modal-backdrop" onMouseDown={onClose}><div className="modal founder-profile" onMouseDown={(event) => event.stopPropagation()}>
+    <button className="modal-close" onClick={onClose}><XCircle size={20}/></button>
+    <p className="eyebrow">FOUNDER PROFILE</p><h2>{row.full_name}</h2>
+    <p>{row.current_title}{row.current_employer ? ` · ${row.current_employer}` : ""}</p>
+    <div className="founder-score-grid">
+      {[['Priority',row.overall_priority_score],['Transition',row.founder_transition_score],['Talent',row.talent_score],['Glasswing fit',row.glasswing_fit_score],['Identity',row.identity_confidence]].map(([label,value]) => <div key={label}><span>{label}</span><strong>{value}/100</strong></div>)}
+    </div>
+    <div className="founder-profile-grid">
+      <div><h3>Professional profile</h3><dl><dt>School / lab</dt><dd>{[row.school,row.research_laboratory].filter(Boolean).join(" · ") || "Not verified"}</dd><dt>Location</dt><dd>{row.geographic_location || "Not verified"}</dd><dt>Technical focus</dt><dd>{(row.technical_categories || []).join(", ") || "Not set"}</dd><dt>GitHub</dt><dd>{row.github_username ? <a href={row.github_profile_url} target="_blank" rel="noreferrer">@{row.github_username}</a> : "Unresolved"}</dd></dl></div>
+      <div><h3>Activity</h3><div className="activity-bars">{(row.activity_monthly || []).slice(0,6).reverse().map((month) => <div key={month.metric_month} title={`${month.total_activity} events`}><span style={{height:`${Math.max(5,Math.min(100,month.total_activity*4))}%`}}/><small>{month.metric_month.slice(5)}</small></div>)}</div></div>
+    </div>
+    <h3>Signal history</h3>{row.signals?.length ? <div className="signal-list">{row.signals.map((signal) => <article key={signal.signal_id}><strong>{String(signal.signal_type).replaceAll("_"," ")}</strong><span>{new Date(signal.event_at).toLocaleDateString()}</span><p>{signal.explanation}</p><small>{signal.evidence}</small></article>)}</div> : <p className="empty">No credible founder-transition signal yet.</p>}
+    <h3>Collaborators</h3>{row.relationships?.length ? <table><tbody>{row.relationships.map((item) => <tr key={item.relationship_id}><td>{item.collaborator_name || item.collaborator_username}</td><td>{item.relationship_type}</td><td>{item.strength}</td></tr>)}</tbody></table> : <p className="muted">No public collaborator links detected.</p>}
+    <div className="form-actions"><select defaultValue={row.analyst_status} onChange={(event) => act("status",event.target.value)} disabled={busy}>{["new","monitoring","priority","contact_now","watch","needs_research","false_positive","not_relevant","archived"].map((value)=><option key={value}>{value}</option>)}</select><button onClick={()=>act("outreach","completed")} disabled={busy}>Mark outreach completed</button></div>
+  </div></div>;
+}
+function FounderSignalsPage() {
+  const { admin, requestLogin } = useAdmin();
+  const [view, setView] = useState("priority");
+  const [tick, setTick] = useState(0);
+  const [selected, setSelected] = useState("");
+  const [query, setQuery] = useState("");
+  const [minimumScore, setMinimumScore] = useState(0);
+  const [sort, setSort] = useState("priority");
+  const [message, setMessage] = useState("");
+  const overview = useApi("/api/founder-signals/overview", [tick]);
+  const candidateUrl = `/api/founder-signals/candidates?page_size=100&minimum_score=${view === "priority" ? Math.max(50,minimumScore) : minimumScore}&sort=${sort}&q=${encodeURIComponent(query)}`;
+  const candidates = useApi(candidateUrl, [tick, view, query, minimumScore, sort]);
+  const identities = useApi("/api/founder-signals/identity-review", [tick]);
+  const settings = useApi("/api/founder-signals/settings", [tick]);
+  const jobs = useApi("/api/founder-signals/jobs", [tick]);
+  const rows = candidates.data?.rows || [];
+  const mutate = async (path, options = {}) => { if (!admin) return requestLogin(); setMessage(""); try { const result = await api(path, options); setTick((value)=>value+1); return result; } catch (err) { setMessage(err.payload?.detail || err.message); } };
+  const upload = async (event) => { const file=event.target.files?.[0]; if(!file)return; const body=new FormData(); body.append("file",file); const result=await mutate("/api/founder-signals/import",{method:"POST",body}); if(result)setMessage(`${result.created} people imported · ${result.identity_review} possible duplicates need review`); event.target.value=""; };
+  const addPerson = async (event) => { event.preventDefault(); const form=new FormData(event.currentTarget); const values=Object.fromEntries(form.entries()); values.technical_categories=String(values.technical_categories||"").split(",").map(v=>v.trim()).filter(Boolean); const result=await mutate("/api/founder-signals/candidates",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({values})}); if(result?.status==="needs_review")setMessage("Possible duplicate found. Review the existing identity before creating another record."); else event.currentTarget.reset(); };
+  const runJob = async (job_type) => { const result=await mutate("/api/founder-signals/jobs",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({job_type})}); if(result)setMessage(`${job_type.replaceAll("_"," ")} queued`); };
+  const saveSettings = async (event) => { event.preventDefault(); const form=new FormData(event.currentTarget); const list=(name)=>String(form.get(name)||"").split("\n").map(v=>v.trim()).filter(Boolean); await mutate("/api/founder-signals/settings",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({values:{target_companies:list("target_companies"),target_universities:list("target_universities"),target_laboratories:list("target_laboratories"),technical_categories:list("technical_categories"),minimum_alert_threshold:Number(form.get("minimum_alert_threshold")),collection_frequency_hours:Number(form.get("collection_frequency_hours")),maximum_people_per_run:Number(form.get("maximum_people_per_run")),automatic_monitoring_confidence:Number(form.get("automatic_monitoring_confidence"))}})}); };
+  const o=overview.data?.counts||{};
+  return <section className="founder-signals-page"><header><p className="eyebrow">EARLY FOUNDER FORMATION</p><h1>Founder Signals</h1><p>Public, evidence-backed signals that exceptional technical people may be preparing to build a Glasswing-relevant company.</p></header>
+    <div className="metrics founder-metrics"><Metric label="Talent universe" value={fmt(o.total||0)}/><Metric label="Actively monitored" value={fmt(o.monitored||0)}/><Metric label="Priority signals" value={fmt(o.priority||0)}/><Metric label="Signals · 30 days" value={fmt(o.signals_30d||0)}/><Metric label="Identity review" value={fmt(o.identity_review||0)}/></div>
+    <div className="founder-tabs">{FOUNDER_VIEWS.map(([id,label])=><button key={id} className={view===id?"active":""} onClick={()=>setView(id)}>{label}</button>)}</div>
+    {message&&<p className="notice">{message}</p>}
+    {(view==="priority"||view==="universe")&&<><div className="founder-toolbar"><div className="compact-search"><Search size={17}/><input value={query} onChange={(e)=>setQuery(e.target.value)} placeholder="Search people, employers, or GitHub"/></div><label>Minimum score <input type="number" min="0" max="100" value={minimumScore} onChange={(e)=>setMinimumScore(Number(e.target.value))}/></label><select value={sort} onChange={(e)=>setSort(e.target.value)}><option value="priority">Highest priority</option><option value="signal">Most recent signal</option><option value="transition">Founder transition</option><option value="talent">Talent quality</option><option value="fit">Glasswing fit</option></select><a className="button-link" href="/api/founder-signals/export"><Download size={15}/> Export CSV</a></div>
+      {view==="universe"&&<div className="founder-admin-grid"><form onSubmit={addPerson}><h3>Add a person</h3><input name="full_name" placeholder="Full name" required/><input name="current_employer" placeholder="Current employer"/><input name="current_title" placeholder="Current title"/><input name="school" placeholder="School or lab"/><input name="github_username" placeholder="GitHub username (optional)"/><input name="technical_categories" placeholder="Categories, comma separated"/><button className="primary">Add person</button></form><label className="founder-upload"><Upload size={24}/><strong>Import talent universe</strong><span>CSV or Excel · ambiguous matches go to Identity Review</span><input type="file" accept=".csv,.xlsx" onChange={upload}/></label></div>}
+      {candidates.loading&&!candidates.data?<Loading/>:rows.length?<div className="table-wrap"><table className="founder-table"><thead><tr><th>Person</th><th>Affiliation</th><th>Focus</th><th>Transition</th><th>Talent</th><th>GW fit</th><th>Priority</th><th>Identity</th><th>Status</th></tr></thead><tbody>{rows.map(row=><tr key={row.candidate_id} onClick={()=>setSelected(row.candidate_id)}><td><strong>{row.full_name}</strong><small>{row.github_username?`@${row.github_username}`:"GitHub unresolved"}{row.synthetic?" · SYNTHETIC":""}</small></td><td>{row.current_employer}<small>{row.current_title}</small></td><td>{(row.technical_categories||[]).slice(0,2).join(" · ")||"—"}</td><td>{row.founder_transition_score}</td><td>{row.talent_score}</td><td>{row.glasswing_fit_score}</td><td><strong className="priority-number">{row.overall_priority_score}</strong></td><td><span className={`pill confidence-${row.confidence_level}`}>{row.identity_confidence}%</span></td><td>{String(row.analyst_status).replaceAll("_"," ")}</td></tr>)}</tbody></table></div>:<p className="empty">No people match this view. Import a talent universe or seed synthetic examples in Settings.</p>}</>}
+    {view==="activity"&&<><div className="crawler-command-bar"><div><strong>{overview.data?.github?.configured?"GitHub API connected":"GitHub token required"}</strong><span>Official API collection is idempotent and preserves public events permanently.</span></div><div><button onClick={()=>runJob("talent_discovery")}><Users size={15}/> Discover talent</button><button onClick={()=>runJob("github_collection")}><RefreshCw size={15}/> Collect now</button><button onClick={()=>runJob("score_recalculation")}>Recalculate scores</button></div></div><div className="table-wrap"><table><thead><tr><th>Job</th><th>Status</th><th>Started</th><th>Succeeded</th><th>Failed</th></tr></thead><tbody>{(jobs.data?.rows||[]).map(job=><tr key={job.job_id}><td>{job.job_type}</td><td>{job.status}</td><td>{job.started_at||job.created_at}</td><td>{job.succeeded}</td><td>{job.failed}</td></tr>)}</tbody></table></div></>}
+    {view==="identity"&&<>{(identities.data?.rows||[]).length?<div className="identity-grid">{identities.data.rows.map(item=><article key={item.identity_id}><h3>{item.full_name}</h3><p>{item.current_title} · {item.current_employer}</p><a href={item.profile_url} target="_blank" rel="noreferrer">@{item.username}</a><strong>{item.confidence_score}% confidence</strong><ul>{item.evidence.map(value=><li key={value}>{value}</li>)}</ul>{item.contradictions.map(value=><p className="error" key={value}>{value}</p>)}<div><button onClick={()=>mutate(`/api/founder-signals/candidates/${item.candidate_id}/identity`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:item.username,accepted:true})})}>Approve</button><button onClick={()=>mutate(`/api/founder-signals/candidates/${item.candidate_id}/identity`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:item.username,accepted:false})})}>Reject</button></div></article>)}</div>:<p className="empty">No ambiguous GitHub identities need review.</p>}</>}
+    {view==="settings"&&settings.data&&<><form className="founder-settings" onSubmit={saveSettings}><label>Target companies<textarea name="target_companies" defaultValue={(settings.data.target_companies||[]).join("\n")}/></label><label>Target universities<textarea name="target_universities" defaultValue={(settings.data.target_universities||[]).join("\n")}/></label><label>Target laboratories<textarea name="target_laboratories" defaultValue={(settings.data.target_laboratories||[]).join("\n")}/></label><label>Technical categories<textarea name="technical_categories" defaultValue={(settings.data.technical_categories||[]).join("\n")}/></label><label>Minimum alert score<input name="minimum_alert_threshold" type="number" min="0" max="100" defaultValue={settings.data.minimum_alert_threshold}/></label><label>Collection frequency (hours)<input name="collection_frequency_hours" type="number" min="1" defaultValue={settings.data.collection_frequency_hours}/></label><label>People per run<input name="maximum_people_per_run" type="number" min="1" max="5000" defaultValue={settings.data.maximum_people_per_run}/></label><label>Automatic identity threshold<input name="automatic_monitoring_confidence" type="number" min="70" max="100" defaultValue={settings.data.automatic_monitoring_confidence}/></label><button className="primary">Save settings</button></form><div className="form-actions"><span>GitHub API: {settings.data.github_api_configured?"Configured":"Not configured"} · token is never displayed</span><button onClick={()=>mutate("/api/founder-signals/seed-demo",{method:"POST"})}>Load synthetic demo data</button></div></>}
+    {selected&&<FounderProfile candidateId={selected} onClose={()=>setSelected("")} onChanged={()=>setTick(v=>v+1)}/>}</section>;
+}
+
 function App() {
   const [page, setPage] = useState(location.hash.slice(1) || "home");
   const [admin, setAdmin] = useState(false);
@@ -3042,6 +3117,7 @@ function App() {
   };
   const body = {
     home: <HomePage />,
+    founders: <FounderSignalsPage />,
     certstream: <CertStreamPage />,
     formd: <FormDPage />,
     csv: <SearchCorpusPage kind="ai" />,

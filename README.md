@@ -1,5 +1,11 @@
 # Glasswing Sourcing
 
+## Founder Signals
+
+The native Founder Signals early-warning module is documented in
+[`FOUNDER_SIGNALS.md`](FOUNDER_SIGNALS.md). It shares this application's
+database, authentication, React shell, and deployment conventions.
+
 Continuous CertStream discovery and fast first-pass screening for early-stage,
 US-oriented B2B AI companies.
 
