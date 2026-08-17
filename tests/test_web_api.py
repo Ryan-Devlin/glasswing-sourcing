@@ -496,6 +496,8 @@ def test_zone_stats_report_retained_and_discarded_separately(monkeypatch):
     assert result["retained"] == 5
     assert result["discarded"] == 695
     assert result["failed"] == 20
+    assert result["scraped"] == 40
+    assert result["new_today"] == 0
     assert result["live"] == 300
     assert result["live_rate"] == 100.0
     assert result["relevance_rate"] == 20.0

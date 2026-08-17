@@ -408,6 +408,19 @@ header p,
 .retention-metrics {
   grid-template-columns: repeat(6, minmax(125px, 1fr));
 }
+.zone-delta-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  margin: -10px 0 26px;
+  padding: 0 4px;
+  color: var(--gw-muted);
+  font-size: 12px;
+}
+.zone-delta-summary strong {
+  margin-right: 5px;
+  color: var(--gw-ink);
+}
 .retention-status {
   display: flex;
   flex-wrap: wrap;

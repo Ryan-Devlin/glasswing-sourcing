@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -1469,6 +1470,8 @@ def corpus_stats(kind: Literal["ai", "zone"]):
             "last_error": worker.get("last_crawl_error", ""),
             "updated_at": heartbeat or "",
         }
+    zone_deltas = []
+    new_domains_today = 0
     with zone_connect(ZONE_UNIVERSE_DB, read_only=True) as conn:
         details = zone_diagnostics(conn)
         worker = zone_worker_state(conn)
@@ -1484,6 +1487,46 @@ def corpus_stats(kind: Literal["ai", "zone"]):
         except (AttributeError, KeyError, TypeError):
             heartbeat = ""
             latest_deal_at = ""
+        try:
+            eastern_today = datetime.now(ZoneInfo("America/New_York")).date()
+            for row in conn.execute(
+                """
+                SELECT tld,imported_at,added_domains,removed_domains,
+                       unchanged_domains,discovered_domains
+                FROM zones
+                WHERE import_status='ready'
+                ORDER BY tld
+                """
+            ).fetchall():
+                imported_at = str(row["imported_at"] or "")
+                imported_today = False
+                if imported_at:
+                    parsed = datetime.fromisoformat(
+                        imported_at.replace("Z", "+00:00")
+                    )
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=timezone.utc)
+                    imported_today = (
+                        parsed.astimezone(ZoneInfo("America/New_York")).date()
+                        == eastern_today
+                    )
+                added = int(row["added_domains"] or 0)
+                if imported_today:
+                    new_domains_today += added
+                zone_deltas.append(
+                    {
+                        "tld": str(row["tld"]),
+                        "snapshot_at": imported_at,
+                        "new_domains": added,
+                        "removed_domains": int(row["removed_domains"] or 0),
+                        "unchanged_domains": int(row["unchanged_domains"] or 0),
+                        "snapshot_domains": int(row["discovered_domains"] or 0),
+                        "is_today": imported_today,
+                    }
+                )
+        except (AttributeError, KeyError, TypeError, ValueError):
+            zone_deltas = []
+            new_domains_today = 0
     retained = int(details.get("success", 0) or 0)
     zone_bucket_counts = source_bucket_counts(CORPUS_SOURCES["zone"])
     investable = int(zone_bucket_counts.get("priority", 0) or 0)
@@ -1524,6 +1567,8 @@ def corpus_stats(kind: Literal["ai", "zone"]):
         batch_rate = 0
         instantaneous_batch_rate = 0
     return {
+        "new_today": new_domains_today,
+        "zone_deltas": zone_deltas,
         "available": details.get("queued_domains", 0),
         "pending": max(
             0,
@@ -1534,6 +1579,7 @@ def corpus_stats(kind: Literal["ai", "zone"]):
         "processed": processed,
         "attempted": attempted,
         "live": live,
+        "scraped": int(details.get("network_success", 0) or 0),
         "crawled": retained,
         "retained": retained,
         "investable": investable,

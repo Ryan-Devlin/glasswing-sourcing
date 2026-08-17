@@ -2372,14 +2372,29 @@ function SearchCorpusPage({ kind }) {
             </>
           ) : (
             <>
-              <Metric label="Domains screened" value={fmt(metrics.data.processed)} />
-              <Metric label="Live websites" value={fmt(metrics.data.live)} />
-              <Metric label="Relevant companies" value={fmt(metrics.data.promising)} />
-              <Metric label="Qualified candidates" value={fmt(metrics.data.retained)} />
-              <Metric label="Investable deals" value={fmt(metrics.data.investable)} />
-              <Metric label="Average screening speed" value={`${fmt(metrics.data.batch_rate || 0)}/sec`} />
+              <Metric label="New domains today" value={fmt(metrics.data.new_today)} />
+              <Metric label="Waiting to check" value={fmt(metrics.data.pending)} />
+              <Metric label="Domains checked" value={fmt(metrics.data.attempted)} />
+              <Metric label="Passed quick screen" value={fmt(metrics.data.promising)} />
+              <Metric label="Successfully scraped" value={fmt(metrics.data.scraped)} />
+              <Metric label="Failed to reach" value={fmt(metrics.data.failed)} />
             </>
           )}
+        </div>
+      )}
+      {!isAi && Boolean(metrics.data?.zone_deltas?.length) && (
+        <div className="zone-delta-summary">
+          {metrics.data.zone_deltas.map((zone) => (
+            <span key={zone.tld}>
+              <strong>.{zone.tld}</strong>
+              {zone.is_today
+                ? ` +${fmt(zone.new_domains)} today`
+                : ` last snapshot +${fmt(zone.new_domains)}`}
+              {zone.snapshot_at
+                ? ` · ${new Date(zone.snapshot_at).toLocaleString()}`
+                : ""}
+            </span>
+          ))}
         </div>
       )}
       {isAi && metrics.data && (
