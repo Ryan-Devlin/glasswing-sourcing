@@ -4183,15 +4183,6 @@ async def process(
         ) = placeholder_assessment(early_text, word_count=len(early_text.split()))
         is_parked = placeholder_reason == "parked_or_for_sale"
         is_agency, agency_evidence = agency_assessment(early_text)
-
-        score, pillar, evidence, counts = score_text(scoring_copy)
-        dimensions = glasswing_dimensions(scoring_copy)
-        enterprise_rescue_signal, enterprise_rescue_evidence = (
-            enterprise_rescue_assessment(combined)
-        )
-        high_conviction_fit, high_conviction_evidence = (
-            high_conviction_fit_assessment(combined)
-        )
         is_consumer_junk, b2c_score, b2c_evidence = b2c_assessment(early_text)
         is_media_newsletter, media_evidence = media_newsletter_assessment(early_text)
         is_non_english, language_evidence = language_assessment(early_text)
@@ -4219,6 +4210,37 @@ async def process(
                 list(location_evidence) + explicit_non_us_evidence
             ))
 
+        # High-confidence factual exclusions are deliberately evaluated before
+        # the expensive full-page scoring, founder extraction, and learned
+        # preference layers. Missing or ambiguous evidence never enters this
+        # gate. This lets obvious junk exit cheaply without changing routing.
+        early_hard_disqualifier = bool(any([
+            is_parked,
+            is_placeholder,
+            is_agency,
+            is_consumer_junk,
+            is_media_newsletter,
+            is_non_english,
+            is_commodity_wrapper,
+            is_hosting_provider,
+            is_non_operating_investor,
+            location_status == "NON_US",
+        ]))
+        full_scoring_copy = "" if early_hard_disqualifier else scoring_copy
+
+        score, pillar, evidence, counts = score_text(full_scoring_copy)
+        dimensions = glasswing_dimensions(full_scoring_copy)
+        enterprise_rescue_signal, enterprise_rescue_evidence = (
+            (False, [])
+            if early_hard_disqualifier
+            else enterprise_rescue_assessment(combined)
+        )
+        high_conviction_fit, high_conviction_evidence = (
+            (False, [])
+            if early_hard_disqualifier
+            else high_conviction_fit_assessment(combined)
+        )
+
         if pillar and not category_is_valid(pillar, scoring_copy):
             pillar = ""
             score = min(score, 55)
@@ -4241,13 +4263,17 @@ async def process(
         )
 
         venture_quality = venture_quality_assessment(
-            combined,
+            "" if early_hard_disqualifier else combined,
             pillar=pillar,
             counts=counts,
             dimensions=dimensions,
             high_conviction_fit=high_conviction_fit,
         )
-        website_green_flags = deal_green_flags(page.text[:20000])
+        website_green_flags = (
+            []
+            if early_hard_disqualifier
+            else deal_green_flags(page.text[:20000])
+        )
         scorecard = scorecard_from_evidence(
             counts=counts,
             dimensions=dimensions,
@@ -4389,7 +4415,11 @@ async def process(
             f"{clean('; '.join(location_evidence))[:100]}",
             f"Maturity: {clean('; '.join(maturity_evidence))[:120]}",
         ])[:1800]
-        preference = calibrate_text(calibration_text)
+        preference = (
+            None
+            if early_hard_disqualifier
+            else calibrate_text(calibration_text)
+        )
         preference_yes_probability = (
             preference.probability_yes if preference is not None else None
         )
