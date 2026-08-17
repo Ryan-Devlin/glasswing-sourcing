@@ -47,8 +47,15 @@ def main() -> None:
     if not args.execute:
         print(json.dumps({"dry_run": True, "reproducible_exports": before}, indent=2))
         return
-    result = compact_classification_storage()
-    result["reproducible_exports"] = removable_exports(execute=True)
+    # Delete reproducible filesystem exports first. Postgres deliberately
+    # refuses an in-place full-table rewrite because the resulting WAL can
+    # exceed a bounded production volume.
+    exports = removable_exports(execute=True)
+    try:
+        result = compact_classification_storage()
+    except RuntimeError as exc:
+        result = {"classification_compaction_skipped": 1, "reason": str(exc)}
+    result["reproducible_exports"] = exports
     print(json.dumps(result, indent=2))
 
 

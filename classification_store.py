@@ -3302,6 +3302,18 @@ def compact_classification_storage(
     batch_size: int = 500,
 ) -> dict[str, int]:
     """Rewrite historical JSON into its bounded decision-evidence form."""
+    # Rewriting the whole Postgres table creates a WAL record for every row.
+    # On a bounded Railway volume that can consume the remaining disk before
+    # checkpoints reclaim it, leaving Postgres unable to complete recovery.
+    # New writes are already compacted by normalized_record(); historical
+    # Postgres rows must instead age out or be migrated with an online,
+    # disk-capacity-aware maintenance operation.
+    if using_classification_postgres():
+        raise RuntimeError(
+            "Bulk classification compaction is disabled for Postgres because "
+            "it can exhaust the database volume with WAL. New records are "
+            "compacted automatically."
+        )
     processed = changed = before_bytes = after_bytes = 0
     last_domain = ""
     with connect_store(path) as conn:
