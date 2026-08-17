@@ -1,7 +1,21 @@
 from pathlib import Path
+from datetime import datetime, timezone
 
 from zone_universe.database import connect, utc_now
-from zone_universe.worker import retire_full_universe_queues, retire_zonefile
+from zone_universe.worker import (
+    retire_full_universe_queues,
+    retire_zonefile,
+    scheduled_snapshot_day,
+)
+
+
+def test_snapshot_schedule_opens_at_six_am_eastern() -> None:
+    assert scheduled_snapshot_day(
+        datetime(2026, 8, 17, 9, 59, tzinfo=timezone.utc)
+    ) == ""
+    assert scheduled_snapshot_day(
+        datetime(2026, 8, 17, 10, 0, tzinfo=timezone.utc)
+    ) == "2026-08-17"
 
 
 def test_retire_zonefile_deletes_redownloadable_source_and_records_state(

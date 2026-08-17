@@ -72,9 +72,13 @@ The crawler resumes from the committed byte offset in every queue shard.
 10. Each later zone import writes sorted `added.txt.gz` and `removed.txt.gz`
     deltas; only newly delegated domains enter the crawl pass.
 
-The worker watches `data/zonefiles/` for completed atomic CZDS downloads. A new
-`.txt.gz` file is imported automatically; `.part` files are ignored. The first
-file for a TLD is a baseline. Every later file queues only additions.
+At 6:00 AM America/New_York each day, the worker downloads the approved `.app`
+and `.com` snapshots from CZDS, imports them atomically, and queues the set
+difference. A five-minute schedule check replaces the old five-second idle file
+poll. Manually supplied `.txt.gz` files are still detected within five minutes;
+`.part` files are ignored. The first file for a TLD is a baseline and every
+later file queues only additions. `CZDS_USERNAME` and `CZDS_PASSWORD` must be
+configured on the worker service.
 
 Generated-domain audit files are compressed under `data/rejected/`. The
 original ICANN zone files are never modified.

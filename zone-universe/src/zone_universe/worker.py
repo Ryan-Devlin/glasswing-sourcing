@@ -5,7 +5,10 @@ import asyncio
 import os
 import signal
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 # Running as its own standalone service (zone-worker), so the repo root
 # (holding runtime_control.py) isn't guaranteed to already be on sys.path.
@@ -36,6 +39,108 @@ from .rdap import (
     recover_registration_queue,
 )
 from .zone_parser import import_zone, source_fingerprint
+
+
+CZDS_CLIENT = _REPO_ROOT / "zone-universe" / "czds.py"
+SNAPSHOT_TIMEZONE = ZoneInfo("America/New_York")
+SNAPSHOT_HOUR_ET = 6
+SNAPSHOT_CHECK_SECONDS = 300
+SNAPSHOT_RETRY_SECONDS = 900
+
+
+def scheduled_snapshot_day(now: datetime | None = None) -> str:
+    """Return today's ET schedule key once the 6 AM window has opened."""
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    eastern = current.astimezone(SNAPSHOT_TIMEZONE)
+    if eastern.hour < SNAPSHOT_HOUR_ET:
+        return ""
+    return eastern.date().isoformat()
+
+
+def _state_value(conn, key: str) -> str:
+    row = conn.execute(
+        "SELECT value FROM worker_state WHERE key=?", (key,)
+    ).fetchone()
+    return str(row["value"]) if row is not None else ""
+
+
+async def download_scheduled_snapshots(conn, settings: Settings) -> bool:
+    """Download `.app` and `.com` once per day at/after 6 AM Eastern."""
+    schedule_day = scheduled_snapshot_day()
+    if not schedule_day:
+        return False
+    if _state_value(conn, "last_czds_snapshot_day") == schedule_day:
+        return False
+
+    last_attempt = _state_value(conn, "last_czds_attempt_at")
+    if last_attempt:
+        try:
+            attempted_at = datetime.fromisoformat(
+                last_attempt.replace("Z", "+00:00")
+            )
+            if (
+                datetime.now(timezone.utc) - attempted_at
+            ).total_seconds() < SNAPSHOT_RETRY_SECONDS:
+                return False
+        except ValueError:
+            pass
+
+    attempt_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    set_state(conn, "last_czds_attempt_at", attempt_at)
+    if not os.getenv("CZDS_USERNAME") or not os.getenv("CZDS_PASSWORD"):
+        set_state(
+            conn,
+            "last_czds_download_error",
+            "CZDS_USERNAME and CZDS_PASSWORD must be configured",
+        )
+        return False
+    if not CZDS_CLIENT.exists():
+        set_state(conn, "last_czds_download_error", "CZDS client is missing")
+        return False
+
+    ZONEFILES.mkdir(parents=True, exist_ok=True)
+    set_state(conn, "crawler_status", "downloading_daily_snapshots")
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        str(CZDS_CLIENT),
+        "-j",
+        "2",
+        "download",
+        *settings.tlds,
+        "-o",
+        str(ZONEFILES),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=str(CZDS_CLIENT.parent),
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            process.communicate(), timeout=3600
+        )
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.communicate()
+        set_state(conn, "last_czds_download_error", "download timed out")
+        return False
+    if process.returncode != 0:
+        error = (stderr or stdout).decode("utf-8", errors="replace")[-1000:]
+        set_state(conn, "last_czds_download_error", error)
+        log_event(conn, "czds_download_error", error)
+        return False
+
+    set_state(conn, "last_czds_snapshot_day", schedule_day)
+    set_state(conn, "last_czds_download_error", "")
+    set_state(conn, "last_czds_download_output", stdout.decode(
+        "utf-8", errors="replace"
+    )[-1000:])
+    log_event(
+        conn,
+        "czds_daily_snapshots_downloaded",
+        f"Downloaded {','.join(settings.tlds)} snapshots for {schedule_day}.",
+    )
+    return True
 
 
 def retire_full_universe_queues(conn) -> dict[str, int]:
@@ -358,8 +463,47 @@ async def run() -> None:
         enrich_registration_dates(settings, stop, pause_requested)
     )
     AUTO_PAUSE_REASON = "auto_full_coverage"
+    next_snapshot_check = 0.0
+    next_import_check = 0.0
     try:
         while not stop.is_set() and not STOP_FILE.exists():
+            now_monotonic = time.monotonic()
+            downloaded = False
+            if now_monotonic >= next_snapshot_check:
+                next_snapshot_check = now_monotonic + SNAPSHOT_CHECK_SECONDS
+                try:
+                    downloaded = await download_scheduled_snapshots(
+                        conn, settings
+                    )
+                except Exception as exc:
+                    set_state(
+                        conn,
+                        "last_czds_download_error",
+                        f"{type(exc).__name__}: {exc}"[:1000],
+                    )
+                    log_event(
+                        conn,
+                        "czds_download_error",
+                        f"{type(exc).__name__}: {exc}",
+                    )
+            # Import immediately after the scheduled download. The slower
+            # five-minute scan also supports an operator dropping in a file
+            # manually without turning the worker into an idle file watcher.
+            if downloaded or now_monotonic >= next_import_check:
+                next_import_check = now_monotonic + SNAPSHOT_CHECK_SECONDS
+                try:
+                    await import_new_zonefiles(conn, settings)
+                except Exception as exc:
+                    set_state(
+                        conn,
+                        "last_import_error",
+                        f"{type(exc).__name__}: {exc}"[:500],
+                    )
+                    log_event(
+                        conn,
+                        "zone_auto_import_error",
+                        f"{type(exc).__name__}: {exc}",
+                    )
             if not zone_crawler_requested():
                 # Coverage can only have auto-paused this; a human pausing
                 # it via the dashboard must never be silently overridden.
@@ -377,19 +521,6 @@ async def run() -> None:
                 set_state(conn, "crawler_phase", "paused_by_user")
                 await wait_or_stop(stop, 5)
                 continue
-            try:
-                await import_new_zonefiles(conn, settings)
-            except Exception as exc:
-                set_state(
-                    conn,
-                    "last_import_error",
-                    f"{type(exc).__name__}: {exc}"[:500],
-                )
-                log_event(
-                    conn,
-                    "zone_auto_import_error",
-                    f"{type(exc).__name__}: {exc}",
-                )
             made_progress = False
             for tld in settings.tlds:
                 if stop.is_set() or STOP_FILE.exists():
