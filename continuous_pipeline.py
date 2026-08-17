@@ -1234,6 +1234,7 @@ def maybe_run_claude(batch_path: Path) -> int:
         return 0
     _last_claude_attempt = now_monotonic
     conn = connect_db()
+    temporary_candidates: Path | None = None
     try:
         allowance = claude_allowance(conn)
         if allowance <= 0:
@@ -1268,6 +1269,7 @@ def maybe_run_claude(batch_path: Path) -> int:
             # one surge wave, then reset every per-run counter to zero, on
             # repeat. The child's peak dies with the child.
             candidates = FILTERED / "all_screened_live.csv"
+            temporary_candidates = candidates
             candidates.parent.mkdir(parents=True, exist_ok=True)
             build = subprocess.run(
                 [
@@ -1383,6 +1385,8 @@ def maybe_run_claude(batch_path: Path) -> int:
         )
         return len(attempted_domains)
     finally:
+        if temporary_candidates is not None:
+            temporary_candidates.unlink(missing_ok=True)
         conn.close()
 
 

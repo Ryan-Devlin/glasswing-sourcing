@@ -541,6 +541,72 @@ def _integer(value: object, default: int = 0) -> int:
         return default
 
 
+# The relational columns are canonical. JSON only carries compact scoring
+# inputs that do not have their own column; raw page bodies and verbose crawl
+# diagnostics must never be duplicated here.
+COMPACT_CLASSIFICATION_FIELDS = {
+    "observed_at", "registrable", "hostname", "run_id", "run_started_at",
+    "domain", "final_url", "website_attempted", "http_status", "page_title",
+    "meta_description", "homepage_excerpt", "pages_scraped",
+    "meaningful_internal_links", "content_source", "crawl_status",
+    "crawler_crawled_at", "rule_score", "diligence_rank_score",
+    "rule_thesis_pillar", "rule_evidence", "word_count", "pillar_hit_count",
+    "ai_hit_count", "enterprise_hit_count", "product_hit_count",
+    "buyer_signal_count", "workflow_depth_count", "technical_depth_count",
+    "business_value_count", "b2c_score", "b2c_evidence",
+    "media_newsletter", "media_evidence", "placeholder_detected",
+    "placeholder_reason", "placeholder_evidence", "predominantly_non_english",
+    "language_evidence", "commodity_wrapper", "commodity_evidence",
+    "clear_enterprise_idea", "sparse_deep_tech_idea",
+    "sparse_vertical_workflow_idea", "prelaunch_score", "prelaunch_evidence",
+    "potential_glasswing_fit", "enterprise_rescue_signal",
+    "enterprise_rescue_evidence", "high_conviction_fit",
+    "high_conviction_evidence", "generic_strong_fit",
+    "independent_signal_dimensions", "location_status", "location_evidence",
+    "maturity_risk_score", "maturity_evidence", "investment_classification",
+    "classification_reason", "website_disclosed_funding_m",
+    "qualified_for_llm", "routing_bucket", "routing_reason", "viability_label",
+    "denial_confidence", "denial_rule", "denial_evidence", "fetch_error",
+    "rescore_model_version", "rescore_source", "venture_quality_score",
+    "venture_thesis_score", "venture_product_score", "venture_wedge_score",
+    "venture_moat_score", "venture_founder_score", "venture_investable_ready",
+    "venture_reviewable", "venture_wedge_present", "venture_moat_present",
+    "venture_founder_strength", "venture_slop_risk", "venture_product_evidence",
+    "venture_wedge_evidence", "venture_moat_evidence",
+    "venture_founder_evidence", "venture_slop_evidence", "hosting_provider",
+    "hosting_evidence", "non_operating_investor", "investor_evidence",
+    "manual_override", "manual_override_target", "manual_override_note",
+    "manual_override_updated_at", "training_basket", "human_rating",
+    "website_green_flags", "green_flags_checked_at", "scorecard",
+}
+
+
+def compact_classification_record(record: dict[str, object]) -> dict[str, object]:
+    """Retain decision evidence while dropping raw/duplicated website payloads."""
+    compact: dict[str, object] = {}
+    for key in COMPACT_CLASSIFICATION_FIELDS:
+        if key not in record:
+            continue
+        value = record[key]
+        if isinstance(value, str):
+            limit = 1600 if key == "homepage_excerpt" else 600
+            compact[key] = clean(value)[:limit]
+        elif isinstance(value, list):
+            compact[key] = [
+                clean(item)[:240] if not isinstance(item, dict) else item
+                for item in value[:12]
+            ]
+        elif isinstance(value, dict):
+            # Only two intentionally small structured UI fields are allowed.
+            compact[key] = value if key == "scorecard" else value
+        else:
+            compact[key] = value
+    flags = compact.get("website_green_flags")
+    if isinstance(flags, list):
+        compact["website_green_flags"] = flags[:8]
+    return compact
+
+
 def availability_for_record(record: dict[str, object]) -> str:
     """Return technical availability without making an investment judgment."""
     crawl_status = clean(record.get("crawl_status", "")).lower()
@@ -693,7 +759,11 @@ def normalized_record(record: dict[str, object]) -> dict[str, object]:
         fit_score=fit_score,
         confidence_score=confidence_score,
     )
-    raw_json = json.dumps(plain, ensure_ascii=False, separators=(",", ":"))
+    raw_json = json.dumps(
+        compact_classification_record(plain),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
     return {
         "domain": domain,
         "company_name": clean(
@@ -707,7 +777,7 @@ def normalized_record(record: dict[str, object]) -> dict[str, object]:
             or plain.get("homepage_excerpt", "")
             or plain.get("excerpt", "")
         )[:1000],
-        "excerpt": clean(plain.get("homepage_excerpt", ""))[:12000],
+        "excerpt": clean(plain.get("homepage_excerpt", ""))[:1600],
         "availability_status": availability,
         "crawl_status": clean(plain.get("crawl_status", "")),
         "content_source": clean(
@@ -3187,15 +3257,90 @@ def frame_from_store(
         return pd.DataFrame()
     with connect_store(path, read_only=True) as conn:
         rows = conn.execute(
-            "SELECT record_json FROM classifications ORDER BY domain"
+            "SELECT domain,company_name,final_url,description,excerpt,"
+            "crawl_status,content_source,http_status,fetch_error,routing_bucket,"
+            "routing_reason,fit_score,priority_score,thesis_pillar,evidence,"
+            "word_count,manual_override,manual_override_target,record_json "
+            "FROM classifications ORDER BY domain"
         ).fetchall()
     records = []
     for row in rows:
         try:
-            records.append(json.loads(row["record_json"] or "{}"))
+            record = json.loads(row["record_json"] or "{}")
         except (TypeError, json.JSONDecodeError):
-            continue
+            record = {}
+        # Canonical relational fields override compatibility JSON. This keeps
+        # Claude and exports working after verbose historical JSON is purged.
+        record.update({
+            "domain": row["domain"],
+            "registrable": row["domain"],
+            "page_title": row["company_name"],
+            "final_url": row["final_url"],
+            "meta_description": row["description"],
+            "homepage_excerpt": row["excerpt"],
+            "crawl_status": row["crawl_status"],
+            "content_source": row["content_source"],
+            "http_status": row["http_status"],
+            "fetch_error": row["fetch_error"],
+            "routing_bucket": row["routing_bucket"],
+            "routing_reason": row["routing_reason"],
+            "rule_score": row["fit_score"],
+            "diligence_rank_score": row["priority_score"],
+            "rule_thesis_pillar": row["thesis_pillar"],
+            "rule_evidence": row["evidence"],
+            "word_count": row["word_count"],
+            "manual_override": row["manual_override"],
+            "manual_override_target": row["manual_override_target"],
+        })
+        records.append(record)
     return pd.DataFrame(records)
+
+
+def compact_classification_storage(
+    path: Path | str = CLASSIFICATION_DB,
+    *,
+    batch_size: int = 500,
+) -> dict[str, int]:
+    """Rewrite historical JSON into its bounded decision-evidence form."""
+    processed = changed = before_bytes = after_bytes = 0
+    last_domain = ""
+    with connect_store(path) as conn:
+        while True:
+            rows = conn.execute(
+                "SELECT domain,record_json FROM classifications "
+                "WHERE domain>? ORDER BY domain LIMIT ?",
+                (last_domain, max(1, int(batch_size))),
+            ).fetchall()
+            if not rows:
+                break
+            for row in rows:
+                domain = str(row["domain"]); raw = str(row["record_json"] or "{}")
+                before_bytes += len(raw.encode("utf-8"))
+                try:
+                    parsed = json.loads(raw)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    parsed = {}
+                compact = json.dumps(
+                    compact_classification_record(parsed),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                after_bytes += len(compact.encode("utf-8"))
+                if compact != raw:
+                    conn.execute(
+                        "UPDATE classifications SET record_json=? WHERE domain=?",
+                        (compact, domain),
+                    )
+                    changed += 1
+                processed += 1; last_domain = domain
+            conn.commit()
+    return {
+        "processed": processed,
+        "changed": changed,
+        "before_bytes": before_bytes,
+        "after_bytes": after_bytes,
+        "bytes_removed": max(0, before_bytes - after_bytes),
+    }
 
 
 def export_all_screened_csv(

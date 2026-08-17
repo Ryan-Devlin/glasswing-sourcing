@@ -193,6 +193,8 @@ def persist_claude_decision_views() -> dict[str, int]:
     these are small, Claude-reviewed-only subsets, not full-corpus mirrors,
     and are the only durable record of Claude's own decision.
     """
+    if using_classification_postgres():
+        return {"database_backed": 1}
     approved_path = LLM / "llm_approved_master.csv"
     denied_path = LLM / "llm_denied_master.csv"
     approved = (

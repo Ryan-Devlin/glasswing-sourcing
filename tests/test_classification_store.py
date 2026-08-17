@@ -60,6 +60,52 @@ def test_tracking_is_persistent_and_idempotent(tmp_path):
     assert tracked_domain_set(["example.ai"], path=database) == set()
 
 
+def test_classification_storage_drops_raw_payloads_but_preserves_scoring(tmp_path):
+    database = tmp_path / "classifications.sqlite3"
+    upsert_classifications(pd.DataFrame([{
+        "domain": "compact.ai",
+        "page_title": "Compact AI",
+        "homepage_excerpt": "enterprise infrastructure " * 300,
+        "raw_html": "<html>" + ("x" * 100_000) + "</html>",
+        "cleaned_text": "y" * 100_000,
+        "rule_score": 88,
+        "routing_bucket": "priority",
+        "location_status": "US",
+    }]), path=database)
+    with connect_store(database, read_only=True) as conn:
+        stored = json.loads(conn.execute(
+            "SELECT record_json FROM classifications WHERE domain=?",
+            ("compact.ai",),
+        ).fetchone()["record_json"])
+    assert "raw_html" not in stored
+    assert "cleaned_text" not in stored
+    assert stored["rule_score"] == 88
+    assert len(stored["homepage_excerpt"]) <= 1600
+
+
+def test_historical_record_compaction_retains_canonical_frame_fields(tmp_path):
+    database = tmp_path / "classifications.sqlite3"
+    upsert_classifications(pd.DataFrame([{
+        "domain": "history.ai", "page_title": "History AI",
+        "meta_description": "Enterprise robotics", "rule_score": 81,
+        "routing_bucket": "priority",
+    }]), path=database)
+    with connect_store(database) as conn:
+        conn.execute(
+            "UPDATE classifications SET record_json=? WHERE domain=?",
+            (json.dumps({"raw_html":"z" * 50_000,"location_status":"US"}), "history.ai"),
+        )
+        conn.commit()
+    result = classification_store.compact_classification_storage(database)
+    assert result["bytes_removed"] > 40_000
+    frame = classification_store.frame_from_store(database)
+    row = frame.iloc[0]
+    assert row["domain"] == "history.ai"
+    assert row["page_title"] == "History AI"
+    assert row["rule_score"] == 81
+    assert row["location_status"] == "US"
+
+
 @pytest.mark.parametrize("transition", ["tracking", "human_yes", "claude_keep"])
 def test_positive_transitions_backfill_evidence_green_flags(tmp_path, transition):
     database = tmp_path / "classifications.sqlite3"

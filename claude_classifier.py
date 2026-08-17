@@ -22,8 +22,10 @@ from common import (
 from filter import score_text
 from classification_store import (
     backfill_claude_training_labels,
+    claude_diligenced_domains,
     purge_invalid_claude_diligence,
     upsert_claude_diligence,
+    using_classification_postgres,
 )
 from diligence_logic import (
     DILIGENCE_VERSION,
@@ -340,6 +342,8 @@ async def classify(
 
 
 def load_currently_diligenced_domains() -> set[str]:
+    if using_classification_postgres():
+        return claude_diligenced_domains(diligence_version=DILIGENCE_VERSION)
     domains: set[str] = set()
 
     for path in (
@@ -603,6 +607,10 @@ def prepare_input(
 
 
 def reconcile_masters(approved: pd.DataFrame, denied: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    # Postgres is the durable Claude ledger in production. CSV mirrors used
+    # nearly a gigabyte across duplicated exports and are unnecessary there.
+    if using_classification_postgres():
+        return approved.copy(), denied.copy()
     approved_master = upsert_csv(
         LLM / "llm_approved_master.csv", approved, key="domain"
     )
