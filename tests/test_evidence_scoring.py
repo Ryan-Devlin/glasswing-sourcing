@@ -74,6 +74,22 @@ def test_founder_enrichment_extracts_named_founder_and_adjacent_ip():
     assert "Founder technical IP" in labels
 
 
+def test_nvidia_inception_membership_is_not_employment_pedigree():
+    flags = founder_green_flags(
+        "Our team builds optimization software for industrial operations. "
+        "AEP Labs is an NVIDIA Inception Member and technology partner."
+    )
+    assert "Ex-Nvidia" not in {flag["label"] for flag in flags}
+
+
+def test_actual_former_nvidia_founder_still_gets_pedigree():
+    flags = founder_green_flags(
+        "Our founding team includes former NVIDIA engineers who built GPU "
+        "infrastructure for production AI."
+    )
+    assert "Ex-Nvidia" in {flag["label"] for flag in flags}
+
+
 def test_scorecard_is_bounded_and_explainable():
     card = scorecard_from_evidence(
         counts={"defensibility": 9},

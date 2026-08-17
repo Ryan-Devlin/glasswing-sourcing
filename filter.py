@@ -1329,9 +1329,50 @@ def founder_green_flags(text: str) -> list[dict[str, str]]:
         add(kind, f"{school_label} team", evidence)
 
     employer_hits = occurrences(context, STRONG_WORK_EXPERIENCE)
-    for employer in employer_hits[:2]:
-        evidence = next((s for s in contexts if employer.lower() in s.lower()), context)
-        add("ex_big_tech", f"Ex-{employer.title()}", evidence)
+    for employer in employer_hits:
+        employer_lower = employer.lower()
+        candidate_sentences = [
+            sentence for sentence in contexts
+            if employer_lower in sentence.lower()
+        ]
+        evidence = ""
+        for sentence in candidate_sentences:
+            lowered = sentence.lower()
+            # Accelerator, partner, customer, certification, and membership
+            # relationships are company affiliations -- not founder pedigree.
+            # Real example: "NVIDIA Inception Member" was incorrectly shown
+            # as "Ex-NVIDIA" because it appeared beside team copy.
+            affiliation_patterns = (
+                f"{employer_lower} inception",
+                "inception member",
+                "inception program",
+                "accelerator member",
+                "accelerator program",
+                "partner program",
+                "partner network",
+                "technology partner",
+                "certified partner",
+                "member of",
+                "powered by",
+            )
+            if any(pattern in lowered for pattern in affiliation_patterns):
+                continue
+            escaped = re.escape(employer_lower)
+            employment_patterns = (
+                rf"\b(?:ex|former)[ -]?{escaped}\b",
+                rf"\b(?:formerly|previously)\b.{{0,70}}\b{escaped}\b",
+                rf"\b(?:worked|served|led|built|engineered|researched)\b"
+                rf".{{0,50}}\b(?:at|for|with)\s+{escaped}\b",
+                rf"\b{escaped}\b.{{0,40}}\b(?:alumni|veterans?|engineers?|"
+                rf"executives?|researchers?|scientists?)\b",
+            )
+            if any(re.search(pattern, lowered) for pattern in employment_patterns):
+                evidence = sentence
+                break
+        if evidence:
+            add("ex_big_tech", f"Ex-{employer.title()}", evidence)
+        if len([flag for flag in flags if flag["type"] == "ex_big_tech"]) >= 2:
+            break
 
     if occurrences(context, ["repeat founder", "previously founded", "former founder"]):
         evidence = next((s for s in contexts if "found" in s.lower()), context)
