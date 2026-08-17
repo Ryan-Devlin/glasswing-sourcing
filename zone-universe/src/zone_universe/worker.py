@@ -38,6 +38,39 @@ from .rdap import (
 from .zone_parser import import_zone, source_fingerprint
 
 
+def retire_full_universe_queues(conn) -> dict[str, int]:
+    """Remove legacy non-delta crawl shards without touching snapshots.
+
+    Older imports stored unchanged/baseline domains in priority bands 1-4.
+    Daily-delta imports use priority 0 exclusively.  Deleting those rows and
+    their plain-text queue files prevents the old 163M-domain backlog from
+    ever running again; compressed snapshots remain available for tomorrow's
+    set difference.
+    """
+    rows = conn.execute(
+        "SELECT tld,queue_version,path FROM shards WHERE priority<>0"
+    ).fetchall()
+    bytes_released = 0
+    files_removed = 0
+    for row in rows:
+        path = Path(str(row["path"]))
+        try:
+            bytes_released += path.stat().st_size
+            path.unlink()
+            files_removed += 1
+        except FileNotFoundError:
+            pass
+    conn.execute("DELETE FROM shards WHERE priority<>0")
+    conn.commit()
+    result = {
+        "shards_removed": len(rows),
+        "files_removed": files_removed,
+        "bytes_released": bytes_released,
+    }
+    set_state(conn, "daily_delta_queue_cleanup", result)
+    return result
+
+
 def retire_zonefile(conn, path: Path, *, tld: str, queue_version: str) -> int:
     """Delete a re-downloadable source only after its queue is durable."""
     imported_size = path.stat().st_size
@@ -202,6 +235,11 @@ async def run() -> None:
     PID_FILE.parent.mkdir(parents=True, exist_ok=True)
     PID_FILE.write_text(str(os.getpid()), encoding="utf-8")
     conn = connect(settings.database)
+
+    # Permanently cut over from full-zone crawling to daily set differences.
+    # This is idempotent and preserves the compressed snapshot used as the
+    # comparison baseline as well as every retained/scored company record.
+    retire_full_universe_queues(conn)
 
     # One-time/boot-time retention sweep: older worker versions kept every
     # successful page regardless of its eventual investment classification.

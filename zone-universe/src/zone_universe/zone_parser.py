@@ -13,7 +13,7 @@ from pathlib import Path
 
 from .config import QUEUES, ZONEFILES
 from .database import connect, log_event, utc_now
-from .domain_quality import assess_domain, crawl_priority
+from .domain_quality import assess_domain
 
 
 DOMAIN = re.compile(rb"^[a-z0-9.-]+$", re.I)
@@ -130,7 +130,13 @@ def import_zone(
     queue_root: Path = QUEUES,
     reject_gibberish: bool = True,
 ) -> dict[str, object]:
-    """Stream a large zone file into resumable byte-addressed queue shards."""
+    """Snapshot a zone and queue only domains added since the prior snapshot.
+
+    The first import is deliberately a baseline: it records the current zone
+    without scheduling millions of already-existing domains.  Every later
+    import performs a streaming merge diff and writes only ``today - prior``
+    to the crawl queue.
+    """
     path = Path(zone_path).expanduser().resolve()
     if not path.exists() or not path.is_file():
         raise FileNotFoundError(path)
@@ -194,8 +200,7 @@ def import_zone(
     repeated_records = 0
     invalid_or_irrelevant = 0
     rejected_gibberish = 0
-    priority_bands = 5
-    total_shards = shard_count * priority_bands
+    total_shards = shard_count
     shard_counts = [0] * total_shards
     added_domains = 0
     removed_domains = 0
@@ -268,19 +273,16 @@ def import_zone(
                         added_handle.write(domain + "\n")
                         added_domains += 1
                         is_new = True
-                priority = 0 if is_new else crawl_priority(domain) + 1
-                shard = (
-                    priority * shard_count
-                    + queue_shard(domain, shard_count)
-                )
-                outputs[shard].write(domain.encode() + b"\n")
-                shard_counts[shard] += 1
+                # A baseline snapshot queues nothing.  On refreshes, only
+                # domains absent from yesterday's snapshot are crawl work.
+                if is_new:
+                    shard = queue_shard(domain, shard_count)
+                    outputs[shard].write(domain.encode() + b"\n")
+                    shard_counts[shard] += 1
                 delegated += 1
                 if limit and delegated >= limit:
                     break
-            if previous_snapshot is None:
-                added_domains = delegated
-            else:
+            if previous_snapshot is not None:
                 while previous_domain:
                     removed_handle.write(previous_domain + "\n")
                     removed_domains += 1
@@ -328,7 +330,7 @@ def import_zone(
                     tld,
                     version,
                     shard,
-                    shard // shard_count,
+                    0,
                     str(shard_path),
                     shard_path.stat().st_size,
                     count,
@@ -363,11 +365,7 @@ def import_zone(
                 added_domains,
                 removed_domains,
                 unchanged_domains,
-                str(
-                    added_path
-                    if previous_snapshot is not None
-                    else snapshot_path
-                ),
+                str(added_path),
                 str(removed_path),
                 tld,
             ),
@@ -376,8 +374,8 @@ def import_zone(
         log_event(
             conn,
             "zone_imported",
-            f"Imported {delegated:,} delegated domains into "
-            f"{total_shards} prioritized shards; excluded "
+            f"Snapshotted {delegated:,} delegated domains and queued "
+            f"{added_domains:,} daily additions in {total_shards} shards; excluded "
             f"{rejected_gibberish:,} obvious generated labels; "
             f"delta +{added_domains:,}/-{removed_domains:,}.",
             tld=tld,

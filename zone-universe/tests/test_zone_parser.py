@@ -69,6 +69,7 @@ wrong.com. 3600 IN NS ns1.example.net.
     )
 
     assert result["delegated_domains"] == 2
+    assert result["added_domains"] == 0
     assert result["repeated_records"] == 1
     assert result["rejected_gibberish"] == 1
     queue_dir = Path(str(result["queue_directory"]))
@@ -78,7 +79,7 @@ wrong.com. 3600 IN NS ns1.example.net.
         for domain in shard.read_text().splitlines()
         if domain
     }
-    assert domains == {"alpha.app", "beta.app"}
+    assert domains == set()
     audit_path = Path(str(result["rejection_audit"]))
     audit = json.loads(audit_path.read_text(encoding="utf-8"))
     assert audit["rejected_domains"] == 1
@@ -100,7 +101,7 @@ wrong.com. 3600 IN NS ns1.example.net.
         conn.execute(
             "SELECT sum(queued_domains) FROM shards WHERE tld='app'"
         ).fetchone()[0]
-        == 2
+        == 0
     )
     conn.close()
 
@@ -124,7 +125,7 @@ def test_zone_refresh_records_additions_and_removals(
         database=database,
         queue_root=queues,
     )
-    assert initial["added_domains"] == 2
+    assert initial["added_domains"] == 0
 
     with gzip.open(second, "wb") as handle:
         handle.write(
@@ -145,3 +146,11 @@ def test_zone_refresh_records_additions_and_removals(
         assert handle.read().splitlines() == ["gamma.app"]
     with gzip.open(refreshed["delta_removed_path"], "rt") as handle:
         assert handle.read().splitlines() == ["alpha.app"]
+    queue_dir = Path(str(refreshed["queue_directory"]))
+    queued = {
+        domain
+        for shard in queue_dir.glob("*.txt")
+        for domain in shard.read_text().splitlines()
+        if domain
+    }
+    assert queued == {"gamma.app"}
