@@ -18,9 +18,12 @@ def _payload():
     return response.json()
 
 
-def test_returns_both_funnels_with_their_stages():
+def test_returns_one_certstream_funnel_and_the_screening_funnel():
+    # One CertStream view, not two: the guards and the deduplication are a
+    # continuous population and were split across two tables for no gain.
     payload = _payload()
-    assert payload["intake"]["name"] == "intake"
+    assert "intake" not in payload
+    assert payload["certstream"]["name"] == "certstream"
     assert payload["screening"]["name"] == "screening"
     assert [s["key"] for s in payload["screening"]["stages"]] == [
         "queued", "screened", "reachable", "substantive",
@@ -40,7 +43,7 @@ def test_the_live_chain_stays_arithmetically_closed():
 def test_no_stage_reports_negative_counts():
     # The queue and classification stores are queried separately and can
     # disagree mid-write; the UI must never render a negative.
-    for funnel in ("intake", "screening"):
+    for funnel in ("certstream", "screening"):
         for stage in _payload()[funnel]["stages"]:
             assert stage["survived"] >= 0, stage["key"]
             assert stage["dropped"] >= 0, stage["key"]

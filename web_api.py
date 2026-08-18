@@ -38,7 +38,7 @@ for source in (ROOT, AI_SRC, ZONE_SRC):
         sys.path.insert(0, str(source))
 
 from funnel import (
-    Throughput, biggest_losses, filter_funnel, intake_funnel, screening_funnel,
+    Throughput, biggest_losses, certstream_funnel, screening_funnel,
 )
 from ai_search.og_bridge import enqueue_for_screening
 from ai_search.domains import normalize_any_domain
@@ -1098,25 +1098,19 @@ def funnel_breakdown():
         claude_kept=diligence.get("KEEP", 0),
     )
 
-    intake = intake_funnel(
-        hostnames_seen=int(status.get("hostnames_seen", 0) or 0),
-        hostnames_filtered=int(status.get("hostnames_filtered", 0) or 0),
+    drops = status.get("intake_drops")
+    filters = certstream_funnel(
+        int(status.get("hostnames_seen", 0) or 0),
+        {str(k): int(v or 0) for k, v in drops.items()} if isinstance(drops, dict) else {},
         new_domains=int(
             status.get("new_domains_received", status.get("domains_received", 0)) or 0
         ),
         repeat_domains=int(status.get("repeat_events_ignored", 0) or 0),
     )
 
-    drops = status.get("intake_drops")
-    filters = filter_funnel(
-        int(status.get("hostnames_seen", 0) or 0),
-        {str(k): int(v or 0) for k, v in drops.items()} if isinstance(drops, dict) else {},
-    )
-
     return {
-        "filter": filters.to_dict(),
-        "filter_live": bool(isinstance(drops, dict) and drops),
-        "intake": intake.to_dict(),
+        "certstream": filters.to_dict(),
+        "certstream_live": bool(isinstance(drops, dict) and drops),
         "screening": screening.to_dict(),
         "biggest_losses": biggest_losses(screening),
         "drop_reasons": reject_reasons,

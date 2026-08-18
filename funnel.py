@@ -166,15 +166,27 @@ class Throughput:
         }
 
 
-def filter_funnel(hostnames_seen: int, drops: dict[str, int]) -> Funnel:
-    """What each guard removed, in the order the guards actually run.
+def certstream_funnel(
+    hostnames_seen: int,
+    drops: dict[str, int],
+    *,
+    new_domains: int = 0,
+    repeat_domains: int = 0,
+) -> Funnel:
+    """One funnel for the CertStream run: hostnames in, queued domains out.
 
-    Each guard only ever sees what the previous ones passed, so this is a real
-    funnel rather than a set of overlapping tallies -- ``motif_spam`` counts
-    only hostnames that already survived the TLD check, and so on. Reporting
-    it as one "filtered" number made an untracked TLD indistinguishable from a
-    bulk-registration farm, which are a configuration choice and an attack on
-    the certificate log respectively.
+    Guards first, in the order they actually run -- each only ever sees what
+    the previous passed -- then the two ways a surviving hostname still fails
+    to become a new queue row: several hostnames on one certificate reducing
+    to the same registrable domain, and a domain the queue already holds.
+
+    Deliberately one view. Splitting the guards and the deduplication across
+    two tables made the reader do the arithmetic between them for no gain --
+    the population is continuous, and where the unit changes from hostnames to
+    domains the stage says so.
+
+    Scoped to a single run. Counters accumulating across restarts cannot
+    answer "is it working right now", which is the only question this is for.
     """
     from certstream_filter import DROP_REASONS
 
@@ -199,58 +211,33 @@ def filter_funnel(hostnames_seen: int, drops: dict[str, int]) -> Funnel:
             dropped=removed,
         ))
         remaining = max(0, remaining - removed)
+
+    # Survivors are still hostnames. These two turn them into queue rows, and
+    # both are ordinary outcomes rather than rejections.
+    collapsed = max(0, remaining - new_domains - repeat_domains)
+    stages.append(Stage(
+        key="registrable",
+        label="Reduced to a registrable domain",
+        entered=remaining,
+        dropped=collapsed,
+        note="Dropped: another hostname on the same certificate reduced to it.",
+    ))
+    stages.append(Stage(
+        key="new_to_queue",
+        label="Not already on the queue",
+        entered=new_domains + repeat_domains,
+        dropped=repeat_domains,
+        note="Dropped: re-observation of a domain already queued (renewal or extra SAN).",
+    ))
+
     return Funnel(
-        name="filter",
-        note="Guards in evaluation order; each sees only what the previous passed.",
-        stages=stages,
-    )
-
-
-def intake_funnel(
-    *,
-    hostnames_seen: int,
-    hostnames_filtered: int,
-    new_domains: int,
-    repeat_domains: int,
-) -> Funnel:
-    """CertStream hostnames to newly-queued domains.
-
-    ``hostnames_filtered`` is what ``certstream_filter.to_registrable`` refused
-    (wrong TLD, bare public suffix, junk). The survivors then split into rows
-    the queue had never seen (``new_domains``) and re-observations of a domain
-    already queued (``repeat_domains``) — a repeat is not waste, it is a
-    certificate renewal or another SAN entry for a domain already in hand.
-    """
-    passed_filter = max(0, hostnames_seen - hostnames_filtered)
-    return Funnel(
-        name="intake",
+        name="certstream",
         note=(
-            "Counted in hostnames, not domains: one certificate can carry many "
-            "hostnames that reduce to a single registrable domain."
+            "This run only. Guards run in this order, each seeing what the "
+            "previous passed; the last two steps turn surviving hostnames "
+            "into new queue rows."
         ),
-        stages=[
-            Stage(
-                key="observed",
-                label="Hostnames seen on the feed",
-                entered=hostnames_seen,
-                dropped=hostnames_filtered,
-                note="Dropped: not a tracked TLD, a bare public suffix, or junk.",
-            ),
-            Stage(
-                key="registrable",
-                label="Reduced to a tracked domain",
-                entered=passed_filter,
-                dropped=max(0, passed_filter - new_domains - repeat_domains),
-                note="Dropped: collapsed into another hostname from the same certificate.",
-            ),
-            Stage(
-                key="deduplicated",
-                label="Not already on the queue",
-                entered=new_domains + repeat_domains,
-                dropped=repeat_domains,
-                note="Dropped: re-observation of a domain already queued (renewal or extra SAN).",
-            ),
-        ],
+        stages=stages,
     )
 
 

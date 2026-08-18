@@ -1597,12 +1597,19 @@ async def listener(
     # the filter refuses leaves no trace anywhere. Without these two counters
     # the single largest drop in the whole pipeline is unmeasurable, so they
     # are counted here and published with the rest of the listener telemetry.
+    # Scoped to the active run. A cumulative counter cannot answer "is intake
+    # working right now" -- it only ever grows, so a stalled listener and a
+    # busy one look identical. Starting a new run zeroes the whole set.
+    _counters_are_this_run = (
+        str(listener_status.get("intake_run_id", "") or "") == active_run_id
+        and bool(active_run_id)
+    )
     hostnames_seen = int(
         listener_status.get("hostnames_seen", 0) or 0
-    )
+    ) if _counters_are_this_run else 0
     hostnames_filtered = int(
         listener_status.get("hostnames_filtered", 0) or 0
-    )
+    ) if _counters_are_this_run else 0
     # Apexes refused because their certificate carried too many unrelated
     # domains to be one company's. Tracked apart from junk-filtered hostnames:
     # this is a deliberate intake rejection, not malformed input.
@@ -1619,17 +1626,17 @@ async def listener(
     # an untracked TLD (a configuration choice) from a bulk-registration farm
     # (somebody spamming the certificate log), and those want opposite
     # responses.
+    # Restored together with the hostname count or not at all: the tally is a
+    # breakdown *of* those hostnames. Observed live, hostnames_seen came back
+    # as 0 while the tally carried 256,698 drops from a previous run, so drops
+    # exceeded the population they describe and the view showed every hostname
+    # dying at the first guard.
     _restored_drops = listener_status.get("intake_drops")
     intake_drops: dict[str, int] = (
         {str(k): int(v or 0) for k, v in _restored_drops.items()}
-        if isinstance(_restored_drops, dict) and hostnames_seen > 0
+        if _counters_are_this_run and isinstance(_restored_drops, dict)
         else {}
     )
-    # Restored together or not at all. These are two halves of one measurement
-    # -- the guard tally is a breakdown *of* the hostnames seen -- and observed
-    # live, hostnames_seen came back as 0 while the tally carried over from a
-    # previous run. Drops then exceeded the population they describe, which
-    # renders as every hostname dying at the first guard.
     if sum(intake_drops.values()) > hostnames_seen:
         intake_drops = {}
     # Per-guard attrition. A single "filtered" total cannot tell an untracked
@@ -1926,6 +1933,7 @@ async def listener(
                             hostnames_seen=hostnames_seen,
                             hostnames_filtered=hostnames_filtered,
                             intake_drops=dict(intake_drops),
+                            intake_run_id=active_run_id,
                             platform_apexes_dropped=platform_apexes_dropped,
                             platform_certs_dropped=platform_certs_dropped,
                             last_platform_cert=last_platform_cert,

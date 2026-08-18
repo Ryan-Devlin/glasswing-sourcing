@@ -3275,6 +3275,19 @@ function FunnelPage() {
 
       <Throughput windows={data.throughput} />
 
+      <h2>CertStream — this run</h2>
+      {!data.certstream_live ? (
+        <p className="funnel-warn">
+          No counters yet for this run. They appear once the listener has
+          processed a frame — this is "no data", not zero.
+        </p>
+      ) : (
+        <>
+          <FunnelTable funnel={data.certstream} />
+          <p className="funnel-note">{data.certstream.note}</p>
+        </>
+      )}
+
       <h2>Screening — queued domains to reviewable companies</h2>
       {!data.queue_counts_live && (
         <p className="funnel-warn">
@@ -3297,18 +3310,6 @@ function FunnelPage() {
         </>
       )}
 
-      <h2>Intake — feed hostnames to queued domains</h2>
-      {!data.intake_counts_live ? (
-        <p className="funnel-warn">
-          No intake counters yet. The listener publishes these once it has run
-          since the counters were added — this is "no data", not zero.
-        </p>
-      ) : (
-        <>
-          <FunnelTable funnel={intake} />
-          <p className="funnel-note">{intake.note}</p>
-        </>
-      )}
     </section>
   );
 }

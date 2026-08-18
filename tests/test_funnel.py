@@ -7,7 +7,7 @@ is distinguished from a backlog is asserted directly.
 import unittest
 
 from funnel import (
-    Funnel, Stage, Throughput, biggest_losses, intake_funnel, screening_funnel,
+    Funnel, Stage, Throughput, biggest_losses, certstream_funnel, screening_funnel,
 )
 
 
@@ -96,27 +96,52 @@ class ScreeningFunnelTests(unittest.TestCase):
         self.assertAlmostEqual(by_key["reachable"]["share_of_start"], 0.15)
 
 
-class IntakeFunnelTests(unittest.TestCase):
-    def test_repeat_observations_are_dropped_at_the_dedup_stage(self):
-        funnel = intake_funnel(
-            hostnames_seen=1000, hostnames_filtered=900,
-            new_domains=40, repeat_domains=60,
-        )
-        stages = {s.key: s for s in funnel.stages}
-        self.assertEqual(stages["observed"].dropped, 900)
-        self.assertEqual(stages["registrable"].entered, 100)
-        self.assertEqual(stages["deduplicated"].dropped, 60)
-        self.assertEqual(funnel.survived, 40)
+class CertstreamFunnelTests(unittest.TestCase):
+    """One run-scoped funnel: hostnames in, queued domains out.
 
-    def test_multi_san_collapse_is_attributed_to_the_registrable_stage(self):
-        # 100 hostnames survive the filter but reduce to 10 domains: the 90
-        # collapsed entries belong to the reduction stage, not to dedup.
-        funnel = intake_funnel(
-            hostnames_seen=200, hostnames_filtered=100,
-            new_domains=4, repeat_domains=6,
+    Replaces two separate views. Splitting the guards from the deduplication
+    made the reader do arithmetic between two tables for no gain.
+    """
+
+    def setUp(self):
+        self.funnel = certstream_funnel(
+            1_000,
+            {"extension_not_tracked": 700, "machine_generated": 20},
+            new_domains=50,
+            repeat_domains=30,
         )
-        stages = {s.key: s for s in funnel.stages}
-        self.assertEqual(stages["registrable"].dropped, 90)
+        self.stages = {s.key: s for s in self.funnel.stages}
+
+    def test_the_chain_is_closed_from_hostnames_to_queued_domains(self):
+        for previous, nxt in zip(self.funnel.stages, self.funnel.stages[1:]):
+            with self.subTest(stage=nxt.key):
+                self.assertEqual(nxt.entered, previous.survived)
+        self.assertEqual(self.funnel.survived, 50)
+
+    def test_guards_run_in_declared_order_each_seeing_the_previous_survivors(self):
+        from certstream_filter import DROP_REASONS
+
+        guard_keys = [s.key for s in self.funnel.stages][: len(DROP_REASONS)]
+        self.assertEqual(guard_keys, list(DROP_REASONS))
+
+    def test_multi_san_collapse_is_a_drop_at_the_reduction_step(self):
+        # 280 hostnames survive the guards but only 80 distinct domains come
+        # out; the 200 collapsed entries belong here, not to dedup.
+        self.assertEqual(self.stages["registrable"].dropped, 200)
+
+    def test_repeat_observations_drop_at_the_queue_step(self):
+        self.assertEqual(self.stages["new_to_queue"].dropped, 30)
+
+    def test_a_run_with_no_traffic_yields_no_negative_counts(self):
+        empty = certstream_funnel(0, {})
+        for stage in empty.stages:
+            with self.subTest(stage=stage.key):
+                self.assertGreaterEqual(stage.survived, 0)
+        self.assertEqual(empty.survived, 0)
+
+    def test_the_note_says_it_is_one_run(self):
+        # A cumulative counter cannot answer "is intake working right now".
+        self.assertIn("run", self.funnel.to_dict()["note"].lower())
 
 
 class BiggestLossesTests(unittest.TestCase):
