@@ -88,6 +88,20 @@ NEUTRAL_LABELS = frozenset({
 # never queued cannot be recovered later.
 MAX_APEXES_PER_CERT = max(2, int(os.getenv("INTAKE_MAX_APEXES_PER_CERT", "10")))
 
+# Platform certificates are ranked to the floor, not discarded. Every *name*
+# rule in ``certstream_filter`` was validated against the 1,911 domains this
+# corpus had already judged real candidates, and required zero losses -- a
+# test that rejected three earlier versions. This rule could get no such test,
+# because certificate composition was never stored, so there is no way to check
+# whether a real candidate ever arrived on a cert carrying eleven apexes.
+#
+# An untested irreversible rule is not worth its own certainty. Sorting below
+# a never-scored row (which reads as -1) means these are never fetched in
+# practice, which is the same outcome a drop would produce -- but the row
+# survives, ``intake_evidence`` records why, and the rule can be checked
+# against real outcomes later instead of being trusted forever.
+SHARED_CERT_SCORE = int(os.getenv("INTAKE_SHARED_CERT_SCORE", "-50"))
+
 _PRODUCT_POINTS = 8
 _PRODUCT_CAP = 32
 _BREADTH_POINTS = 2
@@ -108,8 +122,10 @@ class CertificateReading:
     """What one certificate says about the domains on it."""
 
     scored: list[ScoredDomain] = field(default_factory=list)
-    dropped: list[str] = field(default_factory=list)
-    drop_reason: str = ""
+    # Domains ranked to the floor rather than refused. They are still in
+    # ``scored`` -- this is the audit trail, not a separate outcome.
+    penalized: list[str] = field(default_factory=list)
+    penalty_reason: str = ""
     # Hostnames the junk/TLD filter refused. Counted here so the caller does
     # not have to run the filter a second time just to tally intake attrition.
     filtered_hostnames: int = 0
@@ -169,9 +185,14 @@ def read_certificate(
         # A platform's shared certificate. Every apex on it used to be queued
         # as an equal peer, which is a large and invisible noise source at the
         # very top of the funnel.
+        reason = f"shared_cert:{len(grouped)}_apexes"
         return CertificateReading(
-            dropped=sorted(grouped),
-            drop_reason=f"shared_cert:{len(grouped)}_apexes",
+            scored=[
+                ScoredDomain(domain=domain, score=SHARED_CERT_SCORE, evidence=reason)
+                for domain in sorted(grouped)
+            ],
+            penalized=sorted(grouped),
+            penalty_reason=reason,
             filtered_hostnames=filtered,
         )
 

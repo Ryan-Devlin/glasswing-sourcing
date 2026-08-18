@@ -91,19 +91,35 @@ class RescoringTests(unittest.TestCase):
 
 
 class PlatformCertificateTests(unittest.TestCase):
-    def test_a_shared_certificate_is_dropped_whole(self):
+    def test_a_shared_certificate_is_ranked_to_the_floor_not_discarded(self):
+        # Every name rule was validated against the 1,911 existing candidates
+        # with zero losses. This rule could get no such test -- certificate
+        # composition was never stored -- so it is deliberately reversible.
         hosts = [f"company{i}.ai" for i in range(MAX_APEXES_PER_CERT + 1)]
         reading = read_certificate(hosts, ALL)
-        self.assertEqual(reading.scored, [])
-        self.assertEqual(len(reading.dropped), MAX_APEXES_PER_CERT + 1)
-        self.assertIn("shared_cert", reading.drop_reason)
+        self.assertEqual(len(reading.scored), MAX_APEXES_PER_CERT + 1)
+        self.assertEqual(len(reading.penalized), MAX_APEXES_PER_CERT + 1)
+        self.assertIn("shared_cert", reading.penalty_reason)
 
-    def test_a_company_holding_a_few_domains_is_kept(self):
-        # Dropping at intake is irreversible, so the threshold is generous:
-        # a real company legitimately holds .com plus .ai plus a redirect.
+    def test_the_floor_sorts_below_a_never_scored_row(self):
+        # Unscored rows read as -1 in the claim ordering. Positive evidence
+        # that something is a hosting artefact should rank below knowing
+        # nothing about it, so these are never fetched in practice.
+        hosts = [f"company{i}.ai" for i in range(MAX_APEXES_PER_CERT + 1)]
+        for entry in read_certificate(hosts, ALL).scored:
+            self.assertLess(entry.score, -1)
+
+    def test_the_reason_is_recorded_so_the_rule_can_be_checked_later(self):
+        hosts = [f"company{i}.ai" for i in range(MAX_APEXES_PER_CERT + 1)]
+        self.assertIn("shared_cert", read_certificate(hosts, ALL).scored[0].evidence)
+
+    def test_a_company_holding_a_few_domains_is_unpenalised(self):
+        # A real company legitimately holds .com plus .ai plus a redirect.
         reading = read_certificate(["foo.ai", "foo.com", "foo.io"], ALL)
         self.assertEqual(len(reading.scored), 3)
-        self.assertEqual(reading.dropped, [])
+        self.assertEqual(reading.penalized, [])
+        for entry in reading.scored:
+            self.assertGreater(entry.score, 0)
 
     def test_the_threshold_is_on_distinct_apexes_not_hostnames(self):
         # One company with many subdomains is the best kind of candidate and
@@ -111,6 +127,7 @@ class PlatformCertificateTests(unittest.TestCase):
         hosts = ["foo.ai"] + [f"svc{i}.foo.ai" for i in range(40)]
         reading = read_certificate(hosts, ALL)
         self.assertEqual(reading.domains, ["foo.ai"])
+        self.assertEqual(reading.penalized, [])
 
 
 class TldPriorTests(unittest.TestCase):
@@ -169,7 +186,7 @@ class RobustnessTests(unittest.TestCase):
             with self.subTest(hosts=hosts):
                 reading = read_certificate(hosts, ALL)
                 self.assertEqual(reading.scored, [])
-                self.assertEqual(reading.dropped, [])
+                self.assertEqual(reading.penalized, [])
 
     def test_untracked_extensions_are_filtered_before_scoring(self):
         reading = read_certificate(["foo.ai", "bar.net"], {".ai"})

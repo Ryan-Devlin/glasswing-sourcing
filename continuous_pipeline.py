@@ -961,6 +961,21 @@ def discard_pending_by_extension(
     This only ever touches the pipeline's own scheduling queue
     (undiscovered, unscored hostnames) -- never classifications, training
     truth, or any human decision.
+
+    **The reason this exists no longer holds, and wiping now costs something
+    it did not used to.** The backlog "dominated every claim_batch() call"
+    because the queue was ordered by recency, so it had no way to prefer a
+    good row over an old one. It now orders by intake_score, and a large
+    backlog no longer crowds anything out -- high-scoring rows surface
+    regardless of age.
+
+    Wiping also destroys the property the intake scorer is built on. A bare
+    registration scores low and waits; when its founders ship, the certificate
+    that provisions their app subdomains re-scores the row upward and it
+    climbs the queue by itself. Discard the row and that second certificate
+    arrives to find nothing to update -- the domain is re-inserted as a
+    first sighting with its history gone. Prefer letting low-scoring rows sit:
+    they cost a row each and are no longer in anyone's way.
     """
     rows = conn.execute(
         "SELECT domain FROM domains WHERE status IN ('pending', 'processing')"
@@ -1797,12 +1812,14 @@ async def listener(
                         allowed_extensions,
                     )
                     hostnames_filtered += reading.filtered_hostnames
-                    if reading.dropped:
+                    if reading.penalized:
                         # A platform's shared certificate. Every apex on it
-                        # used to be queued as an equal peer.
-                        platform_apexes_dropped += len(reading.dropped)
+                        # used to be queued as an equal peer; they are now
+                        # ranked below even a never-scored row, so they are
+                        # never fetched in practice while staying auditable.
+                        platform_apexes_dropped += len(reading.penalized)
                         platform_certs_dropped += 1
-                        last_platform_cert = reading.drop_reason
+                        last_platform_cert = reading.penalty_reason
                     intake_scores = {
                         entry.domain: entry for entry in reading.scored
                     }
