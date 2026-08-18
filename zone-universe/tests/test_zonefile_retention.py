@@ -1,4 +1,5 @@
 import concurrent.futures
+from types import SimpleNamespace
 import errno
 import os
 import time
@@ -9,11 +10,13 @@ import pytest
 
 from zone_universe.database import connect, utc_now
 from zone_universe.worker import (
+    download_scheduled_snapshots,
     open_stream_for_write,
     reclaim_orphaned_queue_directories,
     retire_full_universe_queues,
     retire_zonefile,
     scheduled_snapshot_day,
+    snapshot_day_key,
 )
 
 
@@ -216,3 +219,63 @@ def test_stream_open_times_out_when_the_importer_never_reads(
         importer = pool.submit(time.sleep, 3)
         with pytest.raises(TimeoutError):
             open_stream_for_write(fifo, importer, timeout=0.5)
+
+
+def test_a_zone_that_already_imported_today_is_not_imported_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure in one zone must not re-import the zones that succeeded.
+
+    Success is only recorded once every TLD finishes, so a `.com` failure
+    used to send the retry back through `.app`. That second run diffs the
+    day's file against the snapshot the first run just wrote, collapsing
+    added_domains to zero -- the newly delegated names are not merely
+    mis-reported, they are never queued, and the snapshot has already moved
+    past them so no later run can recover them.
+    """
+    import asyncio
+
+    from zone_universe import worker as worker_module
+
+    database = tmp_path / "universe.sqlite3"
+    conn = connect(database)
+    settings = SimpleNamespace(tlds=("app", "com"), database=database)
+    monkeypatch.setenv("CZDS_USERNAME", "user")
+    monkeypatch.setenv("CZDS_PASSWORD", "secret")
+    monkeypatch.setattr(worker_module, "ZONEFILES", tmp_path)
+    client = tmp_path / "czds.py"
+    client.write_text("", encoding="utf-8")
+    monkeypatch.setattr(worker_module, "CZDS_CLIENT", client)
+    streamed: list[str] = []
+
+    def fake_stream(_settings: object, tld: str) -> dict[str, object]:
+        streamed.append(tld)
+        if tld == "com":
+            raise RuntimeError("com import failed")
+        return {"delegated_domains": 10, "added_domains": 7, "removed_domains": 1}
+
+    monkeypatch.setattr(worker_module, "stream_czds_zone", fake_stream)
+    monkeypatch.setattr(
+        worker_module, "scheduled_snapshot_day", lambda *a, **k: "2026-08-18"
+    )
+
+    asyncio.run(download_scheduled_snapshots(conn, settings))
+    assert streamed == ["app", "com"]
+    assert _state(conn, snapshot_day_key("app")) == "2026-08-18"
+    assert _state(conn, snapshot_day_key("com")) == ""
+
+    # The retry after the .com failure must resume at .com, not redo .app.
+    conn.execute("DELETE FROM worker_state WHERE key='last_czds_attempt_at'")
+    conn.commit()
+    asyncio.run(download_scheduled_snapshots(conn, settings))
+
+    assert streamed == ["app", "com", "com"]
+    conn.close()
+
+
+def _state(conn, key: str) -> str:
+    row = conn.execute(
+        "SELECT value FROM worker_state WHERE key=?", (key,)
+    ).fetchone()
+    return str(row["value"]) if row is not None else ""

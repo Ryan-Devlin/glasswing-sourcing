@@ -71,6 +71,11 @@ def scheduled_snapshot_day(now: datetime | None = None) -> str:
     return eastern.date().isoformat()
 
 
+def snapshot_day_key(tld: str) -> str:
+    """State key recording the day a single zone last imported successfully."""
+    return f"last_czds_snapshot_day_{tld}"
+
+
 def _state_value(conn, key: str) -> str:
     row = conn.execute(
         "SELECT value FROM worker_state WHERE key=?", (key,)
@@ -210,12 +215,24 @@ async def download_scheduled_snapshots(conn, settings: Settings) -> bool:
     imported: dict[str, dict[str, object]] = {}
     try:
         for tld in settings.tlds:
+            # Re-importing a zone the same day destroys that day's delta: the
+            # second run diffs the day's file against the snapshot the first
+            # run just wrote, so added_domains collapses to zero and the newly
+            # delegated names are never queued. Because success is only
+            # recorded once every TLD finishes, a failure in one zone used to
+            # drag the zones that already succeeded through exactly that.
+            # Confirmed live: a killed `.com` import made the 14:36 retry
+            # re-import `.app`, which reported "+0 new today" against its own
+            # 14:08 snapshot.
+            if _state_value(conn, snapshot_day_key(tld)) == schedule_day:
+                continue
             set_state(conn, "crawler_status", f"streaming_daily_{tld}_snapshot")
             result = await asyncio.wait_for(
                 asyncio.to_thread(stream_czds_zone, settings, tld),
                 timeout=7200,
             )
             imported[tld] = result
+            set_state(conn, snapshot_day_key(tld), schedule_day)
             set_state(
                 conn,
                 "last_zone_import",
