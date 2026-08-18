@@ -160,3 +160,78 @@ class CollectorContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MachineGeneratedNameTests(unittest.TestCase):
+    """Bulk-registration noise, judged on the name and never the extension.
+
+    Measured on the 247,742-row queue, 7.83% of rows were machine-generated
+    strings that every other guard waved through, concentrated so heavily on
+    one TLD that they were making that extension look unproductive.
+    """
+
+    def test_digit_strings_are_dropped_on_every_extension(self):
+        for tld in (".com", ".ai", ".io", ".app", ".dev", ".xyz"):
+            with self.subTest(tld=tld):
+                self.assertEqual(to_registrable(f"182904u129831{tld}", ALL), "")
+
+    def test_the_bulk_registration_farm_is_dropped(self):
+        # Real rows from the queue.
+        for hostname in ("000026js.app", "0003939pgl1.app", "004936gg.app",
+                         "00417dh1.app", "00097lottery.app"):
+            with self.subTest(hostname=hostname):
+                self.assertEqual(to_registrable(hostname, ALL), "")
+
+    def test_unpronounceable_strings_are_dropped(self):
+        for hostname in ("19823urfq9chwaoisuzdnlfcaws.com",
+                         "x7k2mqp9wzvnbhdlrs.ai", "kjhgfdsazxcvbnm.app"):
+            with self.subTest(hostname=hostname):
+                self.assertEqual(to_registrable(hostname, ALL), "")
+
+    def test_templated_bulk_names_are_dropped(self):
+        # One generator, thousands of domains, all on the best-yielding TLD.
+        for hostname in ("auth-8510-system.ai", "private-1971-system.ai",
+                         "api-2821-system.ai", "vault-5982-system.ai"):
+            with self.subTest(hostname=hostname):
+                self.assertEqual(to_registrable(hostname, ALL), "")
+
+    def test_number_plus_word_brands_survive(self):
+        # Every one of these is a real candidate in this corpus. An earlier
+        # digit-ratio rule discarded all of them -- pairing a small number
+        # with a word is ordinary branding, not machine output.
+        for hostname in ("387labs.ai", "eco360.ai", "101gen.ai",
+                         "8004scan.app", "gr8rthan.ai", "point-72.com"):
+            with self.subTest(hostname=hostname):
+                self.assertEqual(to_registrable(hostname, ALL), hostname)
+
+    def test_acronym_dense_names_survive(self):
+        # gpt7prompts reduces to one vowel in ten letters. A vowel-scarcity
+        # rule discarded it; this sector is full of acronyms, so vowel counts
+        # are not evidence of a machine.
+        for hostname in ("gpt7prompts.ai", "apachealthgroup.com", "llmops.ai"):
+            with self.subTest(hostname=hostname):
+                self.assertEqual(to_registrable(hostname, ALL), hostname)
+
+    def test_numeric_brands_survive(self):
+        # 375.ai and 8090.ai are classified as companies in this corpus. The
+        # length floor is what protects them -- an earlier all-numeric guard
+        # discarded exactly these.
+        for hostname in ("375.ai", "8090.ai", "2021.ai", "a16z.com", "n8n.io"):
+            with self.subTest(hostname=hostname):
+                self.assertEqual(to_registrable(hostname, ALL), hostname)
+
+    def test_coined_and_real_brands_survive(self):
+        for hostname in ("exa.ai", "groq.ai", "vly.ai", "qdrant.io", "x.ai",
+                         "anthropic.com", "cloudflare.com", "hashicorp.com",
+                         "databricks.com", "perplexity.ai", "elevenlabs.io",
+                         "web3auth.io", "scale.com"):
+            with self.subTest(hostname=hostname):
+                self.assertEqual(to_registrable(hostname, ALL), hostname)
+
+    def test_short_labels_are_never_judged_unpronounceable(self):
+        # Coined brands are short by design; the length floors keep the
+        # heuristics well clear of them.
+        from certstream_filter import is_machine_generated
+        for label in ("groq", "exa", "vly", "xai", "n8n", "375", "8090"):
+            with self.subTest(label=label):
+                self.assertFalse(is_machine_generated(label))

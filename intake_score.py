@@ -41,11 +41,25 @@ from certstream_filter import normalize_hostname, to_registrable
 # How dense a TLD is in real companies, as a starting score. Not a gate --
 # the extension allow-list still decides what is tracked at all; this only
 # decides what gets looked at first when capacity is short.
-TLD_WEIGHTS = {
-    ".ai": 30, ".dev": 24, ".io": 22, ".app": 20,
-    ".tech": 14, ".xyz": 12, ".co": 10, ".com": 8,
-}
-DEFAULT_TLD_WEIGHT = 8
+# Nearly flat, and small next to the evidence terms below. An earlier version
+# hand-guessed a 8..30 spread and was wrong: measured on this corpus, .com
+# yields 2.02% candidates against .dev's 1.00% and .app's 0.64%, yet .com had
+# been given the lowest weight of all eight and .dev the second highest.
+#
+# The .app number turned out not to be about .app at all -- that TLD is where
+# a bulk-registration farm lives (000026js.app, 004936gg.app), so the weight
+# was laundering a garbage-filtering gap into a fake fact about extensions.
+# The filter now drops those names outright, which is the right place to fix
+# it.
+#
+# What survives is a small .ai bonus, because its yield gap (7.90%) is far too
+# large to be explained by noise alone -- though even that is confounded, since
+# .ai arrives via CertStream while .com and .app arrive via the zone crawler,
+# so the two are different acquisition channels rather than a clean comparison.
+# Kept deliberately small: the TLD is a proxy, evidence of a build is a direct
+# observation, and a proxy must never outweigh an observation.
+TLD_WEIGHTS = {".ai": 16}
+DEFAULT_TLD_WEIGHT = 10
 
 # Subdomains that mean somebody built something. An application, an API, a
 # dashboard or an auth flow is engineering work; it does not appear on a

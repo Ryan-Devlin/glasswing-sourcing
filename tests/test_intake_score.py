@@ -114,9 +114,32 @@ class PlatformCertificateTests(unittest.TestCase):
 
 
 class TldPriorTests(unittest.TestCase):
-    def test_denser_tlds_start_higher(self):
-        self.assertGreater(tld_weight("foo.ai"), tld_weight("foo.com"))
-        self.assertGreater(tld_weight("foo.dev"), tld_weight("foo.co"))
+    def test_the_tld_prior_is_small_next_to_the_evidence(self):
+        # An earlier version hand-guessed an 8..30 spread that the corpus
+        # contradicted: .com yields 2.02% candidates against .dev's 1.00% and
+        # .app's 0.64%, yet .com had been weighted lowest of all eight. TLD is
+        # a proxy; subdomain structure is a direct observation of a build. The
+        # proxy must never be able to outweigh the observation.
+        spread = max(tld_weight(f"foo{t}") for t in (".ai", ".com", ".io")) - \
+            min(tld_weight(f"foo{t}") for t in (".ai", ".com", ".io"))
+        built = score_of(["foo.com", "app.foo.com", "api.foo.com"], "foo.com")
+        bare = score_of(["foo.com", "www.foo.com"], "foo.com")
+        self.assertLess(spread, built - bare)
+
+    def test_shipping_beats_a_favoured_extension(self):
+        # The case that exposed the bad weights: a .com that shipped an app
+        # must outrank a .ai nobody has built on.
+        built_com = score_of(
+            ["foo.com", "www.foo.com", "app.foo.com", "api.foo.com"], "foo.com"
+        )
+        bare_ai = score_of(["bar.ai", "www.bar.ai"], "bar.ai")
+        self.assertGreater(built_com, bare_ai)
+
+    def test_ai_keeps_a_small_edge_at_equal_evidence(self):
+        # Its 7.90% yield is too large to ignore, but the edge is a tiebreak.
+        ai = score_of(["foo.ai", "www.foo.ai"], "foo.ai")
+        com = score_of(["foo.com", "www.foo.com"], "foo.com")
+        self.assertGreater(ai, com)
 
     def test_an_untracked_suffix_falls_back_rather_than_raising(self):
         self.assertGreater(tld_weight("foo.example"), 0)

@@ -35,6 +35,8 @@ guards, generalised from ``.ai``-only to the pipeline's supported extensions.
 
 from __future__ import annotations
 
+import re
+
 # RFC 1035 maximum FQDN length. An untrusted feed can emit longer strings;
 # they are malformed by definition and would only bloat a queue row.
 MAX_DOMAIN_LENGTH = 253
@@ -104,6 +106,90 @@ def is_domain_too_long(domain: str) -> bool:
     return len(domain) > MAX_DOMAIN_LENGTH
 
 
+# Machine-generated labels. Measured on the 247,742-row queue, 7.83% of rows
+# were bulk-registration noise that every guard above waved through --
+# 000026js.app, 0003939pgl1.app, 004936gg.app, 00097lottery.app -- almost all
+# of it on one TLD, which was quietly making that TLD look unproductive.
+#
+# Dropping at intake is irreversible, so these two rules are deliberately
+# narrow and each needs real length before it fires:
+#
+#   * Digit-dominated labels of six characters or more. The length floor is
+#     what keeps real numeric brands: 375.ai and 8090.ai are both companies
+#     in this corpus, and an earlier all-numeric guard would have discarded
+#     them, so short digit labels stay.
+#   * Long labels with no pronounceable structure -- a vowel-starved run or a
+#     six-consonant pile-up in a name of ten characters or more. Coined
+#     brands are short by design (groq, exa, vly, qdrant), so the floor keeps
+#     them well clear of this.
+_VOWELS = frozenset("aeiouy")
+_MIN_DIGIT_HEAVY_LEN = 6
+_MAX_DIGIT_RATIO = 0.5
+_MAX_DIGIT_RUN = 5
+_MIN_UNPRONOUNCEABLE_LEN = 10
+_MAX_CONSONANT_RUN = 6
+_MIN_VOWEL_RATIO = 0.18
+
+
+def is_machine_generated(label: str) -> bool:
+    """True for labels that read as bulk-registration output, not a name."""
+    core = re.sub(r"[^a-z0-9]", "", (label or "").lower())
+    if len(core) < _MIN_DIGIT_HEAVY_LEN:
+        # Too short to judge, and short is where the real coined brands and
+        # numeric brands live.
+        return False
+
+    # A plain digit ratio is the wrong test. Checked against this corpus, a
+    # 0.4 ratio discarded seven domains the pipeline had already judged real
+    # candidates -- 387labs.ai, eco360.ai, 101gen.ai, gpt7prompts.ai -- because
+    # pairing a small number with a word is ordinary branding. The farm names
+    # differ structurally, not statistically: they carry leading-zero counters
+    # (000026js, 004936gg, 0003939pgl1) or long digit runs, which no brand
+    # does.
+    if re.match(r"0\d{2,}", core):
+        return True
+    if max((len(run) for run in re.findall(r"\d+", core)), default=0) >= _MAX_DIGIT_RUN:
+        return True
+    digits = sum(character.isdigit() for character in core)
+    if len(core) >= _MIN_UNPRONOUNCEABLE_LEN and digits / len(core) >= _MAX_DIGIT_RATIO:
+        return True
+
+    if len(core) < _MIN_UNPRONOUNCEABLE_LEN:
+        return False
+
+    # No vowel-ratio rule. It was redundant -- every random string it caught
+    # (x7k2mqp9wzvnbhdlrs, kjhgfdsazxcvbnm) is already caught by the
+    # consonant-run test below -- and it was the one heuristic producing a
+    # false positive against a real candidate: gpt7prompts.ai reduces to
+    # "gptprompts", one vowel in ten letters. Acronym-dense names are exactly
+    # what this sector produces, so vowel scarcity is not evidence of a machine.
+    runs = re.findall(r"[^aeiouy0-9]+", core)
+    return max((len(run) for run in runs), default=0) >= _MAX_CONSONANT_RUN
+
+
+# A hyphen-delimited number sitting between two words is a template, not a
+# name: auth-8510-system.ai, private-1971-system.ai, admin-7840-system.ai,
+# api-2821-system.ai -- one generator, thousands of domains, all of it on the
+# best-yielding TLD in the corpus.
+#
+# Matched structurally rather than by entropy, because entropy cannot separate
+# this farm from real names. Loosening the vowel and consonant thresholds far
+# enough to catch it also discarded gr8rthan.ai ("greater than"),
+# apachealthgroup.com ("APA Health Group") and trendsspotter.ai. Requiring the
+# digits to be delimited by hyphens on *both* sides is what makes it precise:
+# a brand may contain digits (gr8rthan, a16z, web3auth, n8n) but essentially
+# never as a standalone hyphen-fenced number between two words.
+_TEMPLATED_NUMBER = re.compile(r"(?:^|-)\d{2,6}-(?=[a-z])")
+
+
+def is_templated_bulk_name(label: str) -> bool:
+    """True for names built by a generator from a word/number/word template."""
+    text = (label or "").lower()
+    if "-" not in text:
+        return False
+    return bool(_TEMPLATED_NUMBER.search(text))
+
+
 def normalize_hostname(hostname: str) -> str:
     """Lowercase and strip a raw feed hostname down to a bare host.
 
@@ -155,6 +241,10 @@ def to_registrable(
             return ""
 
     if is_motif_spam(label):
+        return ""
+    if is_machine_generated(label):
+        return ""
+    if is_templated_bulk_name(label):
         return ""
     if len(label) > 1 and len(set(label)) == 1:
         # A multi-character repeated-letter run (``aaa``, ``bb``) is never a
