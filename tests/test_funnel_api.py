@@ -18,16 +18,26 @@ def _payload():
     return response.json()
 
 
-def test_returns_one_certstream_funnel_and_the_screening_funnel():
-    # One CertStream view, not two: the guards and the deduplication are a
-    # continuous population and were split across two tables for no gain.
+def test_returns_exactly_one_funnel():
+    # One pipeline. Three tables in two different units was the whole problem.
     payload = _payload()
-    assert "intake" not in payload
-    assert payload["certstream"]["name"] == "certstream"
-    assert payload["screening"]["name"] == "screening"
-    assert [s["key"] for s in payload["screening"]["stages"]] == [
-        "queued", "screened", "reachable", "substantive",
-        "passed_rules", "candidate", "claude_reviewed", "claude_kept",
+    assert payload["funnel"]["name"] == "run"
+    assert "screening" not in payload
+    assert "certstream" not in payload
+
+
+def test_hostname_rejections_never_exceed_hostnames_seen():
+    # A cumulative guard tally against a reset hostname count reported more
+    # rejections than observations and rendered as a 4040% drop rate. When the
+    # two are out of step the tally is discarded rather than shown.
+    intake = _payload()["intake"]
+    assert intake["hostnames_rejected"] <= max(intake["hostnames_seen"], 0)
+
+
+def test_the_funnel_stages_are_the_run_pipeline():
+    assert [s["key"] for s in _payload()["funnel"]["stages"]] == [
+        "received", "screened", "resolved",
+        "substantive", "passed_rules", "candidate",
     ]
 
 
@@ -35,7 +45,7 @@ def test_the_live_chain_stays_arithmetically_closed():
     # Each stage reads its entered count from the previous stage's survivors.
     # If a query starts returning a different population, the percentages
     # silently describe a funnel that doesn't exist — catch it here.
-    stages = _payload()["screening"]["stages"]
+    stages = _payload()["funnel"]["stages"]
     for previous, nxt in zip(stages, stages[1:]):
         assert nxt["entered"] == previous["survived"], nxt["key"]
 
@@ -43,8 +53,8 @@ def test_the_live_chain_stays_arithmetically_closed():
 def test_no_stage_reports_negative_counts():
     # The queue and classification stores are queried separately and can
     # disagree mid-write; the UI must never render a negative.
-    for funnel in ("certstream", "screening"):
-        for stage in _payload()[funnel]["stages"]:
+    for stage in _payload()["funnel"]["stages"]:
+        if True:
             assert stage["survived"] >= 0, stage["key"]
             assert stage["dropped"] >= 0, stage["key"]
             assert stage["pending"] >= 0, stage["key"]
@@ -54,15 +64,14 @@ def test_backlog_is_reported_separately_from_drops():
     # The distinction the view exists to make: unscreened queue rows are
     # pending, never dropped. Reading them as rejections would send you
     # tuning a filter that never ran.
-    stages = {s["key"]: s for s in _payload()["screening"]["stages"]}
-    assert stages["queued"]["dropped"] == 0
-    assert stages["claude_reviewed"]["dropped"] == 0
+    stages = {s["key"]: s for s in _payload()["funnel"]["stages"]}
+    assert stages["received"]["dropped"] == 0
 
 
 def test_liveness_flags_distinguish_no_data_from_a_real_zero():
     payload = _payload()
     assert isinstance(payload["queue_counts_live"], bool)
-    assert isinstance(payload["intake_counts_live"], bool)
+    assert isinstance(payload["intake"]["live"], bool)
 
 
 def test_a_failed_queue_read_still_renders_the_classification_half(monkeypatch):
@@ -73,7 +82,7 @@ def test_a_failed_queue_read_still_renders_the_classification_half(monkeypatch):
     payload = _payload()
     assert payload["queue_counts_live"] is False
     # The classification stages are independent of the queue and must survive.
-    assert payload["screening"]["stages"][2]["key"] == "reachable"
+    assert payload["funnel"]["stages"][0]["key"] == "received"
 
 
 def test_biggest_losses_are_ranked_and_bounded():

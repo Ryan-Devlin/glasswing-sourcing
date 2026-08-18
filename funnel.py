@@ -166,164 +166,91 @@ class Throughput:
         }
 
 
-def certstream_funnel(
-    hostnames_seen: int,
-    drops: dict[str, int],
+def run_funnel(
     *,
-    new_domains: int = 0,
-    repeat_domains: int = 0,
-) -> Funnel:
-    """One funnel for the CertStream run: hostnames in, queued domains out.
-
-    Guards first, in the order they actually run -- each only ever sees what
-    the previous passed -- then the two ways a surviving hostname still fails
-    to become a new queue row: several hostnames on one certificate reducing
-    to the same registrable domain, and a domain the queue already holds.
-
-    Deliberately one view. Splitting the guards and the deduplication across
-    two tables made the reader do the arithmetic between them for no gain --
-    the population is continuous, and where the unit changes from hostnames to
-    domains the stage says so.
-
-    Scoped to a single run. Counters accumulating across restarts cannot
-    answer "is it working right now", which is the only question this is for.
-    """
-    from certstream_filter import DROP_REASONS
-
-    labels = {
-        "empty": "Empty or unparseable hostname",
-        "too_long": "Over the DNS length limit",
-        "no_registrable_label": "Bare public suffix, nothing registrable",
-        "extension_not_tracked": "TLD not in the tracked list",
-        "motif_spam": "Motif spam (aiaiai, mememe)",
-        "repeated_run": "Repeated-letter run (aaa, bb)",
-        "machine_generated": "Machine-generated name (000091fj, x7k2mqp9)",
-        "templated_bulk": "Templated bulk farm (auth-8510-system)",
-    }
-    stages: list[Stage] = []
-    remaining = hostnames_seen
-    for reason in DROP_REASONS:
-        removed = int(drops.get(reason, 0) or 0)
-        stages.append(Stage(
-            key=reason,
-            label=labels.get(reason, reason),
-            entered=remaining,
-            dropped=removed,
-        ))
-        remaining = max(0, remaining - removed)
-
-    # Survivors are still hostnames. These two turn them into queue rows, and
-    # both are ordinary outcomes rather than rejections.
-    collapsed = max(0, remaining - new_domains - repeat_domains)
-    stages.append(Stage(
-        key="registrable",
-        label="Reduced to a registrable domain",
-        entered=remaining,
-        dropped=collapsed,
-        note="Dropped: another hostname on the same certificate reduced to it.",
-    ))
-    stages.append(Stage(
-        key="new_to_queue",
-        label="Not already on the queue",
-        entered=new_domains + repeat_domains,
-        dropped=repeat_domains,
-        note="Dropped: re-observation of a domain already queued (renewal or extra SAN).",
-    ))
-
-    return Funnel(
-        name="certstream",
-        note=(
-            "This run only. Guards run in this order, each seeing what the "
-            "previous passed; the last two steps turn surviving hostnames "
-            "into new queue rows."
-        ),
-        stages=stages,
-    )
-
-
-def screening_funnel(
-    *,
-    queued: int,
+    received: int,
     unscreened: int,
-    screened: int,
-    classified: int,
+    no_verdict: int,
     ghost: int,
     insufficient: int,
     rejected: int,
     candidates: int,
-    claude_reviewed: int,
-    claude_kept: int,
 ) -> Funnel:
-    """Queue rows to companies worth a human's time.
+    """The whole pipeline for one CertStream run, in one unit.
 
-    Each stage's ``entered`` is the previous stage's ``survived``, so the chain
-    is arithmetically closed and the final survivor count is reproducible from
-    the inputs.
+    Every stage counts **domains**, and the first stage is exactly the number
+    of domains CertStream handed the queue during this run. Earlier versions
+    split this across three tables and changed unit halfway -- hostname guards
+    in one, queue rows in another -- so a reader could not reconcile the top of
+    one with the bottom of the previous, and a cumulative guard tally against a
+    reset hostname count produced drop rates above 100%.
+
+    Hostname-level rejections (wrong TLD, junk names, bulk farms) happen
+    *before* a domain exists, so they are not stages here at all. They are
+    intake noise, reported separately as a single line rather than pretended
+    into this funnel's arithmetic.
+
+    Scoped to one run. A cumulative view cannot answer "is it working right
+    now", which is the only thing this is for.
     """
-    verdict_dropped = max(0, screened - classified)
-    reachable = max(0, classified - ghost)
-    substantive = max(0, reachable - insufficient)
-    passed_rules = max(0, substantive - rejected)
-
     return Funnel(
-        name="screening",
-        note="Counted in domains, one row per registrable domain on the queue.",
+        name="run",
+        note=(
+            "One CertStream run, counted in domains at every stage. The top is "
+            "exactly what CertStream added to the queue during this run."
+        ),
         stages=[
             Stage(
-                key="queued",
-                label="On the queue",
-                entered=queued,
+                key="received",
+                label="Domains received from CertStream",
+                entered=received,
                 pending=unscreened,
-                note="Pending: never fetched yet. Backlog, not a rejection.",
+                note="Pending: queued but not fetched yet. Backlog, not a rejection.",
             ),
             Stage(
                 key="screened",
                 label="Fetched and screened",
-                entered=screened,
-                dropped=verdict_dropped,
+                entered=max(0, received - unscreened),
+                dropped=no_verdict,
                 note="Dropped: fetch or scrape failed, so no verdict was reached.",
             ),
             Stage(
-                key="reachable",
+                key="resolved",
                 label="Site actually resolved",
-                entered=classified,
+                entered=max(0, received - unscreened - no_verdict),
                 dropped=ghost,
                 note="Dropped: ghost — nothing served at the domain.",
             ),
             Stage(
                 key="substantive",
                 label="Site had real content",
-                entered=reachable,
+                entered=max(0, received - unscreened - no_verdict - ghost),
                 dropped=insufficient,
-                note="Dropped: insufficient — parked, placeholder, or too thin to judge.",
+                note="Dropped: parked, placeholder, or too thin to judge.",
             ),
             Stage(
                 key="passed_rules",
                 label="Survived the Python rules",
-                entered=substantive,
+                entered=max(
+                    0, received - unscreened - no_verdict - ghost - insufficient
+                ),
                 dropped=rejected,
                 note="Dropped: hard-denied by a classifier rule or a human decision.",
             ),
             Stage(
                 key="candidate",
                 label="Reached the candidate pool",
-                entered=passed_rules,
-                dropped=max(0, passed_rules - candidates),
+                entered=max(
+                    0,
+                    received - unscreened - no_verdict - ghost - insufficient
+                    - rejected,
+                ),
+                dropped=max(
+                    0,
+                    received - unscreened - no_verdict - ghost - insufficient
+                    - rejected - candidates,
+                ),
                 note="Dropped: scored but not routed to review, priority, or competitor.",
-            ),
-            Stage(
-                key="claude_reviewed",
-                label="Claude ran diligence",
-                entered=candidates,
-                pending=max(0, candidates - claude_reviewed),
-                note="Pending: eligible for diligence but not yet called. Backlog, not a rejection.",
-            ),
-            Stage(
-                key="claude_kept",
-                label="Claude said KEEP",
-                entered=claude_reviewed,
-                dropped=max(0, claude_reviewed - claude_kept),
-                note="Dropped: Claude reviewed the evidence and said REJECT.",
             ),
         ],
     )

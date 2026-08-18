@@ -3252,18 +3252,47 @@ function FunnelPage() {
   if (error) return <p className="error">Could not read the funnel: {error}</p>;
   if (!data) return null;
 
-  const screening = data.screening || { stages: [] };
-  const intake = data.intake || { stages: [] };
+  const funnel = data.funnel || { stages: [] };
+  const intake = data.intake || {};
 
   return (
     <section className="funnel-page">
-      <h1>Funnel attrition</h1>
+      <h1>Pipeline — this run</h1>
+
+      <Throughput windows={data.throughput} />
+
+      {/* Hostname-level rejections happen before a domain exists, so they are
+          deliberately one line and not funnel stages. Mixing them in is what
+          made the unit change halfway down the table and the percentages
+          stop reconciling. */}
+      {intake.live && (
+        <p className="funnel-lede">
+          CertStream showed {num(intake.hostnames_seen)} hostnames this run;{" "}
+          {num(intake.hostnames_rejected)} were rejected before becoming a
+          domain
+          {Object.keys(intake.by_guard || {}).length > 0 && (
+            <> — {Object.entries(intake.by_guard)
+              .map(([reason, n]) => `${reason.replace(/_/g, " ")} ${num(n)}`)
+              .join(" · ")}</>
+          )}
+          .
+        </p>
+      )}
 
       <div className="funnel-legend">
         <span><i className="swatch seg-survived" /> Passed on</span>
         <span><i className="swatch seg-dropped" /> Thrown out</span>
         <span><i className="swatch seg-pending" /> Waiting (not a rejection)</span>
       </div>
+
+      {!data.queue_counts_live && (
+        <p className="funnel-warn">
+          Queue unreadable right now — these counts may be stale.
+        </p>
+      )}
+
+      <FunnelTable funnel={funnel} />
+      <p className="funnel-note">{funnel.note}</p>
 
       {data.biggest_losses?.length > 0 && (
         <p className="funnel-lede">
@@ -3272,44 +3301,6 @@ function FunnelPage() {
           )).join(" · ")}
         </p>
       )}
-
-      <Throughput windows={data.throughput} />
-
-      <h2>CertStream — this run</h2>
-      {!data.certstream_live ? (
-        <p className="funnel-warn">
-          No counters yet for this run. They appear once the listener has
-          processed a frame — this is "no data", not zero.
-        </p>
-      ) : (
-        <>
-          <FunnelTable funnel={data.certstream} />
-          <p className="funnel-note">{data.certstream.note}</p>
-        </>
-      )}
-
-      <h2>Screening — queued domains to reviewable companies</h2>
-      {!data.queue_counts_live && (
-        <p className="funnel-warn">
-          Queue unreadable right now; screening stages below the queue are still live.
-        </p>
-      )}
-      <FunnelTable funnel={screening} />
-      <p className="funnel-note">{screening.note}</p>
-
-      <h2>Filter — which guard removed what</h2>
-      {!data.filter_live ? (
-        <p className="funnel-warn">
-          No guard counters yet. The listener publishes these once it has run
-          since they were added — this is "no data", not zero.
-        </p>
-      ) : (
-        <>
-          <FunnelTable funnel={data.filter} />
-          <p className="funnel-note">{data.filter.note}</p>
-        </>
-      )}
-
     </section>
   );
 }

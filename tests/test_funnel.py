@@ -7,7 +7,7 @@ is distinguished from a backlog is asserted directly.
 import unittest
 
 from funnel import (
-    Funnel, Stage, Throughput, biggest_losses, certstream_funnel, screening_funnel,
+    Funnel, Stage, Throughput, biggest_losses, run_funnel,
 )
 
 
@@ -46,102 +46,62 @@ class DropVersusBacklogTests(unittest.TestCase):
         self.assertEqual(stage.survived, 0)
 
 
-class ScreeningFunnelTests(unittest.TestCase):
+class RunFunnelTests(unittest.TestCase):
+    """One pipeline, one unit, scoped to one CertStream run."""
+
     def setUp(self):
-        self.funnel = screening_funnel(
-            queued=1000, unscreened=700, screened=300,
-            classified=200, ghost=50, insufficient=100, rejected=10,
-            candidates=40, claude_reviewed=25, claude_kept=5,
+        self.funnel = run_funnel(
+            received=1_000, unscreened=300, no_verdict=200,
+            ghost=150, insufficient=250, rejected=40, candidates=55,
         )
         self.stages = {s.key: s for s in self.funnel.stages}
+
+    def test_the_top_is_exactly_the_domains_received_this_run(self):
+        # The requirement this view exists to satisfy: the number at the top
+        # must equal what CertStream added to the queue during this run, with
+        # no reconciliation step in between.
+        self.assertEqual(self.funnel.stages[0].entered, 1_000)
+        self.assertEqual(self.stages["received"].label,
+                         "Domains received from CertStream")
 
     def test_the_chain_is_arithmetically_closed(self):
-        # Each stage's entered must equal the previous stage's survived, or
-        # the reported percentages describe a funnel that doesn't exist.
         for previous, nxt in zip(self.funnel.stages, self.funnel.stages[1:]):
             with self.subTest(stage=nxt.key):
                 self.assertEqual(nxt.entered, previous.survived)
 
-    def test_backlog_appears_at_the_queue_and_at_claude_only(self):
-        # Those are the two places work waits rather than being rejected.
-        with_pending = {s.key for s in self.funnel.stages if s.pending}
-        self.assertEqual(with_pending, {"queued", "claude_reviewed"})
+    def test_every_stage_counts_domains_so_nothing_changes_unit(self):
+        # Mixing hostname-level guard counts into this table is what produced
+        # a 4040% drop rate: a cumulative tally measured against a reset
+        # population. No stage here counts anything but queue rows.
+        for stage in self.funnel.stages:
+            with self.subTest(stage=stage.key):
+                self.assertLessEqual(stage.dropped, stage.entered)
+                self.assertLessEqual(stage.drop_rate, 1.0)
 
-    def test_unscreened_queue_is_pending_not_dropped(self):
-        queued = self.stages["queued"]
-        self.assertEqual(queued.pending, 700)
-        self.assertEqual(queued.dropped, 0)
-        self.assertEqual(queued.survived, 300)
+    def test_unscreened_domains_are_pending_not_dropped(self):
+        self.assertEqual(self.stages["received"].pending, 300)
+        self.assertEqual(self.stages["received"].dropped, 0)
 
-    def test_uncalled_candidates_are_pending_not_dropped(self):
-        reviewed = self.stages["claude_reviewed"]
-        self.assertEqual(reviewed.pending, 15)
-        self.assertEqual(reviewed.dropped, 0)
+    def test_the_survivors_are_the_candidate_pool(self):
+        self.assertEqual(self.funnel.survived, 55)
 
-    def test_failed_fetches_are_dropped_not_pending(self):
-        # A domain that was fetched and produced no verdict is a real loss;
-        # it already consumed the crawl and will not be retried by this stage.
-        screened = self.stages["screened"]
-        self.assertEqual(screened.dropped, 100)
-        self.assertEqual(screened.pending, 0)
-
-    def test_final_survivors_match_the_kept_count(self):
-        self.assertEqual(self.funnel.survived, 5)
-        self.assertAlmostEqual(self.funnel.to_dict()["overall_survival_rate"], 0.005)
-
-    def test_share_of_start_is_cumulative_attrition(self):
-        payload = self.funnel.to_dict()
-        by_key = {s["key"]: s for s in payload["stages"]}
-        self.assertAlmostEqual(by_key["queued"]["share_of_start"], 0.3)
-        self.assertAlmostEqual(by_key["reachable"]["share_of_start"], 0.15)
-
-
-class CertstreamFunnelTests(unittest.TestCase):
-    """One run-scoped funnel: hostnames in, queued domains out.
-
-    Replaces two separate views. Splitting the guards from the deduplication
-    made the reader do arithmetic between two tables for no gain.
-    """
-
-    def setUp(self):
-        self.funnel = certstream_funnel(
-            1_000,
-            {"extension_not_tracked": 700, "machine_generated": 20},
-            new_domains=50,
-            repeat_domains=30,
-        )
-        self.stages = {s.key: s for s in self.funnel.stages}
-
-    def test_the_chain_is_closed_from_hostnames_to_queued_domains(self):
-        for previous, nxt in zip(self.funnel.stages, self.funnel.stages[1:]):
-            with self.subTest(stage=nxt.key):
-                self.assertEqual(nxt.entered, previous.survived)
-        self.assertEqual(self.funnel.survived, 50)
-
-    def test_guards_run_in_declared_order_each_seeing_the_previous_survivors(self):
-        from certstream_filter import DROP_REASONS
-
-        guard_keys = [s.key for s in self.funnel.stages][: len(DROP_REASONS)]
-        self.assertEqual(guard_keys, list(DROP_REASONS))
-
-    def test_multi_san_collapse_is_a_drop_at_the_reduction_step(self):
-        # 280 hostnames survive the guards but only 80 distinct domains come
-        # out; the 200 collapsed entries belong here, not to dedup.
-        self.assertEqual(self.stages["registrable"].dropped, 200)
-
-    def test_repeat_observations_drop_at_the_queue_step(self):
-        self.assertEqual(self.stages["new_to_queue"].dropped, 30)
-
-    def test_a_run_with_no_traffic_yields_no_negative_counts(self):
-        empty = certstream_funnel(0, {})
+    def test_an_idle_run_produces_no_negative_counts(self):
+        empty = run_funnel(received=0, unscreened=0, no_verdict=0, ghost=0,
+                           insufficient=0, rejected=0, candidates=0)
         for stage in empty.stages:
             with self.subTest(stage=stage.key):
                 self.assertGreaterEqual(stage.survived, 0)
-        self.assertEqual(empty.survived, 0)
+                self.assertEqual(stage.drop_rate, 0.0)
 
-    def test_the_note_says_it_is_one_run(self):
-        # A cumulative counter cannot answer "is intake working right now".
-        self.assertIn("run", self.funnel.to_dict()["note"].lower())
+    def test_inconsistent_inputs_never_render_negative(self):
+        # The two counts are read in one query, but a mid-write read can still
+        # disagree; the UI must not show a negative.
+        weird = run_funnel(received=10, unscreened=99, no_verdict=99, ghost=99,
+                           insufficient=99, rejected=99, candidates=99)
+        for stage in weird.stages:
+            with self.subTest(stage=stage.key):
+                self.assertGreaterEqual(stage.survived, 0)
+                self.assertGreaterEqual(stage.entered, 0)
 
 
 class BiggestLossesTests(unittest.TestCase):

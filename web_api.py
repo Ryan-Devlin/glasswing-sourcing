@@ -37,9 +37,7 @@ for source in (ROOT, AI_SRC, ZONE_SRC):
     if str(source) not in sys.path:
         sys.path.insert(0, str(source))
 
-from funnel import (
-    Throughput, biggest_losses, certstream_funnel, screening_funnel,
-)
+from funnel import Throughput, biggest_losses, run_funnel
 from ai_search.og_bridge import enqueue_for_screening
 from ai_search.domains import normalize_any_domain
 from ai_search.database import (
@@ -991,35 +989,69 @@ def certstream_status():
 
 @app.get("/api/funnel")
 def funnel_breakdown():
-    """Live stage-by-stage attrition: what is thrown out, and where.
+    """One pipeline for the current CertStream run, counted in domains.
 
-    Two funnels rather than one end-to-end percentage. Intake is counted in
-    hostnames and screening in domains, and a multi-SAN certificate collapses
-    many of the former into one of the latter -- multiplying across that
-    boundary would produce a number with no unit. See ``funnel.py``.
+    Sourced from a single run-scoped query against the queue table, which
+    already carries each domain's status and its screening verdict. That is
+    what makes the top of the funnel exactly the number of domains CertStream
+    added during this run -- it is the same rows, not a second measurement
+    that has to be reconciled against the first.
+
+    Earlier versions split this across three tables and changed unit halfway,
+    with hostname-level guard counts in one and queue rows in another. Nothing
+    lined up, and a cumulative guard tally against a reset hostname count
+    produced drop rates above 100%.
     """
     status = (
         read_pipeline_status()
         if shared_pipeline_backend_available()
         else read_local_pipeline_status()
     )
+    run_id = str(status.get("run_id", "") or "")
 
-    queue_counts: dict[str, int] = {}
-    throughput: list[dict[str, object]] = []
+    counts = {k: 0 for k in (
+        "received", "unscreened", "no_verdict", "ghost",
+        "insufficient", "rejected", "candidates",
+    )}
     queue_live = False
     conn = None
     try:
         conn = connect_pipeline_db()
-        queue_counts = {
-            str(row["status"]): int(row["total"] or 0)
-            for row in conn.execute(
-                "SELECT status, count(*) AS total FROM domains GROUP BY status"
-            )
-        }
-        # Arrival against fetch rate. Whether intake outruns screening decides
-        # whether queue ordering is a nicety or the only thing that matters,
-        # and it can only be answered against the live database -- timestamps
-        # are ISO-8601 text, so a lexicographic compare is an ordered compare.
+        row = conn.execute(
+            """
+            SELECT
+              count(*) AS received,
+              sum(CASE WHEN status IN ('pending','processing')
+                       THEN 1 ELSE 0 END) AS unscreened,
+              sum(CASE WHEN status NOT IN ('pending','processing')
+                        AND (classification IS NULL OR classification='')
+                       THEN 1 ELSE 0 END) AS no_verdict,
+              sum(CASE WHEN classification='ghost' THEN 1 ELSE 0 END) AS ghost,
+              sum(CASE WHEN classification IN ('insufficient','coming_soon')
+                       THEN 1 ELSE 0 END) AS insufficient,
+              sum(CASE WHEN classification='reject' THEN 1 ELSE 0 END) AS rejected,
+              sum(CASE WHEN classification IN ('review','priority','comp')
+                       THEN 1 ELSE 0 END) AS candidates
+            FROM domains
+            WHERE first_seen_run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        if row:
+            counts = {k: int(row[k] or 0) for k in counts}
+        queue_live = True
+    except Exception:
+        # A transient queue read must not blank the page; the rate cards and
+        # the intake line below are independent.
+        pass
+    finally:
+        if conn is not None:
+            conn.close()
+
+    throughput: list[dict[str, object]] = []
+    conn = None
+    try:
+        conn = connect_pipeline_db()
         for hours in (24, 168):
             since = (
                 datetime.now(timezone.utc) - timedelta(hours=hours)
@@ -1034,91 +1066,45 @@ def funnel_breakdown():
                 (since,),
             ).fetchone()["n"] or 0)
             throughput.append(
-                Throughput(
-                    window_hours=hours, arrived=arrived, fetched=fetched
-                ).to_dict()
+                Throughput(window_hours=hours, arrived=arrived, fetched=fetched)
+                .to_dict()
             )
-        queue_live = True
     except Exception:
-        # A transient queue read must not blank the whole page; the
-        # classification half below is independent and still renders.
         pass
     finally:
         if conn is not None:
             conn.close()
 
-    with connect_store(read_only=True) as store:
-        buckets = {
-            str(row["routing_bucket"] or ""): int(row["total"] or 0)
-            for row in store.execute(
-                "SELECT routing_bucket, count(*) AS total "
-                "FROM classifications GROUP BY routing_bucket"
-            )
-        }
-        diligence = {
-            str(row["decision"] or ""): int(row["total"] or 0)
-            for row in store.execute(
-                "SELECT decision, count(*) AS total FROM claude_diligence "
-                "WHERE diligence_version=? GROUP BY decision",
-                (DILIGENCE_VERSION,),
-            )
-        }
-        reject_reasons = [
-            {"reason": str(row["routing_reason"] or "unknown"),
-             "count": int(row["total"] or 0)}
-            for row in store.execute(
-                "SELECT routing_reason, count(*) AS total FROM classifications "
-                "WHERE routing_bucket IN ('reject','ghost','insufficient') "
-                "GROUP BY routing_reason ORDER BY total DESC LIMIT 12"
-            )
-        ]
+    funnel = run_funnel(**counts)
 
-    queued = sum(queue_counts.values())
-    # 'processing' is in flight, not judged -- it belongs with the backlog so a
-    # mid-batch read never reports in-flight rows as survivors.
-    unscreened = queue_counts.get("pending", 0) + queue_counts.get("processing", 0)
-    classified = sum(buckets.values())
-
-    screening = screening_funnel(
-        queued=queued,
-        unscreened=unscreened,
-        screened=max(0, queued - unscreened),
-        classified=classified,
-        ghost=buckets.get("ghost", 0),
-        # coming_soon is a pre-launch placeholder: no content to judge yet, so
-        # it is the same kind of loss as insufficient rather than a rejection.
-        insufficient=buckets.get("insufficient", 0) + buckets.get("coming_soon", 0),
-        rejected=buckets.get("reject", 0),
-        candidates=(
-            buckets.get("review", 0)
-            + buckets.get("priority", 0)
-            + buckets.get("comp", 0)
-        ),
-        claude_reviewed=sum(diligence.values()),
-        claude_kept=diligence.get("KEEP", 0),
+    # Hostname-level rejections happen before a domain exists, so they are not
+    # stages in the funnel above -- reporting them there is what made the unit
+    # change halfway and the percentages stop reconciling. One line instead.
+    seen = int(status.get("hostnames_seen", 0) or 0)
+    raw_drops = status.get("intake_drops")
+    drops = (
+        {str(k): int(v or 0) for k, v in raw_drops.items()}
+        if isinstance(raw_drops, dict) else {}
     )
-
-    drops = status.get("intake_drops")
-    filters = certstream_funnel(
-        int(status.get("hostnames_seen", 0) or 0),
-        {str(k): int(v or 0) for k, v in drops.items()} if isinstance(drops, dict) else {},
-        new_domains=int(
-            status.get("new_domains_received", status.get("domains_received", 0)) or 0
-        ),
-        repeat_domains=int(status.get("repeat_events_ignored", 0) or 0),
-    )
+    # Never report more rejections than hostnames observed; if the two are out
+    # of step the tally is stale and is worth nothing.
+    if sum(drops.values()) > seen:
+        drops = {}
 
     return {
-        "certstream": filters.to_dict(),
-        "certstream_live": bool(isinstance(drops, dict) and drops),
-        "screening": screening.to_dict(),
-        "biggest_losses": biggest_losses(screening),
-        "drop_reasons": reject_reasons,
-        # Lets the UI show "no data yet" instead of a misleading run of zeros
-        # when the queue read failed or the listener has not published counters.
+        "run_id": run_id,
+        "funnel": funnel.to_dict(),
+        "biggest_losses": biggest_losses(funnel),
+        "intake": {
+            "hostnames_seen": seen,
+            "hostnames_rejected": sum(drops.values()),
+            "by_guard": dict(
+                sorted(drops.items(), key=lambda kv: kv[1], reverse=True)
+            ),
+            "live": bool(seen),
+        },
         "throughput": throughput,
         "queue_counts_live": queue_live,
-        "intake_counts_live": bool(status.get("hostnames_seen")),
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
 
