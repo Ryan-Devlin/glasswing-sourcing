@@ -27,6 +27,7 @@ import {
   Trash2,
   Upload,
   Users,
+  Filter,
   XCircle,
 } from "lucide-react";
 import "./styles.css";
@@ -39,6 +40,7 @@ const NAV = [
   ["home", "Home", Home],
   ["founders", "Founder Signals", Users],
   ["certstream", "CertStream Scraper", Activity],
+  ["funnel", "Funnel Attrition", Filter],
   ["csv", "Domain Intake", Database],
   ["domains", "Domain Crawler (.com, .app)", Globe2],
   ["health", "System Health", HeartPulse],
@@ -3138,6 +3140,135 @@ function FounderSignalsPage() {
     {selected&&<FounderProfile candidateId={selected} onClose={()=>setSelected("")} onChanged={()=>setTick(v=>v+1)}/>}</section>;
 }
 
+
+const pct = (value) => `${(Number(value || 0) * 100).toFixed(1)}%`;
+const num = (value) => Number(value || 0).toLocaleString();
+
+// Survived and dropped are the two states a reader must tell apart, so they
+// carry the colour. Pending is a hatched neutral rather than a third hue: it
+// is not a decision at all, and keeping it out of the hue encoding is what
+// lets the palette pass colour-vision separation. The design system's own red
+// and a blue at ΔE 16.6 (protan) were checked with the palette validator --
+// the obvious red/amber pair sat at ΔE 2.9, which would have made "rejected"
+// and "still queued" identical to a red-green colourblind reader.
+// Each bar is full width and shows one stage's own split, rather than being
+// scaled to the stage's share of the starting population. Measured against
+// real data, proportional widths put the last four stages at ~1.2px -- the
+// funnel discards 99.2% overall, so every stage past the third is invisible,
+// and those are the ones worth reading. Log-scaling the width would restore
+// the sizes while misrepresenting magnitude, so cumulative attrition is
+// carried as an explicit "% of start" number instead.
+function StageBar({ stage }) {
+  const part = (n) => (stage.entered > 0 ? (n / stage.entered) * 100 : 0);
+  return (
+    <div className="funnel-track" role="img"
+         aria-label={`${stage.label}: ${num(stage.survived)} passed, ` +
+                     `${num(stage.dropped)} dropped, ${num(stage.pending)} still waiting`}>
+      <div className="funnel-bar">
+        {stage.survived > 0 && (
+          <span className="seg seg-survived" style={{ flexGrow: part(stage.survived) }}
+                title={`Passed on: ${num(stage.survived)}`} />
+        )}
+        {stage.dropped > 0 && (
+          <span className="seg seg-dropped" style={{ flexGrow: part(stage.dropped) }}
+                title={`Thrown out here: ${num(stage.dropped)} (${pct(stage.drop_rate)} of what this stage judged)`} />
+        )}
+        {stage.pending > 0 && (
+          <span className="seg seg-pending" style={{ flexGrow: part(stage.pending) }}
+                title={`Not reached yet: ${num(stage.pending)} — backlog, not a rejection`} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function FunnelTable({ funnel }) {
+  return (
+    <table className="funnel-table">
+      <thead>
+        <tr>
+          <th>Stage</th><th className="n">In</th>
+          <th className="n">Thrown out</th><th className="n">Drop rate</th>
+          <th className="n">Waiting</th><th className="n">Passed on</th>
+          <th className="n">% of start</th><th>Split</th>
+        </tr>
+      </thead>
+      <tbody>
+        {funnel.stages.map((stage) => (
+          <tr key={stage.key}>
+            <td>
+              <strong>{stage.label}</strong>
+              {stage.note && <div className="funnel-note">{stage.note}</div>}
+            </td>
+            <td className="n">{num(stage.entered)}</td>
+            <td className="n">{num(stage.dropped)}</td>
+            {/* Drop rate excludes the backlog from its denominator: a stage
+                that has judged 10 of 1,000 rows and rejected 9 is dropping
+                90%, not 0.9%. */}
+            <td className="n">{stage.dropped > 0 ? pct(stage.drop_rate) : "—"}</td>
+            <td className="n">{stage.pending > 0 ? num(stage.pending) : "—"}</td>
+            <td className="n">{num(stage.survived)}</td>
+            <td className="n">{pct(stage.share_of_start)}</td>
+            <td><StageBar stage={stage} /></td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function FunnelPage() {
+  const { data, error, loading } = useApi("/api/funnel");
+  if (loading && !data) return <p>Measuring the funnel…</p>;
+  if (error) return <p className="error">Could not read the funnel: {error}</p>;
+  if (!data) return null;
+
+  const screening = data.screening || { stages: [] };
+  const intake = data.intake || { stages: [] };
+
+  return (
+    <section className="funnel-page">
+      <h1>Funnel attrition</h1>
+
+      <div className="funnel-legend">
+        <span><i className="swatch seg-survived" /> Passed on</span>
+        <span><i className="swatch seg-dropped" /> Thrown out</span>
+        <span><i className="swatch seg-pending" /> Waiting (not a rejection)</span>
+      </div>
+
+      {data.biggest_losses?.length > 0 && (
+        <p className="funnel-lede">
+          Losing most: {data.biggest_losses.map((l) => (
+            `${l.label} (${num(l.dropped)}, ${pct(l.drop_rate)})`
+          )).join(" · ")}
+        </p>
+      )}
+
+      <h2>Screening — queued domains to reviewable companies</h2>
+      {!data.queue_counts_live && (
+        <p className="funnel-warn">
+          Queue unreadable right now; screening stages below the queue are still live.
+        </p>
+      )}
+      <FunnelTable funnel={screening} />
+      <p className="funnel-note">{screening.note}</p>
+
+      <h2>Intake — feed hostnames to queued domains</h2>
+      {!data.intake_counts_live ? (
+        <p className="funnel-warn">
+          No intake counters yet. The listener publishes these once it has run
+          since the counters were added — this is "no data", not zero.
+        </p>
+      ) : (
+        <>
+          <FunnelTable funnel={intake} />
+          <p className="funnel-note">{intake.note}</p>
+        </>
+      )}
+    </section>
+  );
+}
+
 function App() {
   const [page, setPage] = useState(location.hash.slice(1) || "home");
   const [admin, setAdmin] = useState(false);
@@ -3176,6 +3307,7 @@ function App() {
     home: <HomePage />,
     founders: <FounderSignalsPage />,
     certstream: <CertStreamPage />,
+    funnel: <FunnelPage />,
     formd: <FormDPage />,
     csv: <SearchCorpusPage kind="ai" />,
     domains: <SearchCorpusPage kind="zone" />,

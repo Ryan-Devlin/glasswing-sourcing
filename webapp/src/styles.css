@@ -1311,3 +1311,64 @@ kbd {
     white-space: normal;
   }
 }
+
+/* ---- Funnel attrition -------------------------------------------------
+   Two hues only. "Passed on" and "thrown out" are the states a reader must
+   separate, so they carry colour; "waiting" is a hatched neutral because it
+   is the absence of a decision, not a third outcome. The pair was checked
+   with the palette validator against this surface: #0b6e99 vs #d90a2e is
+   dE 16.6 under protanopia and 32.1 at normal vision. The intuitive
+   red/amber pair failed at dE 2.9, which would have made "rejected" and
+   "still queued" indistinguishable to a red-green colourblind reader --
+   precisely the distinction this page exists to draw. Every segment also
+   carries a hover label and a row of exact numbers, so identity is never
+   colour alone. */
+:root {
+  --funnel-survived: #0b6e99;
+  --funnel-dropped: var(--gw-red);
+  --funnel-pending: #b9adad;
+}
+.funnel-page h2 { margin-top: 2rem; }
+.funnel-lede { color: var(--gw-muted); margin: 0.25rem 0 1rem; }
+.funnel-warn { color: var(--gw-warning); }
+.funnel-note {
+  color: var(--gw-muted);
+  font-size: 0.82rem;
+  font-weight: 400;
+  margin-top: 0.15rem;
+}
+.funnel-table { width: 100%; border-collapse: collapse; }
+.funnel-table th, .funnel-table td {
+  padding: 0.5rem 0.6rem;
+  border-bottom: 1px solid var(--gw-border);
+  vertical-align: top;
+  text-align: left;
+}
+.funnel-table th { color: var(--gw-muted); font-weight: 600; }
+.funnel-table .n { text-align: right; white-space: nowrap; }
+.funnel-table td:last-child { width: 30%; min-width: 160px; }
+
+.funnel-track { padding-top: 0.35rem; }
+/* Full width per row: see StageBar in main.jsx -- scaling width to each
+   stage's share of the start rendered the last four stages at ~1.2px against
+   real data, because the funnel discards 99.2% overall. */
+.funnel-bar { display: flex; height: 14px; gap: 2px; width: 100%; }
+.funnel-bar .seg { border-radius: 3px; min-width: 2px; }
+.seg-survived { background: var(--funnel-survived); }
+.seg-dropped { background: var(--funnel-dropped); }
+/* Texture, not a hue: works in forced-colours and greyscale print too. */
+.seg-pending {
+  background: repeating-linear-gradient(
+    135deg, var(--funnel-pending), var(--funnel-pending) 3px,
+    var(--gw-surface) 3px, var(--gw-surface) 5px);
+  outline: 1px solid var(--funnel-pending);
+  outline-offset: -1px;
+}
+.funnel-legend {
+  display: flex; gap: 1.1rem; flex-wrap: wrap;
+  color: var(--gw-muted); font-size: 0.85rem; margin-bottom: 0.5rem;
+}
+.funnel-legend .swatch {
+  display: inline-block; width: 11px; height: 11px;
+  border-radius: 3px; margin-right: 0.35rem; vertical-align: baseline;
+}
