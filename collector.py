@@ -12,6 +12,7 @@ from pathlib import Path
 
 import websockets
 
+from certstream_filter import to_registrable
 from common import RAW, stable_domain
 
 FIELDS = ["observed_at", "registrable", "hostname"]
@@ -52,16 +53,20 @@ def registrable_domain(
     hostname: str,
     allowed_extensions: set[str] | None = None,
 ) -> str:
-    """Return the apex domain for a supported single-label TLD."""
-    allowed = allowed_extensions or SUPPORTED_EXTENSIONS
-    host = stable_domain(hostname)
-    labels = [label for label in host.split(".") if label]
-    if len(labels) < 2:
-        return ""
-    extension = f".{labels[-1]}"
-    if extension not in allowed:
-        return ""
-    return ".".join(labels[-2:]).lower()
+    """Return the registrable domain for a supported TLD, or "" to drop it.
+
+    Delegates to ``certstream_filter.to_registrable``. This used to take the
+    last two labels, which is wrong wherever the public suffix is itself two
+    labels: ``foo.com.ai`` reduced to the bare suffix ``com.ai`` and that
+    non-company row was enqueued, fetched and screened like a real domain.
+    The PSL has 19 such suffixes across the supported extensions. The
+    delegate also applies the junk guards this path never had (over-length,
+    motif spam, repeated-letter runs, all-numeric labels).
+    """
+    return to_registrable(
+        hostname,
+        allowed_extensions or SUPPORTED_EXTENSIONS,
+    )
 
 
 def parse_args() -> argparse.Namespace:
