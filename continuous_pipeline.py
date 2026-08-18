@@ -445,30 +445,20 @@ def _migrate_pipeline_columns(conn: sqlite3.Connection) -> None:
     if missing:
         conn.commit()
 
-    # Same trap for the claim index: its definition changed but its name did
-    # not, so CREATE INDEX IF NOT EXISTS silently kept the old first_seen-only
-    # index and the score-ordered claim had nothing to use. Built under a new
-    # name, and CONCURRENTLY so it never blocks the listener's inserts.
-    if conn.execute(
-        "SELECT 1 FROM pg_indexes WHERE schemaname='pipeline' "
-        "AND indexname='idx_domains_claim_by_score'"
-    ).fetchone():
-        return
-    conn.commit()
-    previous = getattr(conn, "autocommit", False)
-    try:
-        conn.autocommit = True
-        conn.execute(
-            "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_domains_claim_by_score "
-            "ON domains (intake_score DESC, first_seen DESC) "
-            "WHERE status='pending'"
-        )
-    except Exception as exc:
-        # A failed CONCURRENTLY build leaves an invalid index that blocks
-        # nobody, and the claim query is correct without it -- only slower.
-        print(f"claim index build skipped: {type(exc).__name__}: {exc}")
-    finally:
-        conn.autocommit = previous
+    # No index build here, deliberately. An earlier version created the
+    # score-ordered claim index CONCURRENTLY at startup; CREATE INDEX
+    # CONCURRENTLY cannot run inside a transaction block, and toggling
+    # autocommit mid-transaction aborted the connection -- the worker came up
+    # and immediately died with InFailedSqlTransaction. Startup is the wrong
+    # place to build an index on a 250k-row table.
+    #
+    # The claim query is correct without it, only slower, so this is an
+    # operational task rather than a boot-time one. Run once by hand, off the
+    # startup path:
+    #
+    #   CREATE INDEX CONCURRENTLY idx_domains_claim_by_score
+    #     ON pipeline.domains (intake_score DESC, first_seen DESC)
+    #     WHERE status = 'pending';
 
 
 def _connect_db_sqlite() -> sqlite3.Connection:
