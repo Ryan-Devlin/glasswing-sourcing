@@ -1511,6 +1511,15 @@ def corpus_stats(kind: Literal["ai", "zone"]):
                         == eastern_today
                     )
                 added = int(row["added_domains"] or 0)
+                unchanged = int(row["unchanged_domains"] or 0)
+                snapshot_domains = int(row["discovered_domains"] or 0)
+                # A baseline import had no prior snapshot to compare against,
+                # so it reports zero additions by design. That is a completely
+                # different fact from "no new domains were registered today",
+                # and the two are indistinguishable from the counts alone: a
+                # real diff that happened to find nothing new still carries
+                # every existing name as unchanged.
+                is_baseline = snapshot_domains > 0 and unchanged == 0 and added == 0
                 if imported_today:
                     new_domains_today += added
                 zone_deltas.append(
@@ -1519,9 +1528,10 @@ def corpus_stats(kind: Literal["ai", "zone"]):
                         "snapshot_at": imported_at,
                         "new_domains": added,
                         "removed_domains": int(row["removed_domains"] or 0),
-                        "unchanged_domains": int(row["unchanged_domains"] or 0),
-                        "snapshot_domains": int(row["discovered_domains"] or 0),
+                        "unchanged_domains": unchanged,
+                        "snapshot_domains": snapshot_domains,
                         "is_today": imported_today,
+                        "is_baseline": is_baseline,
                     }
                 )
         except (AttributeError, KeyError, TypeError, ValueError):

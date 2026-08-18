@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from fastapi.testclient import TestClient
 import pytest
 
@@ -850,3 +852,69 @@ def test_funnel_tiles_show_a_placeholder_before_data_arrives():
                   "Filtered out", "Still processing"):
         block = page.split(label, 1)[1][:220]
         assert "metric(" in block, label
+
+
+def test_zone_stats_separate_a_baseline_snapshot_from_zero_new_domains(
+    monkeypatch,
+):
+    """A baseline import reports no additions because it had nothing to
+    compare against, not because no domains were registered that day.
+
+    Confirmed live: `.app` showed "+0 today" while its recorded snapshot path
+    still pointed at a developer laptop, so the importer silently took the
+    baseline branch. From added_domains alone the two cases are identical --
+    only unchanged_domains tells them apart, because a real comparison
+    carries every surviving name.
+    """
+    imported_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    zone_rows = [
+        {
+            "tld": "com",
+            "imported_at": imported_at,
+            "added_domains": 0,
+            "removed_domains": 0,
+            "unchanged_domains": 0,
+            "discovered_domains": 162241934,
+        },
+        {
+            "tld": "app",
+            "imported_at": imported_at,
+            "added_domains": 0,
+            "removed_domains": 3,
+            "unchanged_domains": 1470238,
+            "discovered_domains": 1470238,
+        },
+    ]
+
+    class ZoneConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def execute(self, sql, *args):
+            if "FROM zones" in sql:
+                return SimpleNamespace(fetchall=lambda: zone_rows)
+            return SimpleNamespace(
+                fetchone=lambda: {"updated_at": "", "crawled_at": ""}
+            )
+
+    monkeypatch.setattr(
+        web_api, "zone_connect", lambda *args, **kwargs: ZoneConnection()
+    )
+    monkeypatch.setattr(
+        web_api, "source_bucket_counts", lambda _prefixes: {}
+    )
+    monkeypatch.setattr(web_api, "zone_diagnostics", lambda conn: {})
+    monkeypatch.setattr(web_api, "zone_worker_state", lambda conn: {})
+
+    result = client.get("/api/corpus/zone/stats").json()
+    deltas = {zone["tld"]: zone for zone in result["zone_deltas"]}
+
+    assert deltas["com"]["is_baseline"] is True
+    assert deltas["app"]["is_baseline"] is False
+    assert deltas["app"]["unchanged_domains"] == 1470238
+    # Neither zone contributes crawl work today, but only one of them means
+    # "nothing new was registered".
+    assert result["new_today"] == 0

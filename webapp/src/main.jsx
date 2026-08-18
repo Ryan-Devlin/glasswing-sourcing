@@ -2388,9 +2388,11 @@ function SearchCorpusPage({ kind }) {
             {metrics.data.zone_deltas.map((zone) => (
               <span key={zone.tld}>
                 <strong>.{zone.tld}</strong>
-                {zone.is_today
-                  ? ` +${fmt(zone.new_domains)} today`
-                  : ` last snapshot +${fmt(zone.new_domains)}`}
+                {zone.is_baseline
+                  ? ` baseline of ${fmt(zone.snapshot_domains)} domains — nothing to diff against yet, first daily comparison runs tomorrow`
+                  : zone.is_today
+                    ? ` +${fmt(zone.new_domains)} new today (vs ${fmt(zone.unchanged_domains)} already known)`
+                    : ` last snapshot +${fmt(zone.new_domains)}`}
                 {zone.snapshot_at
                   ? ` · ${new Date(zone.snapshot_at).toLocaleString()}`
                   : ""}
