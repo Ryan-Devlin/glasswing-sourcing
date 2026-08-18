@@ -1472,6 +1472,7 @@ def corpus_stats(kind: Literal["ai", "zone"]):
         }
     zone_deltas = []
     new_domains_today = 0
+    daily_intake: dict[str, dict] = {}
     with zone_connect(ZONE_UNIVERSE_DB, read_only=True) as conn:
         details = zone_diagnostics(conn)
         worker = zone_worker_state(conn)
@@ -1537,6 +1538,39 @@ def corpus_stats(kind: Literal["ai", "zone"]):
         except (AttributeError, KeyError, TypeError, ValueError):
             zone_deltas = []
             new_domains_today = 0
+        # Two intake views the zones table cannot answer on its own: it only
+        # ever holds the newest import, so yesterday's number has to come from
+        # the per-day history the importer records.
+        try:
+            eastern_now = datetime.now(ZoneInfo("America/New_York")).date()
+            wanted = {
+                "today": eastern_now.isoformat(),
+                "yesterday": (eastern_now - timedelta(days=1)).isoformat(),
+            }
+            for label, day in wanted.items():
+                per_tld = {}
+                for row in conn.execute(
+                    """
+                    SELECT tld,added_domains,removed_domains,discovered_domains
+                    FROM zone_daily_deltas WHERE snapshot_day=? ORDER BY tld
+                    """,
+                    (day,),
+                ).fetchall():
+                    per_tld[str(row["tld"])] = {
+                        "new_domains": int(row["added_domains"] or 0),
+                        "removed_domains": int(row["removed_domains"] or 0),
+                        "snapshot_domains": int(row["discovered_domains"] or 0),
+                    }
+                daily_intake[label] = {
+                    "day": day,
+                    "new_domains": sum(
+                        entry["new_domains"] for entry in per_tld.values()
+                    ),
+                    "by_tld": per_tld,
+                    "imported": bool(per_tld),
+                }
+        except (AttributeError, KeyError, TypeError, ValueError):
+            daily_intake = {}
     retained = int(details.get("success", 0) or 0)
     zone_bucket_counts = source_bucket_counts(CORPUS_SOURCES["zone"])
     investable = int(zone_bucket_counts.get("priority", 0) or 0)
@@ -1579,6 +1613,7 @@ def corpus_stats(kind: Literal["ai", "zone"]):
     return {
         "new_today": new_domains_today,
         "zone_deltas": zone_deltas,
+        "daily_intake": daily_intake,
         "available": details.get("queued_domains", 0),
         "pending": max(
             0,

@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 import pytest
@@ -918,3 +918,91 @@ def test_zone_stats_separate_a_baseline_snapshot_from_zero_new_domains(
     # Neither zone contributes crawl work today, but only one of them means
     # "nothing new was registered".
     assert result["new_today"] == 0
+
+
+def test_zone_stats_report_yesterday_and_today_intake_separately(monkeypatch):
+    """Two views: what yesterday pulled in, and what today pulled in.
+
+    The zones table holds only the newest import, so yesterday has to come
+    from the per-day history. A day with no snapshot must read as "not
+    imported" rather than as a real zero.
+    """
+    from zoneinfo import ZoneInfo
+
+    eastern_today = datetime.now(ZoneInfo("America/New_York")).date()
+    yesterday = (eastern_today - timedelta(days=1)).isoformat()
+    history = {
+        yesterday: [
+            {"tld": "app", "added_domains": 2431, "removed_domains": 12,
+             "discovered_domains": 1468000},
+            {"tld": "com", "added_domains": 168240, "removed_domains": 90210,
+             "discovered_domains": 162100000},
+        ],
+        eastern_today.isoformat(): [
+            {"tld": "app", "added_domains": 71988, "removed_domains": 21627,
+             "discovered_domains": 1470238},
+        ],
+    }
+
+    class ZoneConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def execute(self, sql, params=()):
+            if "FROM zone_daily_deltas" in sql:
+                return SimpleNamespace(
+                    fetchall=lambda: history.get(params[0], [])
+                )
+            if "FROM zones" in sql:
+                return SimpleNamespace(fetchall=lambda: [])
+            return SimpleNamespace(
+                fetchone=lambda: {"updated_at": "", "crawled_at": ""}
+            )
+
+    monkeypatch.setattr(
+        web_api, "zone_connect", lambda *a, **k: ZoneConnection()
+    )
+    monkeypatch.setattr(web_api, "source_bucket_counts", lambda _p: {})
+    monkeypatch.setattr(web_api, "zone_diagnostics", lambda conn: {})
+    monkeypatch.setattr(web_api, "zone_worker_state", lambda conn: {})
+
+    intake = client.get("/api/corpus/zone/stats").json()["daily_intake"]
+
+    assert intake["yesterday"]["new_domains"] == 2431 + 168240
+    assert intake["yesterday"]["by_tld"]["com"]["new_domains"] == 168240
+    assert intake["today"]["new_domains"] == 71988
+    assert intake["today"]["by_tld"]["app"]["new_domains"] == 71988
+    assert intake["today"]["imported"] is True
+
+
+def test_a_day_with_no_snapshot_is_not_reported_as_zero_intake(monkeypatch):
+    class ZoneConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def execute(self, sql, params=()):
+            if "FROM zone_daily_deltas" in sql:
+                return SimpleNamespace(fetchall=lambda: [])
+            if "FROM zones" in sql:
+                return SimpleNamespace(fetchall=lambda: [])
+            return SimpleNamespace(
+                fetchone=lambda: {"updated_at": "", "crawled_at": ""}
+            )
+
+    monkeypatch.setattr(
+        web_api, "zone_connect", lambda *a, **k: ZoneConnection()
+    )
+    monkeypatch.setattr(web_api, "source_bucket_counts", lambda _p: {})
+    monkeypatch.setattr(web_api, "zone_diagnostics", lambda conn: {})
+    monkeypatch.setattr(web_api, "zone_worker_state", lambda conn: {})
+
+    intake = client.get("/api/corpus/zone/stats").json()["daily_intake"]
+
+    assert intake["today"]["imported"] is False
+    assert intake["yesterday"]["imported"] is False

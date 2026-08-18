@@ -113,6 +113,17 @@ CREATE TABLE IF NOT EXISTS zones (
     delta_added_path TEXT NOT NULL DEFAULT '',
     delta_removed_path TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS zone_daily_deltas (
+    tld TEXT NOT NULL,
+    snapshot_day TEXT NOT NULL,
+    imported_at TEXT NOT NULL DEFAULT '',
+    added_domains INTEGER NOT NULL DEFAULT 0,
+    removed_domains INTEGER NOT NULL DEFAULT 0,
+    unchanged_domains INTEGER NOT NULL DEFAULT 0,
+    discovered_domains INTEGER NOT NULL DEFAULT 0,
+    delta_added_path TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (tld, snapshot_day)
+);
 CREATE TABLE IF NOT EXISTS shards (
     tld TEXT NOT NULL,
     queue_version TEXT NOT NULL,
@@ -342,6 +353,18 @@ def migrate(conn: sqlite3.Connection) -> None:
             shard_count INTEGER NOT NULL DEFAULT 0,
             active_queue_version TEXT NOT NULL DEFAULT '',
             import_error TEXT NOT NULL DEFAULT ''
+        );
+
+        CREATE TABLE IF NOT EXISTS zone_daily_deltas (
+            tld TEXT NOT NULL,
+            snapshot_day TEXT NOT NULL,
+            imported_at TEXT NOT NULL DEFAULT '',
+            added_domains INTEGER NOT NULL DEFAULT 0,
+            removed_domains INTEGER NOT NULL DEFAULT 0,
+            unchanged_domains INTEGER NOT NULL DEFAULT 0,
+            discovered_domains INTEGER NOT NULL DEFAULT 0,
+            delta_added_path TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (tld, snapshot_day)
         );
 
         CREATE TABLE IF NOT EXISTS shards (

@@ -408,6 +408,40 @@ header p,
 .retention-metrics {
   grid-template-columns: repeat(6, minmax(125px, 1fr));
 }
+.daily-intake {
+  grid-template-columns: repeat(2, minmax(200px, 1fr));
+  margin-bottom: 18px;
+}
+.intake-view {
+  border: 1px solid var(--gw-line, #e4e0d8);
+  border-radius: 10px;
+  padding: 14px 16px;
+  background: var(--gw-surface, #fff);
+}
+.intake-view h3 {
+  margin: 0 0 6px;
+  color: var(--gw-muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.intake-total {
+  color: var(--gw-ink);
+  font-size: 30px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+.intake-detail {
+  margin-top: 6px;
+  color: var(--gw-muted);
+  font-size: 12px;
+}
+@media (max-width: 720px) {
+  .daily-intake {
+    grid-template-columns: 1fr;
+  }
+}
 .zone-delta-summary {
   display: flex;
   flex-wrap: wrap;

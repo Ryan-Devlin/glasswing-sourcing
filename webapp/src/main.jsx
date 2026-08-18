@@ -2382,6 +2382,31 @@ function SearchCorpusPage({ kind }) {
           )}
         </div>
       )}
+      {!isAi && Boolean(metrics.data?.daily_intake) && (
+        <div className="metrics daily-intake">
+          {["yesterday", "today"].map((label) => {
+            const view = metrics.data.daily_intake?.[label];
+            const byTld = view?.by_tld || {};
+            const tlds = Object.keys(byTld).sort();
+            return (
+              <div className="intake-view" key={label}>
+                <h3>{label === "today" ? "Pulled in today" : "Pulled in yesterday"}</h3>
+                <div className="intake-total">
+                  {view?.imported ? fmt(view.new_domains) : "—"}
+                </div>
+                <div className="intake-detail">
+                  {view?.imported
+                    ? tlds
+                        .map((tld) => `.${tld} ${fmt(byTld[tld].new_domains)}`)
+                        .join(" · ")
+                    : "no snapshot imported"}
+                  {view?.day ? ` · ${view.day}` : ""}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
       {!isAi && Boolean(metrics.data?.zone_deltas?.length) && (
         <>
           <div className="zone-delta-summary">

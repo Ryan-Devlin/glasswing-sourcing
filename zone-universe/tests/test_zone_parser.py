@@ -260,3 +260,57 @@ def test_committed_queue_directory_survives_a_later_failure(
     assert retained.is_dir()
     assert (retained / "domains.txt.gz").exists()
     conn.close()
+
+
+def test_each_import_records_its_own_day_in_the_delta_history(
+    tmp_path: Path,
+) -> None:
+    """The zones table only holds the newest import.
+
+    Without a per-day history there is no way to show what yesterday pulled
+    in next to today, because the second import overwrites the first row.
+    """
+    database = tmp_path / "universe.sqlite3"
+    queues = tmp_path / "queues"
+    first = tmp_path / "first.app.zone.gz"
+    second = tmp_path / "second.app.zone.gz"
+    with gzip.open(first, "wb") as handle:
+        handle.write(b"alpha.app. 3600 IN NS ns1.example.net.\n")
+    with gzip.open(second, "wb") as handle:
+        handle.write(
+            b"alpha.app. 3600 IN NS ns1.example.net.\n"
+            b"bravo.app. 3600 IN NS ns1.example.net.\n"
+            b"charlie.app. 3600 IN NS ns1.example.net.\n"
+        )
+    import_zone(first, tld="app", shard_count=4, database=database,
+                queue_root=queues)
+    result = import_zone(second, tld="app", shard_count=4, database=database,
+                         queue_root=queues)
+    assert result["added_domains"] == 2
+
+    conn = connect(database)
+    rows = conn.execute(
+        "SELECT snapshot_day,added_domains,discovered_domains "
+        "FROM zone_daily_deltas WHERE tld='app'"
+    ).fetchall()
+    # Both imports land on the same Eastern day here, so the day's row must
+    # reflect the latest import rather than duplicating.
+    assert len(rows) == 1
+    assert int(rows[0]["added_domains"]) == 2
+    assert int(rows[0]["discovered_domains"]) == 3
+    assert str(rows[0]["snapshot_day"]) == zone_parser.snapshot_day_of(
+        str(conn.execute(
+            "SELECT imported_at FROM zones WHERE tld='app'"
+        ).fetchone()["imported_at"])
+    )
+    conn.close()
+
+
+def test_snapshot_day_uses_the_eastern_calendar_day() -> None:
+    """The schedule opens at 6 AM ET, so intake days are Eastern days.
+
+    A 22:00 ET import is 02:00 UTC the next day; filing it under the UTC date
+    would report it as tomorrow's intake.
+    """
+    assert zone_parser.snapshot_day_of("2026-08-19T02:00:00Z") == "2026-08-18"
+    assert zone_parser.snapshot_day_of("2026-08-18T14:00:00Z") == "2026-08-18"

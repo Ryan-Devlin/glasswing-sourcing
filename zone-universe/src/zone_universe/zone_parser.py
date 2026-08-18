@@ -11,6 +11,7 @@ from collections import Counter
 from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from db_backend import PostgresConnection
 
@@ -20,6 +21,25 @@ from .domain_quality import assess_domain
 
 
 DOMAIN = re.compile(rb"^[a-z0-9.-]+$", re.I)
+
+
+SNAPSHOT_TIMEZONE = ZoneInfo("America/New_York")
+
+
+def snapshot_day_of(timestamp: str) -> str:
+    """The Eastern calendar day an import belongs to.
+
+    The daily schedule opens at 6 AM America/New_York, so a "day" of intake
+    is an Eastern day, not a UTC one -- a 22:00 ET import would otherwise be
+    filed under tomorrow.
+    """
+    try:
+        parsed = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+    except ValueError:
+        parsed = datetime.now(timezone.utc)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(SNAPSHOT_TIMEZONE).date().isoformat()
 
 
 def normalize_tld(value: str) -> str:
@@ -379,6 +399,34 @@ def import_zone(
                 str(added_path),
                 str(removed_path),
                 tld,
+            ),
+        )
+        # One row per zone per Eastern day, so the dashboard can show what
+        # yesterday pulled in next to today. The zones table only ever holds
+        # the newest import, which makes any day-over-day view impossible.
+        conn.execute(
+            """
+            INSERT INTO zone_daily_deltas(
+                tld,snapshot_day,imported_at,added_domains,removed_domains,
+                unchanged_domains,discovered_domains,delta_added_path
+            ) VALUES (?,?,?,?,?,?,?,?)
+            ON CONFLICT(tld,snapshot_day) DO UPDATE SET
+                imported_at=excluded.imported_at,
+                added_domains=excluded.added_domains,
+                removed_domains=excluded.removed_domains,
+                unchanged_domains=excluded.unchanged_domains,
+                discovered_domains=excluded.discovered_domains,
+                delta_added_path=excluded.delta_added_path
+            """,
+            (
+                tld,
+                snapshot_day_of(now),
+                now,
+                added_domains,
+                removed_domains,
+                unchanged_domains,
+                delegated,
+                str(added_path),
             ),
         )
         conn.commit()
