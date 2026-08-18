@@ -342,10 +342,9 @@ _PIPELINE_POSTGRES_SCHEMA = """
         intake_score INTEGER,
         intake_evidence TEXT DEFAULT ''
     );
-    ALTER TABLE domains ADD COLUMN IF NOT EXISTS intake_score INTEGER;
-    ALTER TABLE domains ADD COLUMN IF NOT EXISTS intake_evidence TEXT DEFAULT '';
+
     CREATE INDEX IF NOT EXISTS idx_domains_pending_claim
-        ON domains (intake_score DESC, first_seen DESC) WHERE status='pending';
+        ON domains (first_seen DESC) WHERE status='pending';
     CREATE INDEX IF NOT EXISTS idx_domains_status
         ON domains (status);
     CREATE TABLE IF NOT EXISTS claude_calls (
@@ -401,12 +400,75 @@ def _connect_db_postgres() -> sqlite3.Connection:
     try:
         conn.executescript(_PIPELINE_POSTGRES_SCHEMA)
         conn.commit()
+        _migrate_pipeline_columns(conn)
     finally:
         if locked:
             conn.execute(
                 "SELECT pg_advisory_unlock(hashtext(?))", ("pipeline_migration",)
             )
+        # Commit the unlock. Without this the connection sits "idle in
+        # transaction" still holding whatever the migration took, and every
+        # later connect queues behind it -- observed live as a ten-minute
+        # convoy of CREATE TABLE IF NOT EXISTS statements with the listener's
+        # INSERTs stuck at the back, the worker reporting stage="starting"
+        # and the feed never connecting. Survivable while the script took only
+        # weak locks; fatal the moment it took an ACCESS EXCLUSIVE one.
+        conn.commit()
     return conn
+
+
+def _migrate_pipeline_columns(conn: sqlite3.Connection) -> None:
+    """Add the intake-scoring columns, only when they are actually missing.
+
+    ALTER TABLE takes an ACCESS EXCLUSIVE lock even when it changes nothing,
+    so running it unconditionally on every connect serialises every worker
+    behind the migration. The catalog check is a cheap read and the ALTER then
+    runs once in the table's lifetime.
+    """
+    existing = {
+        str(row["column_name"])
+        for row in conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema='pipeline' AND table_name='domains'"
+        ).fetchall()
+    }
+    missing = {
+        name: decl
+        for name, decl in (
+            ("intake_score", "INTEGER"),
+            ("intake_evidence", "TEXT DEFAULT ''"),
+        )
+        if name not in existing
+    }
+    for name, decl in missing.items():
+        conn.execute(f"ALTER TABLE domains ADD COLUMN {name} {decl}")
+    if missing:
+        conn.commit()
+
+    # Same trap for the claim index: its definition changed but its name did
+    # not, so CREATE INDEX IF NOT EXISTS silently kept the old first_seen-only
+    # index and the score-ordered claim had nothing to use. Built under a new
+    # name, and CONCURRENTLY so it never blocks the listener's inserts.
+    if conn.execute(
+        "SELECT 1 FROM pg_indexes WHERE schemaname='pipeline' "
+        "AND indexname='idx_domains_claim_by_score'"
+    ).fetchone():
+        return
+    conn.commit()
+    previous = getattr(conn, "autocommit", False)
+    try:
+        conn.autocommit = True
+        conn.execute(
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_domains_claim_by_score "
+            "ON domains (intake_score DESC, first_seen DESC) "
+            "WHERE status='pending'"
+        )
+    except Exception as exc:
+        # A failed CONCURRENTLY build leaves an invalid index that blocks
+        # nobody, and the claim query is correct without it -- only slower.
+        print(f"claim index build skipped: {type(exc).__name__}: {exc}")
+    finally:
+        conn.autocommit = previous
 
 
 def _connect_db_sqlite() -> sqlite3.Connection:
