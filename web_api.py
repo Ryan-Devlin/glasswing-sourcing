@@ -37,7 +37,7 @@ for source in (ROOT, AI_SRC, ZONE_SRC):
     if str(source) not in sys.path:
         sys.path.insert(0, str(source))
 
-from funnel import biggest_losses, intake_funnel, screening_funnel
+from funnel import Throughput, biggest_losses, intake_funnel, screening_funnel
 from ai_search.og_bridge import enqueue_for_screening
 from ai_search.domains import normalize_any_domain
 from ai_search.database import (
@@ -1003,6 +1003,7 @@ def funnel_breakdown():
     )
 
     queue_counts: dict[str, int] = {}
+    throughput: list[dict[str, object]] = []
     queue_live = False
     conn = None
     try:
@@ -1013,6 +1014,28 @@ def funnel_breakdown():
                 "SELECT status, count(*) AS total FROM domains GROUP BY status"
             )
         }
+        # Arrival against fetch rate. Whether intake outruns screening decides
+        # whether queue ordering is a nicety or the only thing that matters,
+        # and it can only be answered against the live database -- timestamps
+        # are ISO-8601 text, so a lexicographic compare is an ordered compare.
+        for hours in (24, 168):
+            since = (
+                datetime.now(timezone.utc) - timedelta(hours=hours)
+            ).isoformat().replace("+00:00", "Z")
+            arrived = int(conn.execute(
+                "SELECT count(*) AS n FROM domains WHERE first_seen >= ?",
+                (since,),
+            ).fetchone()["n"] or 0)
+            fetched = int(conn.execute(
+                "SELECT count(*) AS n FROM domains "
+                "WHERE last_processed_at >= ? AND attempts > 0",
+                (since,),
+            ).fetchone()["n"] or 0)
+            throughput.append(
+                Throughput(
+                    window_hours=hours, arrived=arrived, fetched=fetched
+                ).to_dict()
+            )
         queue_live = True
     except Exception:
         # A transient queue read must not blank the whole page; the
@@ -1089,6 +1112,7 @@ def funnel_breakdown():
         "drop_reasons": reject_reasons,
         # Lets the UI show "no data yet" instead of a misleading run of zeros
         # when the queue read failed or the listener has not published counters.
+        "throughput": throughput,
         "queue_counts_live": queue_live,
         "intake_counts_live": bool(status.get("hostnames_seen")),
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),

@@ -79,3 +79,25 @@ def test_biggest_losses_are_ranked_and_bounded():
     assert [l["dropped"] for l in losses] == sorted(
         (l["dropped"] for l in losses), reverse=True
     )
+
+
+def test_throughput_is_reported_per_window():
+    payload = _payload()
+    windows = {t["window_hours"] for t in payload["throughput"]}
+    assert windows == {24, 168}
+    for entry in payload["throughput"]:
+        assert entry["arrived"] >= 0
+        assert entry["fetched"] >= 0
+        # A stalled worker and a worker keeping up both leave the backlog
+        # looking calm; only these flags tell them apart.
+        assert not (entry["keeping_up"] and entry["stalled"])
+
+
+def test_a_failed_queue_read_reports_no_throughput_rather_than_zeros(monkeypatch):
+    def explode():
+        raise RuntimeError("queue unavailable")
+
+    monkeypatch.setattr(web_api, "connect_pipeline_db", explode)
+    payload = _payload()
+    assert payload["throughput"] == []
+    assert payload["queue_counts_live"] is False

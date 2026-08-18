@@ -1372,3 +1372,33 @@ kbd {
   display: inline-block; width: 11px; height: 11px;
   border-radius: 3px; margin-right: 0.35rem; vertical-align: baseline;
 }
+
+/* ---- Intake vs screening throughput -----------------------------------
+   Two numbers and a ratio: a stat tile, not a chart. Plotting one
+   comparison would add a scale and a legend to say what a sentence says.
+   The state colour is backed by the verdict text beside it, never carried
+   alone, and "stalled" is called out separately from "behind" because a
+   stopped worker and a worker keeping up both leave the backlog looking
+   calm while meaning opposite things. */
+.throughput { display: flex; gap: 1rem; flex-wrap: wrap; margin: 0.75rem 0 1.5rem; }
+.throughput-card {
+  border: 1px solid var(--gw-border);
+  border-left: 3px solid var(--gw-muted);
+  border-radius: 6px;
+  padding: 0.7rem 0.9rem;
+  min-width: 240px;
+  background: var(--gw-surface);
+}
+.throughput-card.ok { border-left-color: var(--funnel-survived); }
+.throughput-card.behind { border-left-color: var(--gw-warning); }
+.throughput-card.stalled { border-left-color: var(--funnel-dropped); }
+.throughput-card h3 {
+  margin: 0; font-size: 0.78rem; letter-spacing: 0.04em;
+  text-transform: uppercase; color: var(--gw-muted);
+}
+.throughput-verdict { margin: 0.3rem 0 0.5rem; font-weight: 600; }
+.throughput-card dl { margin: 0; display: grid; gap: 0.15rem; }
+.throughput-card dl > div { display: flex; justify-content: space-between; gap: 1rem; }
+.throughput-card dt { color: var(--gw-muted); font-size: 0.85rem; }
+.throughput-card dd { margin: 0; font-variant-numeric: tabular-nums; }
+.throughput-card dd span { color: var(--gw-muted); font-size: 0.82rem; }

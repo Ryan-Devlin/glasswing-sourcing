@@ -3151,6 +3151,35 @@ const num = (value) => Number(value || 0).toLocaleString();
 // and a blue at ΔE 16.6 (protan) were checked with the palette validator --
 // the obvious red/amber pair sat at ΔE 2.9, which would have made "rejected"
 // and "still queued" identical to a red-green colourblind reader.
+// A stat line, not a chart. Two numbers and their ratio is a hero-number job;
+// plotting it would add a scale and a legend to communicate one comparison.
+function Throughput({ windows }) {
+  if (!windows?.length) return null;
+  return (
+    <div className="throughput">
+      {windows.map((w) => {
+        const label = w.window_hours === 24 ? "Last 24 hours" : "Last 7 days";
+        const state = w.stalled ? "stalled" : w.keeping_up ? "ok" : "behind";
+        const verdict = w.stalled
+          ? "screening stopped"
+          : w.keeping_up
+            ? "screening keeps up"
+            : `${w.overload_ratio}\u00d7 more arriving than screened`;
+        return (
+          <div key={w.window_hours} className={`throughput-card ${state}`}>
+            <h3>{label}</h3>
+            <p className="throughput-verdict">{verdict}</p>
+            <dl>
+              <div><dt>Arriving</dt><dd>{num(w.arrived)} <span>({w.arrival_per_min}/min)</span></dd></div>
+              <div><dt>Fetched</dt><dd>{num(w.fetched)} <span>({w.fetch_per_min}/min)</span></dd></div>
+            </dl>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 // Each bar is full width and shows one stage's own split, rather than being
 // scaled to the stage's share of the starting population. Measured against
 // real data, proportional widths put the last four stages at ~1.2px -- the
@@ -3243,6 +3272,8 @@ function FunnelPage() {
           )).join(" · ")}
         </p>
       )}
+
+      <Throughput windows={data.throughput} />
 
       <h2>Screening — queued domains to reviewable companies</h2>
       {!data.queue_counts_live && (

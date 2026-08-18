@@ -117,6 +117,55 @@ class Funnel:
         }
 
 
+@dataclass(frozen=True)
+class Throughput:
+    """Arrival against fetch rate over one window — the capacity question.
+
+    Whether intake outruns screening decides whether ranking is a nicety or
+    the only thing that matters, and it is the one number that has to come
+    from the live database rather than from a code comment. A stale local
+    snapshot answers a different question about a machine nobody is running.
+    """
+
+    window_hours: int
+    arrived: int
+    fetched: int
+
+    @property
+    def arrival_per_min(self) -> float:
+        return self.arrived / (self.window_hours * 60) if self.window_hours else 0.0
+
+    @property
+    def fetch_per_min(self) -> float:
+        return self.fetched / (self.window_hours * 60) if self.window_hours else 0.0
+
+    @property
+    def overload_ratio(self) -> float:
+        """Arrivals per fetch. 1.0 means screening keeps up; 4.0 means three
+        of every four domains are never looked at. Zero when nothing was
+        fetched, which is a different condition from keeping up and must not
+        be reported as an infinite ratio."""
+        return self.arrived / self.fetched if self.fetched else 0.0
+
+    @property
+    def keeping_up(self) -> bool:
+        return self.fetched > 0 and self.arrived <= self.fetched
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "window_hours": self.window_hours,
+            "arrived": self.arrived,
+            "fetched": self.fetched,
+            "arrival_per_min": round(self.arrival_per_min, 2),
+            "fetch_per_min": round(self.fetch_per_min, 2),
+            "overload_ratio": round(self.overload_ratio, 2),
+            "keeping_up": self.keeping_up,
+            # Distinguishes "screening is idle" from "screening keeps up".
+            # Both show a healthy-looking backlog delta; only one is good.
+            "stalled": self.fetched == 0 and self.arrived > 0,
+        }
+
+
 def intake_funnel(
     *,
     hostnames_seen: int,

@@ -6,7 +6,9 @@ is distinguished from a backlog is asserted directly.
 
 import unittest
 
-from funnel import Funnel, Stage, biggest_losses, intake_funnel, screening_funnel
+from funnel import (
+    Funnel, Stage, Throughput, biggest_losses, intake_funnel, screening_funnel,
+)
 
 
 class DropVersusBacklogTests(unittest.TestCase):
@@ -138,3 +140,53 @@ class BiggestLossesTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ThroughputTests(unittest.TestCase):
+    """Arrival against fetch rate — the capacity question.
+
+    The number this replaces was never measured: a "373/min arriving vs
+    ~97/min capacity" figure lived in a code comment and got quoted as fact.
+    The local queue snapshot could not settle it either, having stopped
+    receiving data weeks earlier, so it described a machine nobody was
+    running. This has to be computed against the live database.
+    """
+
+    def test_overload_ratio_is_arrivals_per_fetch(self):
+        t = Throughput(window_hours=24, arrived=30_000, fetched=7_500)
+        self.assertEqual(t.overload_ratio, 4.0)
+        self.assertFalse(t.keeping_up)
+
+    def test_keeping_up_when_screening_matches_arrival(self):
+        t = Throughput(window_hours=24, arrived=5_000, fetched=5_000)
+        self.assertTrue(t.keeping_up)
+        self.assertEqual(t.overload_ratio, 1.0)
+
+    def test_screening_faster_than_arrival_still_reads_as_keeping_up(self):
+        # Draining a backlog is healthy, not an anomaly.
+        t = Throughput(window_hours=24, arrived=1_000, fetched=4_000)
+        self.assertTrue(t.keeping_up)
+
+    def test_a_stalled_worker_is_not_reported_as_keeping_up(self):
+        # Zero fetches and a growing queue looks identical to keeping up if
+        # you only watch the backlog delta. It is the opposite condition, and
+        # dividing by zero would have reported it as an infinite ratio.
+        t = Throughput(window_hours=24, arrived=5_000, fetched=0)
+        self.assertEqual(t.overload_ratio, 0.0)
+        self.assertFalse(t.keeping_up)
+        self.assertTrue(t.to_dict()["stalled"])
+
+    def test_an_idle_window_is_neither_stalled_nor_keeping_up(self):
+        t = Throughput(window_hours=24, arrived=0, fetched=0)
+        self.assertFalse(t.to_dict()["stalled"])
+        self.assertFalse(t.keeping_up)
+
+    def test_rates_are_per_minute_over_the_window(self):
+        t = Throughput(window_hours=24, arrived=1_440, fetched=720)
+        self.assertAlmostEqual(t.arrival_per_min, 1.0)
+        self.assertAlmostEqual(t.fetch_per_min, 0.5)
+
+    def test_a_zero_window_does_not_divide_by_zero(self):
+        t = Throughput(window_hours=0, arrived=10, fetched=5)
+        self.assertEqual(t.arrival_per_min, 0.0)
+        self.assertEqual(t.fetch_per_min, 0.0)
