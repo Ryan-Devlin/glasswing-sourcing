@@ -15,6 +15,8 @@ import pandas as pd
 from anthropic import AsyncAnthropic
 from dotenv import load_dotenv
 
+import claude_batch
+from claude_budget import describe_savings, plan_calls
 from common import (
     FILTERED, LLM, atomic_write_json, clean, get_model,
     save_automated_basket_entries, stable_domain, upsert_csv,
@@ -306,6 +308,37 @@ def validate_response_text(text: str) -> None:
         detail = f"missing tags: {','.join(missing)}" if missing else "invalid decision"
         raise DiligenceResponseError(detail)
 
+def assessment_from_response(response: Any) -> dict:
+    """Turn one API response into a parsed assessment, or raise.
+
+    Shared by the synchronous and batched tiers on purpose: they differ only
+    in how the response was obtained, and a second copy of the validate-then-
+    parse sequence is how the two would quietly drift into disagreeing about
+    what counts as a usable verdict.
+    """
+    text, urls = response_text_and_urls(response)
+    validate_response_text(text)
+    return parse_assessment(
+        text,
+        urls,
+        max_total_funding_m=MAX_TOTAL_FUNDING_M,
+        max_institutional_rounds=MAX_INSTITUTIONAL_ROUNDS,
+    )
+
+
+def request_params(row: dict, model: str) -> dict:
+    """The Messages request body for one candidate, identical in both tiers."""
+    return {
+        "model": model,
+        # The evidence-first rubric has substantially more required tags than
+        # the legacy five-word response. Leave enough headroom so a valid
+        # answer is not truncated before the closing evidence tags.
+        "max_tokens": 1000,
+        "system": SYSTEM_PROMPT,
+        "messages": [{"role": "user", "content": company_payload(row)}],
+    }
+
+
 async def classify(
     client: AsyncAnthropic,
     sem: asyncio.Semaphore,
@@ -313,27 +346,9 @@ async def classify(
     model: str,
 ) -> dict:
     async with sem:
-        response = await client.messages.create(
-            model=model,
-            # The evidence-first rubric has substantially more required tags
-            # than the legacy five-word response. Leave enough headroom so a
-            # valid answer is not truncated before the closing evidence tags.
-            max_tokens=1000,
-            system=SYSTEM_PROMPT,
-            messages=[{
-                "role": "user",
-                "content": company_payload(row),
-            }],
-        )
+        response = await client.messages.create(**request_params(row, model))
 
-    text, urls = response_text_and_urls(response)
-    validate_response_text(text)
-    assessment = parse_assessment(
-        text,
-        urls,
-        max_total_funding_m=MAX_TOTAL_FUNDING_M,
-        max_institutional_rounds=MAX_INSTITUTIONAL_ROUNDS,
-    )
+    assessment = assessment_from_response(response)
 
     # "No external coverage" used to be a real finding: a web search ran and
     # returned nothing. With the search gone no call can ever produce a URL,
@@ -728,23 +743,98 @@ async def run() -> None:
 
         client = AsyncAnthropic()
         sem = asyncio.Semaphore(options.workers)
+
+        # A batch submitted by an earlier run is already paid for. Ingest it
+        # before spending anything new, so its verdicts land even on a run
+        # that dispatches nothing of its own.
+        (
+            batch_responses,
+            batch_failures,
+            batch_status,
+            batch_rows,
+        ) = await claude_batch.collect(client)
+
+        # Split today's candidates: the highest-conviction few answered now at
+        # full price, the rest batched at half. See claude_budget.
+        plan = plan_calls(
+            rows,
+            calls_used_today=0,
+            exceptional_score=float(options.exceptional_score),
+        )
+        print(describe_savings(plan))
+        if plan.deferred:
+            print(plan.note)
+
         attempted_domains = [
-            stable_domain(row.get("domain", "")) for row in rows
+            stable_domain(row.get("domain", "")) for row in plan.sync
         ]
         raw_results = await asyncio.gather(*[
             classify(client, sem, row, options.model)
-            for row in rows
+            for row in plan.sync
         ], return_exceptions=True)
 
         successful_rows = []
         assessments = []
         failures: list[tuple[str, Exception]] = []
-        for row, result in zip(rows, raw_results):
+        for row, result in zip(plan.sync, raw_results):
             if isinstance(result, Exception):
                 failures.append((stable_domain(row.get("domain", "")), result))
             else:
                 successful_rows.append(row)
                 assessments.append(result)
+
+        # Verdicts from the batch submitted a run or more ago. Parsed through
+        # the same helper as the synchronous tier so the two cannot disagree
+        # about what counts as a usable answer.
+        for custom_id, message in batch_responses.items():
+            row = batch_rows.get(custom_id)
+            if not row:
+                # No stashed row means nothing downstream can be written for
+                # it; report rather than persist a half-populated record.
+                failures.append(
+                    (custom_id, RuntimeError("batch row missing from state"))
+                )
+                continue
+            attempted_domains.append(stable_domain(row.get("domain", "")))
+            try:
+                assessment = assessment_from_response(message)
+            except Exception as exc:
+                failures.append((stable_domain(row.get("domain", "")), exc))
+                continue
+            successful_rows.append(row)
+            assessments.append(assessment)
+
+        for custom_id, kind in batch_failures:
+            failures.append((custom_id, RuntimeError(f"batch result {kind}")))
+
+        # Submitted last on purpose: if anything above raised, the day's
+        # budget has not been committed to a batch nobody will collect.
+        if plan.batched:
+            entries = [
+                (
+                    claude_batch.custom_id_for(row.get("domain", "")),
+                    request_params(row, options.model),
+                )
+                for row in plan.batched
+            ]
+            submitted = await claude_batch.submit(
+                client,
+                entries,
+                rows={
+                    claude_batch.custom_id_for(row.get("domain", "")): row
+                    for row in plan.batched
+                },
+            )
+            if submitted:
+                print(
+                    f"Batch submitted | id={submitted} | "
+                    f"candidates={len(entries)} | half-price tier"
+                )
+            else:
+                print(
+                    "Batch not submitted: one is still in flight "
+                    f"(status={batch_status}). Candidates roll to the next run."
+                )
 
         for domain, exc in failures:
             print(
@@ -812,7 +902,7 @@ async def run() -> None:
     append_claude_buckets(approved, denied)
 
     print(
-        f"Web diligence searches: {len(rows)} | "
+        f"Diligence verdicts: {len(rows)} | "
         f"New approved: {len(approved)} | "
         f"New denied: {len(denied)} | "
         f"Approved master: {len(approved_master)} | "

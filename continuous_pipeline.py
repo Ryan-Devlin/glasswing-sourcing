@@ -101,9 +101,18 @@ _shared_config_cache: dict[str, object] = {}
 # pipeline, not a budget knob someone has to remember to tune.
 CLAUDE_MINIMUM_SCORE = 60
 CLAUDE_EXCEPTIONAL_SCORE = 90
-CLAUDE_BATCH_MAX = 10
+# One attempt should be able to dispatch a whole day. Every attempt pays the
+# same O(corpus) rescore to choose its candidates regardless of how many it
+# then calls, so a batch max of 10 against a 100/day budget meant paying that
+# cost ten times for the same day's work. Sized to the daily cap: the split
+# between the immediate and half-price tiers is claude_budget's job, not this
+# constant's.
+CLAUDE_BATCH_MAX = 100
 CLAUDE_HOURLY_LIMIT = 100
-CLAUDE_DAILY_LIMIT = 400
+# 100/day, down from 400. The budget is now spent through two tiers -- the
+# highest-conviction candidates answered immediately at full price, the rest
+# batched at half -- so 100 verdicts cost about 55 calls' worth of spend.
+CLAUDE_DAILY_LIMIT = 100
 # Diligence used to be attempted after every screening batch. In Postgres mode
 # each attempt loads the entire classifications table (99k rows, each carrying
 # a full record_json payload) into a DataFrame and writes it to CSV just to

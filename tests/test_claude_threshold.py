@@ -140,9 +140,28 @@ class ClaudeThresholdTests(unittest.TestCase):
         self.assertEqual(apply_hard_guards(assessment)["decision"], "KEEP")
 
     def test_rubric_response_has_sufficient_token_headroom(self):
+        # The evidence-first rubric requires fifteen tags; too small a ceiling
+        # truncates the answer before the closing evidence tags and the whole
+        # call is discarded as malformed. Asserted on the value the request
+        # actually carries rather than on source text, so it keeps holding
+        # when the request body moves.
+        params = claude_classifier.request_params({"domain": "a.ai"}, "m")
+        self.assertGreaterEqual(params["max_tokens"], 1000)
+        self.assertEqual(params["system"], claude_classifier.SYSTEM_PROMPT)
         source = Path(claude_classifier.__file__).read_text(encoding="utf-8")
-        self.assertIn("max_tokens=1000", source)
         self.assertIn('"failure_details"', source)
+
+    def test_both_tiers_send_an_identical_request_body(self):
+        # The synchronous and batched tiers must differ only in transport. If
+        # they built different bodies, a batched verdict would be answering a
+        # subtly different question than an immediate one for the same row.
+        source = Path(claude_classifier.__file__).read_text(encoding="utf-8")
+        classify_body = source.split("async def classify(", 1)[1].split(
+            "\ndef load_currently_diligenced_domains", 1
+        )[0]
+        self.assertIn("request_params(row, model)", classify_body)
+        run_body = source.split("async def run(", 1)[1]
+        self.assertIn("request_params(row, options.model)", run_body)
 
     def test_weighted_score_is_deterministic_and_confidence_is_separate(self):
         assessment = {

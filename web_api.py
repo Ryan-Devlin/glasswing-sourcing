@@ -595,7 +595,7 @@ def pipeline_filters():
         "include_keywords": config.get("include_keywords", []),
         "exclude_keywords": config.get("exclude_keywords", []),
         "minimum_score": int(config.get("minimum_score", 55)),
-        "claude_daily_limit": int(config.get("claude_daily_limit", 400)),
+        "claude_daily_limit": int(config.get("claude_daily_limit", 100)),
     }
 
 
