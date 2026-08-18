@@ -75,7 +75,15 @@ async def download_scheduled_snapshots(conn, settings: Settings) -> bool:
         return False
 
     last_attempt = _state_value(conn, "last_czds_attempt_at")
-    if last_attempt:
+    prior_error = _state_value(conn, "last_czds_download_error")
+    credentials_now_available = bool(
+        os.getenv("CZDS_USERNAME") and os.getenv("CZDS_PASSWORD")
+    )
+    recovered_missing_credentials = bool(
+        credentials_now_available
+        and prior_error.startswith("CZDS_USERNAME and CZDS_PASSWORD")
+    )
+    if last_attempt and not recovered_missing_credentials:
         try:
             attempted_at = datetime.fromisoformat(
                 last_attempt.replace("Z", "+00:00")
