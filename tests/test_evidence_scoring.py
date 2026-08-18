@@ -1,4 +1,8 @@
 from filter import (
+    COVERAGE_EVIDENCE_CAP,
+    COVERAGE_FLOOR_MAX,
+    COVERAGE_WORD_CAP,
+    LOW_VALUE_SCORE_CEILING,
     aiaas_green_flags,
     founder_green_flags,
     founder_pedigree_score,
@@ -104,3 +108,28 @@ def test_scorecard_is_bounded_and_explainable():
         "technical_depth",
     }
     assert all(0 <= value <= 100 for value in card.values())
+
+
+def test_evidence_coverage_floor_stays_below_the_low_value_fit_ceiling():
+    """The floor exists so an extracted page is not confused with a failed
+    extraction -- it must never promote a page into a fit band.
+
+    This replaces a `min(coverage_score, 24)` clamp that could never bind,
+    because the components cap out at 1 + 8 + 12 = 21. The clamp implied a
+    ceiling of 24 that was unreachable, so raising a component cap later would
+    have silently crossed the low-value ceiling without anything failing.
+    """
+    assert COVERAGE_FLOOR_MAX == 1 + COVERAGE_WORD_CAP + COVERAGE_EVIDENCE_CAP
+    assert COVERAGE_FLOOR_MAX < LOW_VALUE_SCORE_CEILING
+
+
+def test_a_long_page_with_no_fit_evidence_scores_within_the_coverage_floor():
+    """Lots of text but no thesis, product, or buyer evidence."""
+    text = " ".join(["the weather here is pleasant this afternoon"] * 200)
+    score = score_text(text)[0]
+    assert 0 < score <= COVERAGE_FLOOR_MAX
+
+
+def test_extraction_failure_is_the_only_way_to_score_zero():
+    assert score_text("")[0] == 0
+    assert score_text("   ")[0] == 0

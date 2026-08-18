@@ -1523,6 +1523,18 @@ def scorecard_from_evidence(
     }
 
 
+# Lowest thesis-fit ceiling: a page carrying low-value signals cannot score
+# above this no matter what else it contains.
+LOW_VALUE_SCORE_CEILING = 24
+# Evidence-coverage floor components. Their sum is deliberately kept under
+# LOW_VALUE_SCORE_CEILING so that merely having extractable text can never lift
+# a page into a band that real thesis fit has to earn.
+COVERAGE_BASE_POINT = 1
+COVERAGE_WORD_CAP = 8
+COVERAGE_EVIDENCE_CAP = 12
+COVERAGE_FLOOR_MAX = COVERAGE_BASE_POINT + COVERAGE_WORD_CAP + COVERAGE_EVIDENCE_CAP
+
+
 def score_text(text: str) -> tuple[int, str, list[str], dict[str, int]]:
     """Conservative website-only Glasswing score.
 
@@ -1663,7 +1675,7 @@ def score_text(text: str) -> tuple[int, str, list[str], dict[str, int]]:
     if service_hits:
         score = min(score, 42)
     if low_value_hits:
-        score = min(score, 24)
+        score = min(score, LOW_VALUE_SCORE_CEILING)
     if unique_technical == 0:
         score = min(score, 68)
     if unique_defensibility == 0:
@@ -1705,12 +1717,17 @@ def score_text(text: str) -> tuple[int, str, list[str], dict[str, int]]:
             + unique_defensibility
             + unique_problem
         )
+        # Bounded by construction at COVERAGE_FLOOR_MAX (21). The clamp that
+        # used to sit here read `min(coverage_score, 24)`, which could never
+        # bind and so silently documented a ceiling the components could not
+        # reach. The real invariant -- that this floor stays below the
+        # low-value fit ceiling -- is asserted in the tests instead.
         coverage_score = (
-            1
-            + min(word_count // 40, 8)
-            + min(observed_evidence, 12)
+            COVERAGE_BASE_POINT
+            + min(word_count // 40, COVERAGE_WORD_CAP)
+            + min(observed_evidence, COVERAGE_EVIDENCE_CAP)
         )
-        score = max(score, min(coverage_score, 24))
+        score = max(score, coverage_score)
 
     evidence = list(dict.fromkeys(
         pillar_hits[best]
