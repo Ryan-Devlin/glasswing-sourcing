@@ -1600,6 +1600,10 @@ def corpus_stats(kind: Literal["ai", "zone"]):
         "last_deal_at": latest_deal_at,
         "crawler_status": worker.get("crawler_status", "unknown"),
         "crawler_phase": worker.get("crawler_phase", "unknown"),
+        "snapshot_schedule": "Daily at 6:00 AM ET",
+        "last_snapshot_day": worker.get("last_czds_snapshot_day", ""),
+        "last_snapshot_attempt_at": worker.get("last_czds_attempt_at", ""),
+        "snapshot_error": worker.get("last_czds_download_error", ""),
     }
 
 

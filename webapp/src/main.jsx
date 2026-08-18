@@ -2383,19 +2383,29 @@ function SearchCorpusPage({ kind }) {
         </div>
       )}
       {!isAi && Boolean(metrics.data?.zone_deltas?.length) && (
-        <div className="zone-delta-summary">
-          {metrics.data.zone_deltas.map((zone) => (
-            <span key={zone.tld}>
-              <strong>.{zone.tld}</strong>
-              {zone.is_today
-                ? ` +${fmt(zone.new_domains)} today`
-                : ` last snapshot +${fmt(zone.new_domains)}`}
-              {zone.snapshot_at
-                ? ` · ${new Date(zone.snapshot_at).toLocaleString()}`
+        <>
+          <div className="zone-delta-summary">
+            {metrics.data.zone_deltas.map((zone) => (
+              <span key={zone.tld}>
+                <strong>.{zone.tld}</strong>
+                {zone.is_today
+                  ? ` +${fmt(zone.new_domains)} today`
+                  : ` last snapshot +${fmt(zone.new_domains)}`}
+                {zone.snapshot_at
+                  ? ` · ${new Date(zone.snapshot_at).toLocaleString()}`
+                  : ""}
+              </span>
+            ))}
+          </div>
+          {metrics.data.snapshot_error && (
+            <ErrorBox>
+              Daily snapshot failed: {metrics.data.snapshot_error}
+              {metrics.data.last_snapshot_attempt_at
+                ? ` · attempted ${new Date(metrics.data.last_snapshot_attempt_at).toLocaleString()}`
                 : ""}
-            </span>
-          ))}
-        </div>
+            </ErrorBox>
+          )}
+        </>
       )}
       {isAi && metrics.data && (
         <section className={`corpus-status ${crawlerStale ? "stale" : ""}`}>
