@@ -82,6 +82,13 @@ are still detected within five minutes;
 later file queues only additions. `CZDS_USERNAME` and `CZDS_PASSWORD` must be
 configured on the worker service.
 
+A failed import never leaves storage behind: an aborted download deletes its
+`.part` file, an import that fails after staging its queue directory removes
+that directory unless its shard rows already committed, and the worker
+reclaims queue directories nothing references at startup. Without those, one
+out-of-space failure kept the volume full and every retry after it died the
+same way.
+
 Generated-domain audit files are compressed under `data/rejected/`. The
 original ICANN zone files are never modified.
 
@@ -129,7 +136,9 @@ Remove any already-crawled domains that fail the current quality gate:
 The `.com` zone is enormous. A complete crawl is a distributed-scale workload,
 not a quick laptop job. The local worker therefore defaults to bounded
 concurrency, stores only successful website HTML, reuses completed pages after
-zone refreshes, and pauses before available disk falls below 20 GB.
+zone refreshes, and pauses before available disk falls below
+`ZONE_UNIVERSE_MINIMUM_FREE_GB` (0.5 GB, sized for the 5 GB production
+volume rather than a laptop).
 
 Use the `.app` import first and a 100,000-domain `.com` pilot before deciding
 whether to import the full `.com` queue.
