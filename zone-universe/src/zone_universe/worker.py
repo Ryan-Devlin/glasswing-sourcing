@@ -652,16 +652,30 @@ async def run() -> None:
     AUTO_PAUSE_REASON = "auto_full_coverage"
     next_snapshot_check = 0.0
     next_import_check = 0.0
+    snapshot_task: asyncio.Task | None = None
+
+    async def scheduled_snapshot_cycle() -> None:
+        """Stream and import the daily snapshots on their own connection.
+
+        The crawl loop commits on `conn` continuously; sharing one connection
+        across both would let either side commit the other's half-finished
+        transaction.
+        """
+        with connect(settings.database) as snapshot_conn:
+            downloaded = await download_scheduled_snapshots(
+                snapshot_conn, settings
+            )
+            if downloaded:
+                await import_new_zonefiles(snapshot_conn, settings)
+
     try:
         while not stop.is_set() and not STOP_FILE.exists():
             now_monotonic = time.monotonic()
-            downloaded = False
-            if now_monotonic >= next_snapshot_check:
-                next_snapshot_check = now_monotonic + SNAPSHOT_CHECK_SECONDS
+            if snapshot_task is not None and snapshot_task.done():
                 try:
-                    downloaded = await download_scheduled_snapshots(
-                        conn, settings
-                    )
+                    snapshot_task.result()
+                except asyncio.CancelledError:
+                    pass
                 except Exception as exc:
                     set_state(
                         conn,
@@ -673,10 +687,22 @@ async def run() -> None:
                         "czds_download_error",
                         f"{type(exc).__name__}: {exc}",
                     )
-            # Import immediately after the scheduled download. The slower
-            # five-minute scan also supports an operator dropping in a file
-            # manually without turning the worker into an idle file watcher.
-            if downloaded or now_monotonic >= next_import_check:
+                snapshot_task = None
+            # Deliberately not awaited: a `.com` stream runs for roughly an
+            # hour, and awaiting it inline stalled every crawl for that whole
+            # window once a day. Confirmed live: 71,988 queued `.app` domains
+            # sat untouched behind `streaming_daily_com_snapshot` with the
+            # crawler already resumed. One cycle at a time, so a slow import
+            # cannot pile up concurrent duplicates of itself.
+            if snapshot_task is None and now_monotonic >= next_snapshot_check:
+                next_snapshot_check = now_monotonic + SNAPSHOT_CHECK_SECONDS
+                snapshot_task = asyncio.create_task(
+                    scheduled_snapshot_cycle()
+                )
+            # The slower scan supports an operator dropping a file in by hand
+            # without turning the worker into an idle file watcher. Skipped
+            # while a snapshot cycle owns the importer.
+            if snapshot_task is None and now_monotonic >= next_import_check:
                 next_import_check = now_monotonic + SNAPSHOT_CHECK_SECONDS
                 try:
                     await import_new_zonefiles(conn, settings)
@@ -771,6 +797,9 @@ async def run() -> None:
                     pass
     finally:
         registration_task.cancel()
+        if snapshot_task is not None:
+            snapshot_task.cancel()
+            await asyncio.gather(snapshot_task, return_exceptions=True)
         await asyncio.gather(registration_task, return_exceptions=True)
         set_state(conn, "worker_status", "stopped")
         set_state(conn, "crawler_status", "stopped")
