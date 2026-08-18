@@ -507,6 +507,13 @@ class StatusPersistenceTests(unittest.TestCase):
                 )
                 """
             )
+            # Deliberately the pre-intake-scoring schema above, then migrated
+            # with the real helper rather than hand-copying today's columns.
+            # A hand-written fixture silently drifts from production every
+            # time a column is added -- which is exactly how this test broke.
+            # Going through the migration also asserts that an existing
+            # database picks up new columns instead of erroring.
+            continuous_pipeline.ensure_domain_registry_schema(conn)
             first = continuous_pipeline.register_domain_event(
                 conn, "duplicate.ai", {".ai"}, run_id="run-1"
             )

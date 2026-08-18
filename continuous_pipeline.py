@@ -49,6 +49,7 @@ from db_backend import (
     using_postgres,
 )
 
+from intake_score import read_certificate
 from collector import (
     SUPPORTED_EXTENSIONS,
     domain_extension,
@@ -202,6 +203,10 @@ def ensure_domain_registry_schema(
         "last_seen_run_id": (
             "TEXT NOT NULL DEFAULT ''"
         ),
+        # Nullable on purpose: an unscored row reads as NULL, sorts last, and
+        # behaves exactly as it did before scoring existed. No backfill.
+        "intake_score": "INTEGER",
+        "intake_evidence": "TEXT DEFAULT ''",
     }
     for column, definition in additions.items():
         if column not in existing_columns:
@@ -325,10 +330,17 @@ _PIPELINE_POSTGRES_SCHEMA = """
         last_error TEXT DEFAULT '',
         seen_count INTEGER NOT NULL DEFAULT 1,
         first_seen_run_id TEXT NOT NULL DEFAULT '',
-        last_seen_run_id TEXT NOT NULL DEFAULT ''
+        last_seen_run_id TEXT NOT NULL DEFAULT '',
+        -- What the certificate itself said about this domain at intake, and
+        -- why. NULL means never scored, which sorts last and behaves exactly
+        -- as the pre-scoring queue did.
+        intake_score INTEGER,
+        intake_evidence TEXT DEFAULT ''
     );
+    ALTER TABLE domains ADD COLUMN IF NOT EXISTS intake_score INTEGER;
+    ALTER TABLE domains ADD COLUMN IF NOT EXISTS intake_evidence TEXT DEFAULT '';
     CREATE INDEX IF NOT EXISTS idx_domains_pending_claim
-        ON domains (first_seen DESC) WHERE status='pending';
+        ON domains (intake_score DESC, first_seen DESC) WHERE status='pending';
     CREATE INDEX IF NOT EXISTS idx_domains_status
         ON domains (status);
     CREATE TABLE IF NOT EXISTS claude_calls (
@@ -529,6 +541,8 @@ def register_domain_event(
     allowed_extensions: set[str] | None = None,
     *,
     run_id: str = "",
+    intake_score: int | None = None,
+    intake_evidence: str = "",
 ) -> dict[str, object]:
     """Register one CertStream event without requeueing known domains."""
     domain = stable_domain(domain)
@@ -546,6 +560,9 @@ def register_domain_event(
         }
 
     now = utc_now()
+    # A missing score must never beat a stored one, so an unscored repeat
+    # observation compares as -1 and leaves the existing value alone.
+    score_for_update = -1 if intake_score is None else int(intake_score)
     cursor = conn.execute(
         """
         INSERT INTO domains(
@@ -557,9 +574,11 @@ def register_domain_event(
             next_attempt_at,
             seen_count,
             first_seen_run_id,
-            last_seen_run_id
+            last_seen_run_id,
+            intake_score,
+            intake_evidence
         )
-        VALUES(?, ?, ?, 'pending', 0, ?, 1, ?, ?)
+        VALUES(?, ?, ?, 'pending', 0, ?, 1, ?, ?, ?, ?)
         ON CONFLICT(domain) DO NOTHING
         """,
         (
@@ -569,6 +588,8 @@ def register_domain_event(
             now,
             run_id,
             run_id,
+            intake_score,
+            (intake_evidence or "")[:200],
         ),
     )
     if cursor.rowcount == 1:
@@ -595,13 +616,28 @@ def register_domain_event(
         UPDATE domains
         SET last_seen = ?,
             seen_count = seen_count + 1,
-            last_seen_run_id = ?
+            last_seen_run_id = ?,
+            -- Keep the best evidence any certificate has ever shown for this
+            -- domain. A name that was a bare registration in March and ships
+            -- an app in June gets a richer certificate then, and this is what
+            -- lifts it up the queue at the moment it became worth fetching --
+            -- which is why nothing here needs a revisit timer. Written as a
+            -- CASE rather than GREATEST/MAX so one statement serves both
+            -- backends.
+            intake_score = CASE
+                WHEN ? > COALESCE(intake_score, -1) THEN ?
+                ELSE intake_score END,
+            intake_evidence = CASE
+                WHEN ? > COALESCE(intake_score, -1) THEN ?
+                ELSE intake_evidence END
         WHERE domain = ?
         RETURNING status, seen_count
         """,
         (
             now,
             run_id,
+            score_for_update, score_for_update,
+            score_for_update, (intake_evidence or "")[:200],
             domain,
         ),
     ).fetchone()
@@ -716,6 +752,11 @@ def claim_batch(
                 WHEN last_seen_run_id IN ('manual_domain_intake','csv_upload') THEN 2
                 ELSE 3
               END,
+              -- What the certificate said, before recency. Arrival runs
+              -- ~4x screening capacity, so this clause decides which quarter
+              -- of the feed is ever looked at; recency is uncorrelated with
+              -- whether a domain is a company. Unscored rows sort last.
+              COALESCE(intake_score, -1) DESC,
               first_seen DESC
             LIMIT ?
             """,
@@ -798,6 +839,7 @@ def claim_batch(
                 WHEN crawled.domain IS NOT NULL THEN 1
                 ELSE 2
               END,
+              COALESCE(queue.intake_score, -1) DESC,
               queue.first_seen DESC
             LIMIT ?
             """,
@@ -818,6 +860,7 @@ def claim_batch(
               )
             ORDER BY
               CASE WHEN crawled.domain IS NOT NULL THEN 0 ELSE 1 END,
+              COALESCE(queue.intake_score, -1) DESC,
               queue.first_seen DESC
             LIMIT ?
             """,
@@ -837,6 +880,7 @@ def claim_batch(
               )
             ORDER BY
               CASE WHEN zone_page.domain IS NOT NULL THEN 0 ELSE 1 END,
+              COALESCE(queue.intake_score, -1) DESC,
               queue.first_seen DESC
             LIMIT ?
             """,
@@ -849,7 +893,7 @@ def claim_batch(
             FROM domains
             WHERE status='pending'
               AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
-            ORDER BY first_seen DESC
+            ORDER BY COALESCE(intake_score, -1) DESC, first_seen DESC
             LIMIT ?
             """,
             (now, size),
@@ -1487,6 +1531,18 @@ async def listener(
     hostnames_filtered = int(
         listener_status.get("hostnames_filtered", 0) or 0
     )
+    # Apexes refused because their certificate carried too many unrelated
+    # domains to be one company's. Tracked apart from junk-filtered hostnames:
+    # this is a deliberate intake rejection, not malformed input.
+    platform_apexes_dropped = int(
+        listener_status.get("platform_apexes_dropped", 0) or 0
+    )
+    platform_certs_dropped = int(
+        listener_status.get("platform_certs_dropped", 0) or 0
+    )
+    last_platform_cert = str(
+        listener_status.get("last_platform_cert", "") or ""
+    )
     intake_status_flushed_at = time.monotonic()
     intake_status_flush_seconds = max(
         1.0, float(os.getenv("INTAKE_STATUS_FLUSH_SECONDS", "5"))
@@ -1730,16 +1786,27 @@ async def listener(
                     # rejects, doubling the work on the hottest path here.
                     raw_hostnames = names_from_message(raw)
                     hostnames_seen += len(raw_hostnames)
-                    message_domains: set[str] = set()
-                    for hostname in raw_hostnames:
-                        registrable = registrable_domain(
-                            hostname,
-                            allowed_extensions,
-                        )
-                        if registrable:
-                            message_domains.add(registrable)
-                        else:
-                            hostnames_filtered += 1
+                    # Read the certificate as a whole rather than hostname by
+                    # hostname. The SAN list is the richest free signal in the
+                    # pipeline -- subdomain structure says whether anyone has
+                    # built anything, and the count of distinct apexes says
+                    # whether this is a company or a hosting provider -- and
+                    # collapsing it to a set of apexes threw all of that away.
+                    reading = read_certificate(
+                        raw_hostnames,
+                        allowed_extensions,
+                    )
+                    hostnames_filtered += reading.filtered_hostnames
+                    if reading.dropped:
+                        # A platform's shared certificate. Every apex on it
+                        # used to be queued as an equal peer.
+                        platform_apexes_dropped += len(reading.dropped)
+                        platform_certs_dropped += 1
+                        last_platform_cert = reading.drop_reason
+                    intake_scores = {
+                        entry.domain: entry for entry in reading.scored
+                    }
+                    message_domains: set[str] = set(intake_scores)
 
                     if (
                         time.monotonic() - intake_status_flushed_at
@@ -1753,6 +1820,9 @@ async def listener(
                         write_status(
                             hostnames_seen=hostnames_seen,
                             hostnames_filtered=hostnames_filtered,
+                            platform_apexes_dropped=platform_apexes_dropped,
+                            platform_certs_dropped=platform_certs_dropped,
+                            last_platform_cert=last_platform_cert,
                         )
 
                     for domain in sorted(message_domains):
@@ -1770,6 +1840,8 @@ async def listener(
                                 domain,
                                 allowed_extensions,
                                 run_id=active_run_id,
+                                intake_score=intake_scores[domain].score,
+                                intake_evidence=intake_scores[domain].evidence,
                             )
                         else:
                             event = register_domain_event(
@@ -1777,6 +1849,8 @@ async def listener(
                                 domain,
                                 allowed_extensions,
                                 run_id=active_run_id,
+                                intake_score=intake_scores[domain].score,
+                                intake_evidence=intake_scores[domain].evidence,
                             )
                         _register_elapsed = (
                             time.monotonic() - _register_started
