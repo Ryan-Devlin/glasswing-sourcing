@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import concurrent.futures
 import os
+import shutil
 import signal
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -66,8 +69,49 @@ def _state_value(conn, key: str) -> str:
     return str(row["value"]) if row is not None else ""
 
 
+def stream_czds_zone(settings: Settings, tld: str) -> dict[str, object]:
+    """Pipe one authenticated CZDS response directly through the importer."""
+    if str(CZDS_CLIENT.parent) not in sys.path:
+        sys.path.insert(0, str(CZDS_CLIENT.parent))
+    import czds
+
+    session = czds.Session(
+        os.environ["CZDS_USERNAME"],
+        os.environ["CZDS_PASSWORD"],
+    )
+    url = czds.select_links(session.links(), [tld])[0]
+    fifo = ZONEFILES / f".{tld}-{uuid.uuid4().hex}.stream.gz"
+    os.mkfifo(fifo, mode=0o600)
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            imported = pool.submit(
+                import_zone,
+                fifo,
+                tld=tld,
+                shard_count=64,
+                database=settings.database,
+            )
+            producer_connected = False
+            try:
+                with session.get(url, timeout=3600) as response:
+                    with fifo.open("wb", buffering=0) as output:
+                        producer_connected = True
+                        shutil.copyfileobj(response, output, 1024 * 1024)
+            except Exception:
+                # Closing the producer side causes the importer to receive
+                # EOF and unwind instead of waiting forever on the FIFO.
+                if not producer_connected:
+                    with fifo.open("wb", buffering=0):
+                        pass
+                imported.cancel()
+                raise
+            return imported.result()
+    finally:
+        fifo.unlink(missing_ok=True)
+
+
 async def download_scheduled_snapshots(conn, settings: Settings) -> bool:
-    """Download `.app` and `.com` once per day at/after 6 AM Eastern."""
+    """Stream/import `.app` and `.com` once daily after 6 AM Eastern."""
     schedule_day = scheduled_snapshot_day()
     if not schedule_day:
         return False
@@ -109,44 +153,50 @@ async def download_scheduled_snapshots(conn, settings: Settings) -> bool:
         return False
 
     ZONEFILES.mkdir(parents=True, exist_ok=True)
-    set_state(conn, "crawler_status", "downloading_daily_snapshots")
-    process = await asyncio.create_subprocess_exec(
-        sys.executable,
-        str(CZDS_CLIENT),
-        "-j",
-        "2",
-        "download",
-        *settings.tlds,
-        "-o",
-        str(ZONEFILES),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=str(CZDS_CLIENT.parent),
-    )
+    set_state(conn, "last_czds_download_error", "")
+    imported: dict[str, dict[str, object]] = {}
     try:
-        stdout, stderr = await asyncio.wait_for(
-            process.communicate(), timeout=3600
-        )
-    except asyncio.TimeoutError:
-        process.kill()
-        await process.communicate()
-        set_state(conn, "last_czds_download_error", "download timed out")
-        return False
-    if process.returncode != 0:
-        error = (stderr or stdout).decode("utf-8", errors="replace")[-1000:]
+        for tld in settings.tlds:
+            set_state(conn, "crawler_status", f"streaming_daily_{tld}_snapshot")
+            result = await asyncio.wait_for(
+                asyncio.to_thread(stream_czds_zone, settings, tld),
+                timeout=7200,
+            )
+            imported[tld] = result
+            set_state(
+                conn,
+                "last_zone_import",
+                {
+                    "tld": tld,
+                    "domains": result["delegated_domains"],
+                    "added": result["added_domains"],
+                    "removed": result["removed_domains"],
+                },
+            )
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"[:1000]
         set_state(conn, "last_czds_download_error", error)
-        log_event(conn, "czds_download_error", error)
+        log_event(conn, "czds_stream_import_error", error)
         return False
 
     set_state(conn, "last_czds_snapshot_day", schedule_day)
     set_state(conn, "last_czds_download_error", "")
-    set_state(conn, "last_czds_download_output", stdout.decode(
-        "utf-8", errors="replace"
-    )[-1000:])
+    set_state(
+        conn,
+        "last_czds_download_output",
+        {
+            tld: {
+                "domains": result["delegated_domains"],
+                "added": result["added_domains"],
+                "removed": result["removed_domains"],
+            }
+            for tld, result in imported.items()
+        },
+    )
     log_event(
         conn,
         "czds_daily_snapshots_downloaded",
-        f"Downloaded {','.join(settings.tlds)} snapshots for {schedule_day}.",
+        f"Stream-imported {','.join(settings.tlds)} snapshots for {schedule_day}.",
     )
     return True
 

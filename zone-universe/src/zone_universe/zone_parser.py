@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 import shutil
+import stat
 import uuid
 from collections import Counter
 from contextlib import ExitStack
@@ -33,9 +34,14 @@ def source_fingerprint(path: Path) -> str:
 
 
 def _open_zone(path: Path):
+    # Named pipes are used by the production CZDS streaming importer. Avoid a
+    # separate magic-byte probe: opening a FIFO twice would consume bytes from
+    # the one-shot network stream and can deadlock the producer.
+    if path.suffix.lower() == ".gz":
+        return gzip.open(path, "rb")
     with path.open("rb") as handle:
         magic = handle.read(2)
-    if path.suffix.lower() == ".gz" or magic == b"\x1f\x8b":
+    if magic == b"\x1f\x8b":
         return gzip.open(path, "rb")
     return path.open("rb")
 
@@ -138,7 +144,9 @@ def import_zone(
     to the crawl queue.
     """
     path = Path(zone_path).expanduser().resolve()
-    if not path.exists() or not path.is_file():
+    if not path.exists() or not (
+        path.is_file() or stat.S_ISFIFO(path.stat().st_mode)
+    ):
         raise FileNotFoundError(path)
     tld = normalize_tld(tld)
     shard_count = max(4, min(int(shard_count), 128))

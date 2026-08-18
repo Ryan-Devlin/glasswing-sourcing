@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import gzip
 import json
+import os
+import concurrent.futures
 from pathlib import Path
 
 from zone_universe.database import connect
@@ -154,3 +156,27 @@ def test_zone_refresh_records_additions_and_removals(
         if domain
     }
     assert queued == {"gamma.app"}
+
+
+def test_import_zone_accepts_a_one_shot_gzip_fifo(tmp_path: Path) -> None:
+    fifo = tmp_path / "app.stream.gz"
+    os.mkfifo(fifo)
+    database = tmp_path / "universe.sqlite3"
+    queues = tmp_path / "queues"
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(
+            import_zone,
+            fifo,
+            tld="app",
+            shard_count=4,
+            database=database,
+            queue_root=queues,
+        )
+        with gzip.open(fifo, "wb") as output:
+            output.write(
+                b"alpha.app. 3600 IN NS ns1.example.net.\n"
+                b"beta.app. 3600 IN NS ns1.example.net.\n"
+            )
+        result = future.result(timeout=5)
+    assert result["delegated_domains"] == 2
+    assert result["added_domains"] == 0

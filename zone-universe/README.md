@@ -72,10 +72,12 @@ The crawler resumes from the committed byte offset in every queue shard.
 10. Each later zone import writes sorted `added.txt.gz` and `removed.txt.gz`
     deltas; only newly delegated domains enter the crawl pass.
 
-At 6:00 AM America/New_York each day, the worker downloads the approved `.app`
-and `.com` snapshots from CZDS, imports them atomically, and queues the set
-difference. A five-minute schedule check replaces the old five-second idle file
-poll. Manually supplied `.txt.gz` files are still detected within five minutes;
+At 6:00 AM America/New_York each day, the worker streams the approved `.app`
+and `.com` CZDS responses directly through normalization and set-diffing. The
+multi-gigabyte raw archives are never written to disk; only the compact domain
+snapshot and small additions queue persist. A five-minute schedule check
+replaces the old five-second idle file poll. Manually supplied `.txt.gz` files
+are still detected within five minutes;
 `.part` files are ignored. The first file for a TLD is a baseline and every
 later file queues only additions. `CZDS_USERNAME` and `CZDS_PASSWORD` must be
 configured on the worker service.
