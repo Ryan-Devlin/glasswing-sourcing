@@ -6,7 +6,10 @@ import os
 import concurrent.futures
 from pathlib import Path
 
+import pytest
+
 from zone_universe.database import connect
+from zone_universe import zone_parser
 from zone_universe.zone_parser import (
     extract_delegated_domain,
     import_zone,
@@ -180,3 +183,80 @@ def test_import_zone_accepts_a_one_shot_gzip_fifo(tmp_path: Path) -> None:
         result = future.result(timeout=5)
     assert result["delegated_domains"] == 2
     assert result["added_domains"] == 0
+
+
+def test_failed_database_write_does_not_strand_the_queue_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The build directory is renamed into place before the database work.
+
+    A failure after that rename used to leave the finished directory --
+    snapshot plus every shard -- on disk with no shards row pointing at it,
+    so nothing ever reclaimed it and the volume filled up.
+    """
+    zone_path = tmp_path / "app.zone.gz"
+    with gzip.open(zone_path, "wb") as handle:
+        handle.write(b"alpha.app. 3600 IN NS ns1.example.net.\n")
+    database = tmp_path / "universe.sqlite3"
+    queues = tmp_path / "queues"
+
+    def explode() -> str:
+        raise RuntimeError("simulated database failure after rename")
+
+    monkeypatch.setattr(zone_parser, "utc_now", explode)
+    with pytest.raises(RuntimeError):
+        import_zone(
+            zone_path,
+            tld="app",
+            shard_count=4,
+            database=database,
+            queue_root=queues,
+        )
+
+    assert list((queues / "app").iterdir()) == []
+    conn = connect(database)
+    zone = conn.execute("SELECT * FROM zones WHERE tld='app'").fetchone()
+    assert zone is not None
+    assert zone["import_status"] == "error"
+    assert "simulated database failure" in str(zone["import_error"])
+    conn.close()
+
+
+def test_committed_queue_directory_survives_a_later_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once shard rows are durable the directory must be kept.
+
+    log_event and the obsolete-version sweep both run after the commit, so a
+    failure there must not delete a queue the database still points at.
+    """
+    zone_path = tmp_path / "app.zone.gz"
+    with gzip.open(zone_path, "wb") as handle:
+        handle.write(b"alpha.app. 3600 IN NS ns1.example.net.\n")
+    database = tmp_path / "universe.sqlite3"
+    queues = tmp_path / "queues"
+
+    def explode(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("simulated failure after commit")
+
+    monkeypatch.setattr(zone_parser, "log_event", explode)
+    with pytest.raises(RuntimeError):
+        import_zone(
+            zone_path,
+            tld="app",
+            shard_count=4,
+            database=database,
+            queue_root=queues,
+        )
+
+    conn = connect(database)
+    shard = conn.execute(
+        "SELECT path FROM shards WHERE tld='app' LIMIT 1"
+    ).fetchone()
+    assert shard is not None
+    retained = Path(str(shard["path"])).parent
+    assert retained.is_dir()
+    assert (retained / "domains.txt.gz").exists()
+    conn.close()

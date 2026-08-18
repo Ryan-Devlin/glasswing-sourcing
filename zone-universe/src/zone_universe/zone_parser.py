@@ -397,8 +397,21 @@ def import_zone(
             active_version=version,
         )
     except Exception as exc:
-        shutil.rmtree(build_dir, ignore_errors=True)
+        # Roll back first: on Postgres every later statement in an aborted
+        # transaction fails, including the orphan check below.
         conn.rollback()
+        shutil.rmtree(build_dir, ignore_errors=True)
+        # build_dir is renamed to final_dir before any of the database work,
+        # so a failure after the rename used to strand a complete queue
+        # directory -- snapshot plus 64 shards, hundreds of MB for .com --
+        # that no shards row references and no later import ever reclaims.
+        # Keep it only once its shard rows are actually committed.
+        durable = conn.execute(
+            "SELECT 1 FROM shards WHERE tld=? AND queue_version=? LIMIT 1",
+            (tld, version),
+        ).fetchone()
+        if durable is None:
+            shutil.rmtree(final_dir, ignore_errors=True)
         conn.execute(
             """
             UPDATE zones SET import_status='error',import_error=?

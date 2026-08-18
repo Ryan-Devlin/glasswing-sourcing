@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import concurrent.futures
+import errno
+import fcntl
 import os
 import shutil
 import signal
@@ -26,7 +28,14 @@ from runtime_control import (
     service_requested_by,
 )
 
-from .config import PID_FILE, STOP_FILE, ZONEFILES, Settings, load_settings
+from .config import (
+    PID_FILE,
+    QUEUES,
+    STOP_FILE,
+    ZONEFILES,
+    Settings,
+    load_settings,
+)
 from .crawler import (
     crawl_once,
     discard_cached_pages,
@@ -69,6 +78,45 @@ def _state_value(conn, key: str) -> str:
     return str(row["value"]) if row is not None else ""
 
 
+def open_stream_for_write(fifo: Path, importer, *, timeout: float = 300.0):
+    """Open the FIFO write end without deadlocking on an importer that died.
+
+    A blocking write-open on a FIFO waits forever for a reader.  The importer
+    creates a database row, 64 shard files and three gzip handles before it
+    opens the read end, so anything that fails in there -- ENOSPC being the
+    realistic one -- leaves the producer waiting on a reader that will never
+    arrive.  Poll with ``O_NONBLOCK`` instead, which fails with ENXIO until a
+    reader attaches, and stop as soon as the importer has finished, so the
+    caller sees the importer's real error rather than a hang.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            descriptor = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+        except OSError as exc:
+            if exc.errno != errno.ENXIO:
+                raise
+            if importer.done():
+                # Re-raises whatever killed the importer; only reached with a
+                # clean result if it somehow exited without reading anything.
+                importer.result()
+                raise OSError(
+                    errno.EPIPE,
+                    "zone importer exited without reading the stream",
+                )
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"zone importer never opened {fifo.name} for reading"
+                )
+            time.sleep(0.1)
+            continue
+        # Back to blocking for the copy itself: non-blocking pipe writes fail
+        # with EAGAIN every time the importer falls behind the download.
+        flags = fcntl.fcntl(descriptor, fcntl.F_GETFL)
+        fcntl.fcntl(descriptor, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
+        return os.fdopen(descriptor, "wb", buffering=0)
+
+
 def stream_czds_zone(settings: Settings, tld: str) -> dict[str, object]:
     """Pipe one authenticated CZDS response directly through the importer."""
     if str(CZDS_CLIENT.parent) not in sys.path:
@@ -91,19 +139,24 @@ def stream_czds_zone(settings: Settings, tld: str) -> dict[str, object]:
                 shard_count=64,
                 database=settings.database,
             )
-            producer_connected = False
             try:
                 with session.get(url, timeout=3600) as response:
-                    with fifo.open("wb", buffering=0) as output:
-                        producer_connected = True
+                    with open_stream_for_write(fifo, imported) as output:
                         shutil.copyfileobj(response, output, 1024 * 1024)
             except Exception:
-                # Closing the producer side causes the importer to receive
-                # EOF and unwind instead of waiting forever on the FIFO.
-                if not producer_connected:
-                    with fifo.open("wb", buffering=0):
-                        pass
-                imported.cancel()
+                if imported.done():
+                    # An importer that already failed closed the read end, so
+                    # the download only ever sees a broken pipe. Report the
+                    # cause, not the symptom.
+                    imported.result()
+                    raise
+                # Nothing consumed the stream yet: opening and closing the
+                # write end is what lets the importer see EOF and unwind
+                # instead of blocking on the FIFO forever.
+                try:
+                    open_stream_for_write(fifo, imported, timeout=30.0).close()
+                except Exception:
+                    pass
                 raise
             return imported.result()
     finally:
@@ -231,6 +284,60 @@ def retire_full_universe_queues(conn) -> dict[str, int]:
         "bytes_released": bytes_released,
     }
     set_state(conn, "daily_delta_queue_cleanup", result)
+    return result
+
+
+def reclaim_orphaned_queue_directories(
+    conn,
+    queue_root: Path = QUEUES,
+) -> dict[str, object]:
+    """Delete queue directories that no shards row and no zone points at.
+
+    An import that failed after renaming its build directory into place left
+    the whole thing behind -- snapshot plus 64 shards, several hundred MB for
+    `.com` -- with nothing referencing it, so remove_obsolete_queue_versions
+    could not find it either.  A handful of those fills the 5 GB volume and
+    every daily snapshot after that dies on ENOSPC.
+
+    Only safe at worker startup: nothing else is importing yet, so a leftover
+    `.building-` directory can only be debris from a process that was killed
+    mid-import (a redeploy), never a build in progress.
+    """
+    if not queue_root.exists():
+        return {"directories_removed": 0, "bytes_released": 0, "paths": []}
+    live = {
+        Path(str(row["path"])).parent
+        for row in conn.execute("SELECT path FROM shards")
+        if str(row["path"])
+    }
+    live |= {
+        Path(str(row["snapshot_path"])).parent
+        for row in conn.execute("SELECT snapshot_path FROM zones")
+        if str(row["snapshot_path"])
+    }
+    removed: list[str] = []
+    bytes_released = 0
+    for candidate in sorted(queue_root.glob("*/*")):
+        if not candidate.is_dir() or candidate in live:
+            continue
+        for item in candidate.rglob("*"):
+            if item.is_file():
+                bytes_released += item.stat().st_size
+        shutil.rmtree(candidate, ignore_errors=True)
+        removed.append(str(candidate))
+    result = {
+        "directories_removed": len(removed),
+        "bytes_released": bytes_released,
+        "paths": removed[:20],
+    }
+    set_state(conn, "orphaned_queue_cleanup", result)
+    if removed:
+        log_event(
+            conn,
+            "orphaned_queues_reclaimed",
+            f"Reclaimed {len(removed)} unreferenced queue "
+            f"directories ({bytes_released:,} bytes).",
+        )
     return result
 
 
@@ -403,6 +510,11 @@ async def run() -> None:
     # This is idempotent and preserves the compressed snapshot used as the
     # comparison baseline as well as every retained/scored company record.
     retire_full_universe_queues(conn)
+
+    # Runs after the retirement above so it also collects the directories
+    # that step empties out. Keeping the volume clear is what keeps the
+    # daily CZDS snapshot from failing with "no space left on device".
+    reclaim_orphaned_queue_directories(conn)
 
     # One-time/boot-time retention sweep: older worker versions kept every
     # successful page regardless of its eventual investment classification.

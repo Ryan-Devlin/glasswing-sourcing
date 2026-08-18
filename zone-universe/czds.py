@@ -369,16 +369,27 @@ def download_one(session, url, outdir, state, lock, force, decompress):
     tmp = dest + ".part"
     log("%-16s downloading %s" % (tld, human(meta["size"]) if meta["size"] else "?"))
     written = 0
-    with session.get(url, timeout=1800) as resp, open(tmp, "wb") as out:
-        stream = gzip.GzipFile(fileobj=resp) if decompress else resp
-        shutil.copyfileobj(stream, out, 1024 * 256)
-        written = out.tell()
+    try:
+        with session.get(url, timeout=1800) as resp, open(tmp, "wb") as out:
+            stream = gzip.GzipFile(fileobj=resp) if decompress else resp
+            shutil.copyfileobj(stream, out, 1024 * 256)
+            written = out.tell()
 
-    # A truncated transfer is worse than a failed one: it looks like a valid
-    # zone file. Only trust the length check on the raw (non-decompressed) path.
-    if not decompress and meta["size"] and written != meta["size"]:
-        os.unlink(tmp)
-        raise CzdsError("%s: expected %d bytes, got %d" % (tld, meta["size"], written))
+        # A truncated transfer is worse than a failed one: it looks like a
+        # valid zone file. Only trust the length check on the raw
+        # (non-decompressed) path.
+        if not decompress and meta["size"] and written != meta["size"]:
+            raise CzdsError("%s: expected %d bytes, got %d"
+                            % (tld, meta["size"], written))
+    except BaseException:
+        # Never leave the partial behind. A multi-GB .part from an aborted
+        # transfer is what turns one out-of-space failure into a volume that
+        # stays full and fails every retry after it.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
     os.replace(tmp, dest)
     state[tld] = {"last_modified": meta["last_modified"], "size": meta["size"],
