@@ -12,6 +12,8 @@ from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 
+from db_backend import PostgresConnection
+
 from .config import QUEUES, ZONEFILES
 from .database import connect, log_event, utc_now
 from .domain_quality import assess_domain
@@ -323,7 +325,8 @@ def import_zone(
         snapshot_path = final_dir / "domains.txt.gz"
         added_path = final_dir / "added.txt.gz"
         removed_path = final_dir / "removed.txt.gz"
-        conn.execute("BEGIN IMMEDIATE")
+        if not isinstance(conn, PostgresConnection):
+            conn.execute("BEGIN IMMEDIATE")
         for shard, count in enumerate(shard_counts):
             shard_path = final_dir / f"{shard:03d}.txt"
             conn.execute(
