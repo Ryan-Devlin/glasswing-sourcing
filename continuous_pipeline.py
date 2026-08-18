@@ -50,6 +50,11 @@ from db_backend import (
 )
 
 from intake_score import read_certificate
+from screening_capacity import (
+    WORKER_CEILING as SCREENING_WORKER_CEILING,
+    WORKER_FLOOR as SCREENING_WORKER_FLOOR,
+    next_worker_count,
+)
 from collector import (
     SUPPORTED_EXTENSIONS,
     domain_extension,
@@ -1976,6 +1981,7 @@ def adaptive_screening_profile(
     base_batch: int,
     base_workers: int,
     base_timeout: float,
+    surge_workers: int | None = None,
 ) -> dict[str, object]:
     """Fast first-pass screening with bounded Mac-friendly concurrency."""
     # A homepage fetch can open both apex and www connections. Keeping the
@@ -2021,8 +2027,17 @@ def adaptive_screening_profile(
         # resolver" reading was taken while persistence was blocked on lock
         # convoys, which stalls this event loop and makes every in-flight
         # timeout fire at once.
+        # Was a hardcoded 40. That number was measured honestly, but on one
+        # day against one arrival rate, and neither "intake is outrunning us"
+        # nor "we are over-provisioned" announces itself. screening_capacity
+        # now closes the loop on the fetch-failure rate and RSS the worker
+        # already publishes each batch, so the pool finds its own level
+        # without anyone having measured the arrival/capacity gap. The env
+        # var remains an override for pinning it by hand.
+        if surge_workers is None:
+            surge_workers = int(os.getenv("STREAM_SURGE_WORKERS", "40"))
         surge_workers = max(
-            1, min(40, int(os.getenv("STREAM_SURGE_WORKERS", "40")))
+            SCREENING_WORKER_FLOOR, min(SCREENING_WORKER_CEILING, int(surge_workers))
         )
         return {
             "mode": "surge",
@@ -2270,11 +2285,34 @@ async def worker_loop(
             int(counts_by_extension.get(extension, {}).get("pending", 0) or 0)
             for extension in active_extensions
         )
+        # Size the pool from what the previous batch actually measured. A
+        # missing signal (the first batch after a deploy) holds rather than
+        # ramps -- see screening_capacity.
+        _capacity_status = read_status()
+        capacity = next_worker_count(
+            int(_capacity_status.get("screening_workers", 0) or 0)
+            or int(os.getenv("STREAM_SURGE_WORKERS", "40")),
+            failure_rate=(
+                float(_capacity_status["fetch_failure_rate"])
+                if _capacity_status.get("fetch_failure_rate") is not None
+                else None
+            ),
+            rss_mb=(
+                float(_capacity_status["worker_rss_mb"])
+                if _capacity_status.get("worker_rss_mb") is not None
+                else None
+            ),
+            pending=pending,
+        )
+        if capacity.changed:
+            write_status(**capacity.to_dict(), updated_at=utc_now())
+
         profile = adaptive_screening_profile(
             pending,
             base_batch=base_batch_size,
             base_workers=base_workers,
             base_timeout=base_timeout,
+            surge_workers=capacity.workers,
         )
 
         # Allow a very short accumulation window so the filter processes
