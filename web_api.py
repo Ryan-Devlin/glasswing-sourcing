@@ -974,9 +974,27 @@ def certstream_status():
     # should appear in a classification bucket.
     screening_complete = int(current_run_queue.get("complete", 0) or 0)
     discarded_after_screening = max(screening_complete - retained_in_buckets, 0)
+    # Report the number of domains this run actually put on the queue, not the
+    # listener's in-memory tally. The two are different measurements of the
+    # same thing and drifted against each other -- the tally resets on restart
+    # and is read at a different instant than the funnel's query, so a live
+    # feed made them disagree by whatever arrived in between. The funnel is
+    # built from these same rows, so sourcing both here makes them equal by
+    # construction rather than by luck.
+    run_domains = (
+        int(current_run_queue.get("total", 0) or 0) if queue_is_live else None
+    )
     desired = bool(read_control()["desired"].get("pipeline", False))
     return {
         **status,
+        **(
+            {
+                "domains_received": run_domains,
+                "new_domains_received": run_domains,
+            }
+            if run_domains is not None
+            else {}
+        ),
         "current_run_queue": current_run_queue,
         "retained_in_buckets": retained_in_buckets,
         "discarded_after_screening": discarded_after_screening,

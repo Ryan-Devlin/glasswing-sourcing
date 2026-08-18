@@ -113,3 +113,18 @@ def test_a_failed_queue_read_reports_no_throughput_rather_than_zeros(monkeypatch
     payload = _payload()
     assert payload["throughput"] == []
     assert payload["queue_counts_live"] is False
+
+
+def test_certstream_page_and_funnel_report_the_same_run_total():
+    # The requirement: the top of the funnel must always equal the domains
+    # CertStream added this run. They used to be two counters -- an in-memory
+    # tally and a row count -- read at different instants against a live feed,
+    # so they disagreed by whatever arrived in between. Both now come from the
+    # same run-scoped query.
+    status = client.get("/api/certstream/status").json()
+    funnel_top = _payload()["funnel"]["stages"][0]["entered"]
+    if status.get("current_run_queue", {}).get("total") is not None and status.get(
+        "queue_counts_live"
+    ):
+        assert status["domains_received"] == status["current_run_queue"]["total"]
+        assert funnel_top == status["domains_received"]
