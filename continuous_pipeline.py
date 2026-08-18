@@ -1467,6 +1467,21 @@ async def listener(
     repeat_events = int(
         listener_status.get("repeat_events_ignored", 0) or 0
     )
+    # Intake attrition. The funnel view can derive every other stage from
+    # stored rows, but raw feed hostnames are never persisted -- a hostname
+    # the filter refuses leaves no trace anywhere. Without these two counters
+    # the single largest drop in the whole pipeline is unmeasurable, so they
+    # are counted here and published with the rest of the listener telemetry.
+    hostnames_seen = int(
+        listener_status.get("hostnames_seen", 0) or 0
+    )
+    hostnames_filtered = int(
+        listener_status.get("hostnames_filtered", 0) or 0
+    )
+    intake_status_flushed_at = time.monotonic()
+    intake_status_flush_seconds = max(
+        1.0, float(os.getenv("INTAKE_STATUS_FLUSH_SECONDS", "5"))
+    )
     last_repeat_domain = ""
     repeat_status_dirty = False
     repeat_status_flush_seconds = max(
@@ -1509,6 +1524,33 @@ async def listener(
     )
     reconnect_seconds = float(
         os.getenv("STREAM_RECONNECT_SECONDS", "5")
+    )
+    # Reconnect backs off exponentially from ``reconnect_seconds`` to this
+    # ceiling and resets the moment a connection delivers a frame. A flat 5s
+    # retry against a feed server that is down (rather than blipping) is a
+    # tight hot loop that logs a disconnect every 5s forever; backing off
+    # keeps the same fast recovery for a blip without the noise.
+    reconnect_max_seconds = float(
+        os.getenv("STREAM_RECONNECT_MAX_SECONDS", "60")
+    )
+    reconnect_backoff = reconnect_seconds
+    # Idle-frame watchdog. ``ping_timeout=None`` above is deliberate (a
+    # certificate burst can delay a pong on a perfectly healthy feed), but it
+    # also removes the only thing that would ever drop a half-open socket --
+    # so a feed server that accepts the connection and then broadcasts
+    # nothing leaves this listener reporting connected=True with zero domains
+    # arriving, indefinitely. recv() has a 1s timeout that merely `continue`s,
+    # so nothing here notices. The domains-only firehose delivers frames
+    # constantly, so a long silence means a dead socket, not a quiet feed:
+    # after this many seconds without a frame, drop the socket and reconnect
+    # with a fresh one. Frames arriving keep the watchdog permanently reset,
+    # which is what distinguishes "slow/delayed pong under load" from "dead".
+    idle_timeout_seconds = float(
+        os.getenv("STREAM_IDLE_TIMEOUT_SECONDS", "120")
+    )
+    idle_report_seconds = 15.0
+    idle_watchdog_count = int(
+        listener_status.get("stream_idle_watchdog_count", 0) or 0
     )
     reconnect_count = int(
         listener_status.get("stream_reconnect_count", 0) or 0
@@ -1565,6 +1607,13 @@ async def listener(
                     last_error="",
                     updated_at=utc_now(),
                 )
+                # Watchdog/backoff state is per-connection: a fresh socket
+                # starts its silence clock now, and the backoff only resets
+                # once this connection proves itself by delivering a frame
+                # (connecting successfully to a silent feed is not proof).
+                last_frame_at = time.monotonic()
+                idle_reported_at = last_frame_at
+                connection_delivered_frame = False
 
                 while not stop.is_set():
                     if RUNTIME_MODE != "local" and not read_control()["desired"].get(
@@ -1609,20 +1658,93 @@ async def listener(
                         )
                     except asyncio.TimeoutError:
                         flush_repeat_status()
+                        idle_seconds = time.monotonic() - last_frame_at
+                        if idle_seconds >= idle_timeout_seconds:
+                            # Connected but silent past the threshold: treat
+                            # the socket as dead and reconnect. Breaking here
+                            # (rather than os._exit, which the upstream
+                            # dedicated daemon can afford) closes the socket
+                            # via the context manager and re-enters the outer
+                            # connect loop -- this process also owns the
+                            # screening worker, so it must not take an
+                            # in-flight batch down with it.
+                            idle_watchdog_count += 1
+                            write_status(
+                                connected=False,
+                                stream_connection_state="reconnecting",
+                                stream_seconds_since_frame=round(
+                                    idle_seconds, 1
+                                ),
+                                stream_idle_watchdog_count=(
+                                    idle_watchdog_count
+                                ),
+                                last_stream_idle_watchdog_at=utc_now(),
+                                last_error=(
+                                    "idle-frame watchdog: no certificate "
+                                    f"frame for {idle_seconds:.0f}s on a "
+                                    "live socket; reconnecting"
+                                ),
+                                updated_at=utc_now(),
+                            )
+                            break
+                        if (
+                            time.monotonic() - idle_reported_at
+                            >= idle_report_seconds
+                        ):
+                            # Publish the silence so the dashboard can tell a
+                            # frozen intake from a slow one without a second
+                            # counter sample: a climbing value here is the
+                            # feed going quiet, which the connected=True flag
+                            # alone never showed.
+                            idle_reported_at = time.monotonic()
+                            write_status(
+                                stream_seconds_since_frame=round(
+                                    idle_seconds, 1
+                                ),
+                                updated_at=utc_now(),
+                            )
                         continue
+
+                    if not connection_delivered_frame:
+                        # This connection is live, not merely accepted: clear
+                        # the backoff so the next genuine blip retries fast.
+                        connection_delivered_frame = True
+                        reconnect_backoff = reconnect_seconds
+                    last_frame_at = time.monotonic()
+                    idle_reported_at = last_frame_at
 
                     # SAN certificates often contain many subdomains for the
                     # same root. Count that root once per certificate message.
-                    message_domains = {
-                        domain
-                        for hostname in names_from_message(raw)
-                        if (
-                            domain := registrable_domain(
-                                hostname,
-                                allowed_extensions,
-                            )
+                    # Written as a loop rather than a set comprehension so the
+                    # filter runs once per hostname: the comprehension form
+                    # would need a second call per hostname to tally the
+                    # rejects, doubling the work on the hottest path here.
+                    raw_hostnames = names_from_message(raw)
+                    hostnames_seen += len(raw_hostnames)
+                    message_domains: set[str] = set()
+                    for hostname in raw_hostnames:
+                        registrable = registrable_domain(
+                            hostname,
+                            allowed_extensions,
                         )
-                    }
+                        if registrable:
+                            message_domains.add(registrable)
+                        else:
+                            hostnames_filtered += 1
+
+                    if (
+                        time.monotonic() - intake_status_flushed_at
+                        >= intake_status_flush_seconds
+                    ):
+                        # Throttled: these move on every frame, and the feed
+                        # delivers frames constantly, so an unthrottled write
+                        # would rewrite the status file thousands of times a
+                        # minute for a number nobody reads that fast.
+                        intake_status_flushed_at = time.monotonic()
+                        write_status(
+                            hostnames_seen=hostnames_seen,
+                            hostnames_filtered=hostnames_filtered,
+                        )
 
                     for domain in sorted(message_domains):
                         _register_started = time.monotonic()
@@ -1720,9 +1842,15 @@ async def listener(
                 last_stream_disconnect=disconnect_detail,
                 last_stream_disconnect_at=utc_now(),
                 stream_reconnect_count=reconnect_count,
+                stream_reconnect_backoff_seconds=round(
+                    reconnect_backoff, 1
+                ),
                 updated_at=utc_now(),
             )
-            await asyncio.sleep(reconnect_seconds)
+            await asyncio.sleep(reconnect_backoff)
+            reconnect_backoff = min(
+                reconnect_backoff * 2, reconnect_max_seconds
+            )
 
 
 def read_status() -> dict[str, object]:

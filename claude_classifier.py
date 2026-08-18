@@ -52,9 +52,11 @@ Target: pre-seed/seed enterprise B2B technology in vertical AI, physical AI,
 AI-adaptive infrastructure, intelligent enterprise defense, collaborative
 intelligence, and next-generation compute.
 
-Use the supplied first-party website evidence and one exact company+domain web
-search. Separate confirmed facts from unknowns. Missing verification is NEVER
-negative evidence. Confirmed non-U.S., consumer, agency, generic wrapper,
+Work only from the supplied first-party website evidence. You have no web
+search and no browsing: if a fact is not in the evidence below, it is an
+unknown, not a negative. Separate confirmed facts from unknowns. Missing
+verification is NEVER negative evidence, and absence of external coverage is
+expected at pre-seed and must not lower any score. Confirmed non-U.S., consumer, agency, generic wrapper,
 funding >$8M, Series A+, >2 institutional rounds, acquired/subsidiary/public,
 or established/large status is a hard disqualifier.
 
@@ -177,22 +179,37 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+# How much stored homepage text to hand Claude. The crawler stores 12,000
+# characters per candidate; this used to pass 800 of them and buy a web search
+# to make up the difference. That was backwards on both cost and evidence: the
+# search ran $0.01/call -- more than the model tokens for the whole call --
+# to rediscover a page already sitting in the row. The full excerpt is ~3,000
+# tokens, which costs a fraction of the search it replaces.
+HOMEPAGE_EXCERPT_CHARS = max(
+    800, int(os.getenv("CLAUDE_HOMEPAGE_EXCERPT_CHARS", "12000"))
+)
+
+
 def company_payload(row: dict) -> str:
     data = {
         "domain": clean(row.get("domain", row.get("registrable", ""))),
         "website": clean(row.get("final_url", "")),
         "company_name_hint": clean(row.get("page_title", ""))[:90],
         "website_description": clean(row.get("meta_description", ""))[:280],
-        "website_excerpt": clean(row.get("homepage_excerpt", ""))[:800],
+        "website_excerpt": clean(
+            row.get("homepage_excerpt", "")
+        )[:HOMEPAGE_EXCERPT_CHARS],
         "website_thesis_category": clean(row.get("rule_thesis_pillar", "")),
         "website_thesis_evidence": clean(row.get("rule_evidence", ""))[:220],
         "website_location_evidence": clean(row.get("location_evidence", ""))[:120],
         "website_maturity_evidence": clean(row.get("maturity_evidence", ""))[:120],
     }
     return (
-        "Search the exact company and domain for ownership, funding, stage, HQ, "
-        "founder work/education, spinout origin, accelerators, exits, patents, and "
-        "named enterprise or government validation. Use only confirmed facts. Return tags.\n"
+        "Assess this company from its own website evidence alone. Look for "
+        "ownership, funding, stage, HQ, founder background, spinout origin, "
+        "accelerators, exits, patents, and named enterprise or government "
+        "customers. Anything the evidence does not establish is an unknown, "
+        "not a negative. Use only confirmed facts. Return tags.\n"
         + json.dumps(data, ensure_ascii=False)
     )
 
@@ -295,18 +312,6 @@ async def classify(
     row: dict,
     model: str,
 ) -> dict:
-    tools = [{
-        "type": "web_search_20250305",
-        "name": "web_search",
-        "max_uses": 1,
-        "allowed_callers": ["direct"],
-        "user_location": {
-            "type": "approximate",
-            "country": "US",
-            "timezone": "America/New_York",
-        },
-    }]
-
     async with sem:
         response = await client.messages.create(
             model=model,
@@ -319,7 +324,6 @@ async def classify(
                 "role": "user",
                 "content": company_payload(row),
             }],
-            tools=tools,
         )
 
     text, urls = response_text_and_urls(response)
@@ -331,12 +335,11 @@ async def classify(
         max_institutional_rounds=MAX_INSTITUTIONAL_ROUNDS,
     )
 
-    # Very early companies may have no external coverage. Missing coverage is
-    # a follow-up concern, not proof that the company is a bad investment.
-    if not urls:
-        assessment["concerns"] = (
-            clean(assessment.get("concerns")) or "No external coverage"
-        )
+    # "No external coverage" used to be a real finding: a web search ran and
+    # returned nothing. With the search gone no call can ever produce a URL,
+    # so stamping it on every assessment would assert a search result that was
+    # never looked for -- and at pre-seed, where thin coverage is the norm, a
+    # universal concern is noise a reviewer learns to skip.
 
     return assessment
 

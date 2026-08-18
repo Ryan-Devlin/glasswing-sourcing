@@ -37,6 +37,7 @@ for source in (ROOT, AI_SRC, ZONE_SRC):
     if str(source) not in sys.path:
         sys.path.insert(0, str(source))
 
+from funnel import biggest_losses, intake_funnel, screening_funnel
 from ai_search.og_bridge import enqueue_for_screening
 from ai_search.domains import normalize_any_domain
 from ai_search.database import (
@@ -983,6 +984,114 @@ def certstream_status():
         "queue_counts_live": bool(queue_is_live or run_id in _run_queue_cache),
         "desired_running": desired,
         "pause_requested": not desired,
+    }
+
+
+@app.get("/api/funnel")
+def funnel_breakdown():
+    """Live stage-by-stage attrition: what is thrown out, and where.
+
+    Two funnels rather than one end-to-end percentage. Intake is counted in
+    hostnames and screening in domains, and a multi-SAN certificate collapses
+    many of the former into one of the latter -- multiplying across that
+    boundary would produce a number with no unit. See ``funnel.py``.
+    """
+    status = (
+        read_pipeline_status()
+        if shared_pipeline_backend_available()
+        else read_local_pipeline_status()
+    )
+
+    queue_counts: dict[str, int] = {}
+    queue_live = False
+    conn = None
+    try:
+        conn = connect_pipeline_db()
+        queue_counts = {
+            str(row["status"]): int(row["total"] or 0)
+            for row in conn.execute(
+                "SELECT status, count(*) AS total FROM domains GROUP BY status"
+            )
+        }
+        queue_live = True
+    except Exception:
+        # A transient queue read must not blank the whole page; the
+        # classification half below is independent and still renders.
+        pass
+    finally:
+        if conn is not None:
+            conn.close()
+
+    with connect_store(read_only=True) as store:
+        buckets = {
+            str(row["routing_bucket"] or ""): int(row["total"] or 0)
+            for row in store.execute(
+                "SELECT routing_bucket, count(*) AS total "
+                "FROM classifications GROUP BY routing_bucket"
+            )
+        }
+        diligence = {
+            str(row["decision"] or ""): int(row["total"] or 0)
+            for row in store.execute(
+                "SELECT decision, count(*) AS total FROM claude_diligence "
+                "WHERE diligence_version=? GROUP BY decision",
+                (DILIGENCE_VERSION,),
+            )
+        }
+        reject_reasons = [
+            {"reason": str(row["routing_reason"] or "unknown"),
+             "count": int(row["total"] or 0)}
+            for row in store.execute(
+                "SELECT routing_reason, count(*) AS total FROM classifications "
+                "WHERE routing_bucket IN ('reject','ghost','insufficient') "
+                "GROUP BY routing_reason ORDER BY total DESC LIMIT 12"
+            )
+        ]
+
+    queued = sum(queue_counts.values())
+    # 'processing' is in flight, not judged -- it belongs with the backlog so a
+    # mid-batch read never reports in-flight rows as survivors.
+    unscreened = queue_counts.get("pending", 0) + queue_counts.get("processing", 0)
+    classified = sum(buckets.values())
+
+    screening = screening_funnel(
+        queued=queued,
+        unscreened=unscreened,
+        screened=max(0, queued - unscreened),
+        classified=classified,
+        ghost=buckets.get("ghost", 0),
+        # coming_soon is a pre-launch placeholder: no content to judge yet, so
+        # it is the same kind of loss as insufficient rather than a rejection.
+        insufficient=buckets.get("insufficient", 0) + buckets.get("coming_soon", 0),
+        rejected=buckets.get("reject", 0),
+        candidates=(
+            buckets.get("review", 0)
+            + buckets.get("priority", 0)
+            + buckets.get("comp", 0)
+        ),
+        claude_reviewed=sum(diligence.values()),
+        claude_kept=diligence.get("KEEP", 0),
+    )
+
+    intake = intake_funnel(
+        hostnames_seen=int(status.get("hostnames_seen", 0) or 0),
+        hostnames_filtered=int(status.get("hostnames_filtered", 0) or 0),
+        new_domains=int(
+            status.get("new_domains_received", status.get("domains_received", 0)) or 0
+        ),
+        repeat_domains=int(status.get("repeat_events_ignored", 0) or 0),
+    )
+
+    return {
+        "intake": intake.to_dict(),
+        "screening": screening.to_dict(),
+        "biggest_losses": biggest_losses(screening),
+        "drop_reasons": reject_reasons,
+        # Lets the UI show "no data yet" instead of a misleading run of zeros
+        # when the queue read failed or the listener has not published counters.
+        "queue_counts_live": queue_live,
+        "intake_counts_live": bool(status.get("hostnames_seen")),
+        "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
 
 

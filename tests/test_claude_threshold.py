@@ -198,15 +198,38 @@ class ClaudeThresholdTests(unittest.TestCase):
         self.assertEqual(save.call_args_list[0].kwargs["source"], "claude")
         self.assertEqual(save.call_args_list[1].kwargs["source"], "claude")
 
-    def test_payload_is_lean_but_keeps_core_evidence(self):
+    def test_payload_carries_the_stored_page_text_it_already_paid_for(self):
+        # This used to cap the excerpt at 800 characters and buy a web search
+        # to make up the difference -- backwards on both counts. The crawler
+        # stores 12,000 characters per candidate, and passing them costs a
+        # fraction of the $0.01/call search they replace.
         payload = claude_classifier.company_payload({
             "domain": "example.ai",
-            "homepage_excerpt": "x" * 5000,
+            "homepage_excerpt": "x" * 20000,
             "meta_description": "y" * 1000,
             "rule_evidence": "z" * 1000,
         })
-        self.assertLess(len(payload), 1900)
+        self.assertGreater(payload.count("x"), 10000)
         self.assertIn("example.ai", payload)
+
+    def test_payload_stays_bounded(self):
+        # Evidence-rich is not unbounded: a pathological excerpt must still be
+        # truncated, or one row could blow the context window and the budget.
+        payload = claude_classifier.company_payload({
+            "domain": "example.ai",
+            "homepage_excerpt": "x" * 500000,
+            "meta_description": "y" * 50000,
+            "rule_evidence": "z" * 50000,
+        })
+        self.assertLess(len(payload), 14000)
+
+    def test_payload_does_not_ask_for_a_search_it_cannot_run(self):
+        # The instruction and the tool were removed together. Leaving the ask
+        # in would tell the model to search with no tool to search with, which
+        # invites invented citations instead of an honest unknown.
+        payload = claude_classifier.company_payload({"domain": "example.ai"})
+        instruction = payload.split("{", 1)[0].lower()
+        self.assertNotIn("search", instruction)
 
     def prepare(self, rows):
         with tempfile.TemporaryDirectory() as directory:
@@ -439,3 +462,43 @@ def test_diversification_can_be_switched_off():
     with patch.object(claude_classifier, "DIVERSIFY_CLAUDE_PILLARS", False):
         selected = claude_classifier._spread_across_pillars(frame, 10)
     assert selected["rule_thesis_pillar"].nunique() == 1
+
+
+class NoWebSearchTests(unittest.TestCase):
+    """The diligence call must not carry a web-search tool.
+
+    Measured: the search cost $0.01/call -- more than the Haiku tokens for the
+    entire call -- to rediscover a homepage already stored on the row. These
+    assertions keep it from creeping back in with the tool re-added but the
+    evidence budget left small, which would be the worst of both.
+    """
+
+    def setUp(self):
+        self.source = Path("claude_classifier.py").read_text(encoding="utf-8")
+        self.classify = self.source.split("async def classify(", 1)[1].split(
+            "\ndef load_currently_diligenced_domains", 1
+        )[0]
+
+    def test_the_diligence_call_declares_no_tools(self):
+        self.assertNotIn("web_search", self.classify)
+        self.assertNotIn("tools=", self.classify)
+
+    def test_the_system_prompt_says_there_is_no_search(self):
+        # Without this the model is told to use a search it does not have.
+        # Whitespace-normalised: the prompt hard-wraps, so "no web search"
+        # spans a newline in the source.
+        prompt = " ".join(claude_classifier.SYSTEM_PROMPT.lower().split())
+        self.assertIn("no web search", prompt)
+        self.assertNotIn("one exact company+domain web search", prompt)
+
+    def test_absence_of_coverage_is_not_stamped_on_every_assessment(self):
+        # With no search, no call can produce a URL, so an unconditional
+        # concern would assert a search result nobody looked for -- and land
+        # on 100% of rows, which is not a signal. Assert on the assignment
+        # rather than the phrase: the phrase also appears in the comment
+        # explaining why the assignment was removed.
+        self.assertNotIn('assessment["concerns"]', self.classify)
+
+    def test_the_evidence_budget_is_large_and_tunable(self):
+        self.assertGreaterEqual(claude_classifier.HOMEPAGE_EXCERPT_CHARS, 12000)
+        self.assertIn("CLAUDE_HOMEPAGE_EXCERPT_CHARS", self.source)
