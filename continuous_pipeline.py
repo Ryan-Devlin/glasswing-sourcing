@@ -1622,9 +1622,16 @@ async def listener(
     _restored_drops = listener_status.get("intake_drops")
     intake_drops: dict[str, int] = (
         {str(k): int(v or 0) for k, v in _restored_drops.items()}
-        if isinstance(_restored_drops, dict)
+        if isinstance(_restored_drops, dict) and hostnames_seen > 0
         else {}
     )
+    # Restored together or not at all. These are two halves of one measurement
+    # -- the guard tally is a breakdown *of* the hostnames seen -- and observed
+    # live, hostnames_seen came back as 0 while the tally carried over from a
+    # previous run. Drops then exceeded the population they describe, which
+    # renders as every hostname dying at the first guard.
+    if sum(intake_drops.values()) > hostnames_seen:
+        intake_drops = {}
     # Per-guard attrition. A single "filtered" total cannot tell an untracked
     # TLD from a bulk-registration farm, and those mean opposite things.
     _stored_drops = listener_status.get("intake_drops")
