@@ -37,7 +37,9 @@ for source in (ROOT, AI_SRC, ZONE_SRC):
     if str(source) not in sys.path:
         sys.path.insert(0, str(source))
 
-from funnel import Throughput, biggest_losses, intake_funnel, screening_funnel
+from funnel import (
+    Throughput, biggest_losses, filter_funnel, intake_funnel, screening_funnel,
+)
 from ai_search.og_bridge import enqueue_for_screening
 from ai_search.domains import normalize_any_domain
 from ai_search.database import (
@@ -1105,7 +1107,15 @@ def funnel_breakdown():
         repeat_domains=int(status.get("repeat_events_ignored", 0) or 0),
     )
 
+    drops = status.get("intake_drops")
+    filters = filter_funnel(
+        int(status.get("hostnames_seen", 0) or 0),
+        {str(k): int(v or 0) for k, v in drops.items()} if isinstance(drops, dict) else {},
+    )
+
     return {
+        "filter": filters.to_dict(),
+        "filter_live": bool(isinstance(drops, dict) and drops),
         "intake": intake.to_dict(),
         "screening": screening.to_dict(),
         "biggest_losses": biggest_losses(screening),

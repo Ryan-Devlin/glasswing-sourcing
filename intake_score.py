@@ -36,7 +36,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
-from certstream_filter import normalize_hostname, to_registrable
+from certstream_filter import classify_hostname, normalize_hostname, to_registrable
 
 # How dense a TLD is in real companies, as a starting score. Not a gate --
 # the extension allow-list still decides what is tracked at all; this only
@@ -129,6 +129,10 @@ class CertificateReading:
     # Hostnames the junk/TLD filter refused. Counted here so the caller does
     # not have to run the filter a second time just to tally intake attrition.
     filtered_hostnames: int = 0
+    # Which guard refused each rejected hostname. A single lumped count cannot
+    # tell an untracked TLD from a bulk-registration farm, and those call for
+    # opposite responses.
+    filtered_by_reason: dict[str, int] = field(default_factory=dict)
 
     @property
     def domains(self) -> list[str]:
@@ -171,15 +175,24 @@ def read_certificate(
     """
     grouped: dict[str, list[str]] = {}
     filtered = 0
+    # Named distinctly from the per-domain ``reasons`` list built in the
+    # scoring loop below. They collided once, and the loop's list silently
+    # replaced this tally -- every frame then raised AttributeError inside the
+    # listener, which caught it as a connection fault and reconnected, so a
+    # healthy feed produced zero domains and a reconnect storm.
+    drop_counts: dict[str, int] = {}
     for hostname in hostnames or []:
-        registrable = to_registrable(hostname, allowed_extensions)
+        registrable, reason = classify_hostname(hostname, allowed_extensions)
         if registrable:
             grouped.setdefault(registrable, []).append(hostname)
         else:
             filtered += 1
+            drop_counts[reason] = drop_counts.get(reason, 0) + 1
 
     if not grouped:
-        return CertificateReading(filtered_hostnames=filtered)
+        return CertificateReading(
+            filtered_hostnames=filtered, filtered_by_reason=drop_counts
+        )
 
     if len(grouped) > max_apexes:
         # A platform's shared certificate. Every apex on it used to be queued
@@ -194,6 +207,7 @@ def read_certificate(
             penalized=sorted(grouped),
             penalty_reason=reason,
             filtered_hostnames=filtered,
+            filtered_by_reason=drop_counts,
         )
 
     scored: list[ScoredDomain] = []
@@ -251,4 +265,6 @@ def read_certificate(
             )
         )
 
-    return CertificateReading(scored=scored, filtered_hostnames=filtered)
+    return CertificateReading(
+        scored=scored, filtered_hostnames=filtered, filtered_by_reason=drop_counts
+    )

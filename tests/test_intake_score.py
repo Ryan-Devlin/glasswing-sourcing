@@ -206,3 +206,49 @@ class RobustnessTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DropTallyTests(unittest.TestCase):
+    """Per-guard drop counts.
+
+    These regressed once in a way nothing caught until a live-feed test: the
+    tally shared a name with the per-domain evidence list built in the scoring
+    loop, so the loop replaced it and every frame raised AttributeError inside
+    the listener. The listener caught that as a connection fault and
+    reconnected -- a healthy feed produced zero domains and a reconnect storm,
+    with no error surfaced anywhere.
+    """
+
+    def test_the_tally_is_a_mapping_of_reason_to_count(self):
+        reading = read_certificate(["exa.ai", "bar.net", "com.ai"], {".ai"})
+        self.assertIsInstance(reading.filtered_by_reason, dict)
+        for reason, count in reading.filtered_by_reason.items():
+            self.assertIsInstance(reason, str)
+            self.assertIsInstance(count, int)
+
+    def test_each_guard_is_attributed_separately(self):
+        reading = read_certificate(
+            ["exa.ai", "000091fj.app", "auth-8510-system.ai", "bar.net", "com.ai"],
+            {".ai", ".app"},
+        )
+        self.assertEqual(reading.filtered_by_reason, {
+            "machine_generated": 1,
+            "templated_bulk": 1,
+            "extension_not_tracked": 1,
+            "no_registrable_label": 1,
+        })
+
+    def test_the_tally_is_not_the_scoring_evidence(self):
+        # The exact shape of the regression: evidence is per-domain prose,
+        # the tally is per-guard counts, and they are not interchangeable.
+        reading = read_certificate(["exa.ai", "www.exa.ai"], {".ai"})
+        self.assertEqual(reading.filtered_by_reason, {})
+        self.assertIn("tld:", reading.scored[0].evidence)
+
+    def test_the_counts_reconcile_with_the_total(self):
+        reading = read_certificate(
+            ["exa.ai", "bar.net", "com.ai", "000091fj.app"], {".ai"}
+        )
+        self.assertEqual(
+            sum(reading.filtered_by_reason.values()), reading.filtered_hostnames
+        )

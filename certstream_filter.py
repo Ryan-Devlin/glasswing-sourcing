@@ -208,6 +208,60 @@ def normalize_hostname(hostname: str) -> str:
     return host[4:] if host.startswith("www.") else host
 
 
+# The guards, in evaluation order. Each one only ever sees what the previous
+# guards passed, so counting them in this order gives a real filter funnel
+# rather than a set of overlapping tallies.
+DROP_REASONS = (
+    "empty",
+    "too_long",
+    "no_registrable_label",
+    "extension_not_tracked",
+    "motif_spam",
+    "repeated_run",
+    "machine_generated",
+    "templated_bulk",
+)
+
+
+def classify_hostname(
+    hostname: str,
+    allowed_extensions: set[str] | None = None,
+) -> tuple[str, str]:
+    """Reduce a hostname, and say which guard refused it if one did.
+
+    Returns ``(registrable, "")`` when kept, or ``("", reason)`` naming the
+    first guard that rejected it. A single lumped "filtered" count cannot tell
+    an untracked TLD from a bulk-registration farm, and those call for
+    completely different responses -- one is a configuration choice, the other
+    is somebody spamming the certificate log.
+    """
+    host = normalize_hostname(hostname)
+    if not host:
+        return "", "empty"
+    if is_domain_too_long(host):
+        return "", "too_long"
+
+    label, suffix = _split_suffix(host)
+    if not label or not suffix:
+        return "", "no_registrable_label"
+
+    if allowed_extensions is not None:
+        extension = f".{suffix.rsplit('.', 1)[-1]}"
+        if extension not in allowed_extensions:
+            return "", "extension_not_tracked"
+
+    if is_motif_spam(label):
+        return "", "motif_spam"
+    if len(label) > 1 and len(set(label)) == 1:
+        return "", "repeated_run"
+    if is_machine_generated(label):
+        return "", "machine_generated"
+    if is_templated_bulk_name(label):
+        return "", "templated_bulk"
+
+    return f"{label}.{suffix}", ""
+
+
 def to_registrable(
     hostname: str,
     allowed_extensions: set[str] | None = None,
@@ -216,54 +270,12 @@ def to_registrable(
 
     Returns the lowercase registrable domain (``exa.ai``,
     ``something.com.ai``) iff the host sits under one of
-    ``allowed_extensions``, has a registrable label, and survives the junk
-    guards. Returns ``""`` -- not ``None``, matching the previous
-    ``registrable_domain`` contract so callers are unchanged -- for a
-    disallowed extension, empty input, a bare public suffix, an over-length
-    host, or a label that is motif spam, a repeated-letter run, or all digits.
+    ``allowed_extensions``, has a registrable label, and survives every guard.
+    Returns ``""`` -- not ``None``, matching the previous ``registrable_domain``
+    contract so callers are unchanged. See :func:`classify_hostname` for which
+    guard refused it.
 
     A single-character label (``x.ai``) is kept: one character is a coined
     brand, not a repeated run.
     """
-    host = normalize_hostname(hostname)
-    if not host or is_domain_too_long(host):
-        return ""
-
-    label, suffix = _split_suffix(host)
-    if not label or not suffix:
-        # Empty input, a single label, or a bare public suffix (``ai``,
-        # ``com.ai``): nothing registrable to enqueue.
-        return ""
-
-    if allowed_extensions is not None:
-        extension = f".{suffix.rsplit('.', 1)[-1]}"
-        if extension not in allowed_extensions:
-            return ""
-
-    if is_motif_spam(label):
-        return ""
-    if is_machine_generated(label):
-        return ""
-    if is_templated_bulk_name(label):
-        return ""
-    if len(label) > 1 and len(set(label)) == 1:
-        # A multi-character repeated-letter run (``aaa``, ``bb``) is never a
-        # real brand. A one-character label is, so the guard is length-gated.
-        # Measured against the 247,742-row queue corpus this drops 26 rows,
-        # every one of them already dead or insufficient -- no candidate lost.
-        return ""
-
-    # NO all-numeric guard, deliberately, against the upstream filter which
-    # has one. It was measured on this pipeline's own corpus: an
-    # ``isdigit()`` drop removes 876 rows, and six of them are domains this
-    # pipeline already screened and rated -- ``375.ai`` and ``8090.ai`` as
-    # companies, ``044.ai`` / ``2021.ai`` / ``2077.ai`` / ``2342.ai`` as
-    # review candidates. Numeric brands are real (particularly in Asian
-    # markets), and there is no length or shape rule separating those six
-    # from the ~870 dead ones. The costs are wildly asymmetric here: a dead
-    # numeric domain costs one cheap fetch and, measured over the whole
-    # corpus, zero Claude calls, while a missed company is the one error
-    # this funnel exists to avoid. So the junk stays in and screening
-    # discards it, which is what screening is for.
-
-    return f"{label}.{suffix}"
+    return classify_hostname(hostname, allowed_extensions)[0]

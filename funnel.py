@@ -166,6 +166,46 @@ class Throughput:
         }
 
 
+def filter_funnel(hostnames_seen: int, drops: dict[str, int]) -> Funnel:
+    """What each guard removed, in the order the guards actually run.
+
+    Each guard only ever sees what the previous ones passed, so this is a real
+    funnel rather than a set of overlapping tallies -- ``motif_spam`` counts
+    only hostnames that already survived the TLD check, and so on. Reporting
+    it as one "filtered" number made an untracked TLD indistinguishable from a
+    bulk-registration farm, which are a configuration choice and an attack on
+    the certificate log respectively.
+    """
+    from certstream_filter import DROP_REASONS
+
+    labels = {
+        "empty": "Empty or unparseable hostname",
+        "too_long": "Over the DNS length limit",
+        "no_registrable_label": "Bare public suffix, nothing registrable",
+        "extension_not_tracked": "TLD not in the tracked list",
+        "motif_spam": "Motif spam (aiaiai, mememe)",
+        "repeated_run": "Repeated-letter run (aaa, bb)",
+        "machine_generated": "Machine-generated name (000091fj, x7k2mqp9)",
+        "templated_bulk": "Templated bulk farm (auth-8510-system)",
+    }
+    stages: list[Stage] = []
+    remaining = hostnames_seen
+    for reason in DROP_REASONS:
+        removed = int(drops.get(reason, 0) or 0)
+        stages.append(Stage(
+            key=reason,
+            label=labels.get(reason, reason),
+            entered=remaining,
+            dropped=removed,
+        ))
+        remaining = max(0, remaining - removed)
+    return Funnel(
+        name="filter",
+        note="Guards in evaluation order; each sees only what the previous passed.",
+        stages=stages,
+    )
+
+
 def intake_funnel(
     *,
     hostnames_seen: int,

@@ -1563,6 +1563,22 @@ async def listener(
     last_platform_cert = str(
         listener_status.get("last_platform_cert", "") or ""
     )
+    # Per-guard attrition. One lumped "filtered" count could not distinguish
+    # an untracked TLD (a configuration choice) from a bulk-registration farm
+    # (somebody spamming the certificate log), and those want opposite
+    # responses.
+    _restored_drops = listener_status.get("intake_drops")
+    intake_drops: dict[str, int] = (
+        {str(k): int(v or 0) for k, v in _restored_drops.items()}
+        if isinstance(_restored_drops, dict)
+        else {}
+    )
+    # Per-guard attrition. A single "filtered" total cannot tell an untracked
+    # TLD from a bulk-registration farm, and those mean opposite things.
+    _stored_drops = listener_status.get("intake_drops")
+    intake_drops: dict[str, int] = {
+        str(k): int(v or 0) for k, v in _stored_drops.items()
+    } if isinstance(_stored_drops, dict) else {}
     intake_status_flushed_at = time.monotonic()
     intake_status_flush_seconds = max(
         1.0, float(os.getenv("INTAKE_STATUS_FLUSH_SECONDS", "5"))
@@ -1817,6 +1833,14 @@ async def listener(
                         allowed_extensions,
                     )
                     hostnames_filtered += reading.filtered_hostnames
+                    for _reason, _count in reading.filtered_by_reason.items():
+                        intake_drops[_reason] = (
+                            intake_drops.get(_reason, 0) + _count
+                        )
+                    for _reason, _count in reading.filtered_by_reason.items():
+                        intake_drops[_reason] = (
+                            intake_drops.get(_reason, 0) + _count
+                        )
                     if reading.penalized:
                         # A platform's shared certificate. Every apex on it
                         # used to be queued as an equal peer; they are now
@@ -1842,6 +1866,7 @@ async def listener(
                         write_status(
                             hostnames_seen=hostnames_seen,
                             hostnames_filtered=hostnames_filtered,
+                            intake_drops=dict(intake_drops),
                             platform_apexes_dropped=platform_apexes_dropped,
                             platform_certs_dropped=platform_certs_dropped,
                             last_platform_cert=last_platform_cert,

@@ -3284,6 +3284,19 @@ function FunnelPage() {
       <FunnelTable funnel={screening} />
       <p className="funnel-note">{screening.note}</p>
 
+      <h2>Filter — which guard removed what</h2>
+      {!data.filter_live ? (
+        <p className="funnel-warn">
+          No guard counters yet. The listener publishes these once it has run
+          since they were added — this is "no data", not zero.
+        </p>
+      ) : (
+        <>
+          <FunnelTable funnel={data.filter} />
+          <p className="funnel-note">{data.filter.note}</p>
+        </>
+      )}
+
       <h2>Intake — feed hostnames to queued domains</h2>
       {!data.intake_counts_live ? (
         <p className="funnel-warn">
