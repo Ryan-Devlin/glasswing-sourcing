@@ -2348,28 +2348,126 @@ def company_location_assessment(text: str) -> tuple[str, list[str]]:
     return "UNKNOWN", []
 
 
-def explicit_non_us_identity_assessment(text: str) -> tuple[bool, list[str]]:
-    """Detect geography that explicitly describes the company or target market.
+# Demonyms for the countries this pipeline actually encounters. A company
+# rarely writes "based in Saudi Arabia" in its meta description -- it writes
+# "the Saudi-built platform" -- so matching country nouns alone misses the
+# clearest self-identification there is.
+NON_US_DEMONYMS = {
+    "saudi": "saudi arabia", "emirati": "uae", "qatari": "qatar",
+    "kuwaiti": "kuwait", "omani": "oman", "bahraini": "bahrain",
+    "indian": "india", "pakistani": "pakistan", "bangladeshi": "bangladesh",
+    "sri lankan": "sri lanka", "nepali": "nepal", "chinese": "china",
+    "japanese": "japan", "korean": "south korea", "taiwanese": "taiwan",
+    "singaporean": "singapore", "malaysian": "malaysia",
+    "indonesian": "indonesia", "filipino": "philippines", "thai": "thailand",
+    "vietnamese": "vietnam", "british": "uk", "scottish": "uk",
+    "welsh": "uk", "irish": "ireland", "french": "france",
+    "german": "germany", "spanish": "spain", "italian": "italy",
+    "dutch": "netherlands", "belgian": "belgium", "swiss": "switzerland",
+    "austrian": "austria", "swedish": "sweden", "norwegian": "norway",
+    "danish": "denmark", "finnish": "finland", "polish": "poland",
+    "portuguese": "portugal", "greek": "greece", "czech": "czechia",
+    "hungarian": "hungary", "romanian": "romania", "bulgarian": "bulgaria",
+    "estonian": "estonia", "latvian": "latvia", "lithuanian": "lithuania",
+    "ukrainian": "ukraine", "russian": "russia", "turkish": "turkey",
+    "israeli": "israel", "egyptian": "egypt", "moroccan": "morocco",
+    "nigerian": "nigeria", "kenyan": "kenya", "ghanaian": "ghana",
+    "ethiopian": "ethiopia", "south african": "south africa",
+    "canadian": "canada", "mexican": "mexico", "brazilian": "brazil",
+    "argentine": "argentina", "argentinian": "argentina",
+    "chilean": "chile", "colombian": "colombia", "peruvian": "peru",
+    "australian": "australia", "european": "europe", "african": "africa",
+    "eswatini": "eswatini", "emirian": "uae",
+}
 
-    This intentionally scans only title/description copy supplied by the
-    caller, avoiding country names from customer logos, blogs, and footers.
+# The company IS from there. High confidence: these describe the company or
+# its product, not who it sells to.
+_ORIGIN_SHAPES = (
+    r"\b{d}[\s\-]?(?:built|based|made|born|founded|owned|headquartered|"
+    r"grown|bred|native)\b",
+    r"\b{d}\s+(?:ai\s+|tech\s+|software\s+)?(?:company|companies|startup|"
+    r"start-up|scale-?up|firm|business|venture|team|platform|studio|lab|"
+    r"agency|powerhouse|leader)\b",
+)
+_ORIGIN_COUNTRY_SHAPES = (
+    r"\b(?:built|made|designed|engineered|developed|born|based|"
+    r"headquartered|founded|incorporated|registered)\s+in\s+{c}\b",
+    r"\b{c}[’']?s\s+(?:leading|premier|first|top|largest|foremost)\b",
+)
+
+# The company's whole market is somewhere else. Weaker as an origin signal,
+# but for a fund that invests in US companies a product positioned solely at
+# another country's buyers is the same outcome, so it is recorded separately
+# rather than folded in silently.
+_MARKET_SHAPES = (
+    # Up to two filler words, so "for complex Australian legal work" and
+    # "for modern North-Indian land dealers" both read as the market claim
+    # they are.
+    r"\b(?:for|serving|across|throughout)\s+(?:\w+\s+){{0,2}}{d}\b",
+    r"\b{d}\s+(?:market|markets|customers|clients|businesses|brokerages|"
+    r"enterprises|smes|merchants|retailers|dealers|banks|hospitals)\b",
+)
+_MARKET_COUNTRY_SHAPES = (
+    r"\b(?:for|serving|throughout|across)\s+{c}\b",
+    r"\b(?:in|of)\s+{c}[.,]",
+)
+
+
+def _alternation(terms) -> str:
+    """One regex alternation, longest term first so 'south africa' beats
+    'africa'."""
+    return "(?:%s)" % "|".join(
+        re.escape(term) for term in sorted(terms, key=len, reverse=True)
+    )
+
+
+# Compiled once at import, not per call. Looping 250 country/demonym terms
+# across four pattern shapes meant ~1,000 regex searches for every domain
+# screened, on the hot path; as alternations it is eight.
+_DEMONYMS_ALT = _alternation(NON_US_DEMONYMS)
+_COUNTRIES_ALT = _alternation(NON_US_COUNTRIES + NON_US_ALIASES)
+
+_ORIGIN_PATTERNS = [
+    re.compile(shape.format(d=_DEMONYMS_ALT), re.I) for shape in _ORIGIN_SHAPES
+] + [
+    re.compile(shape.format(c=_COUNTRIES_ALT), re.I)
+    for shape in _ORIGIN_COUNTRY_SHAPES
+]
+_MARKET_PATTERNS = [
+    re.compile(shape.format(d=_DEMONYMS_ALT), re.I) for shape in _MARKET_SHAPES
+] + [
+    re.compile(shape.format(c=_COUNTRIES_ALT), re.I)
+    for shape in _MARKET_COUNTRY_SHAPES
+]
+
+
+def explicit_non_us_identity_assessment(text: str) -> tuple[bool, list[str]]:
+    """Detect geography that explicitly describes the company or its market.
+
+    Scans only the title/description copy the caller supplies, so country
+    names from customer logos, blog posts and footers cannot trigger it.
+
+    Two kinds of evidence, kept apart in the returned list so a reviewer can
+    see which fired. ``origin:`` means the company says it is from somewhere
+    else -- "the Saudi-built platform", "made in Germany". ``market:`` means
+    its stated buyers are elsewhere -- "for Indian brokerages", "directory for
+    Eswatini". Both disqualify for a US-focused thesis, but they are not the
+    same claim and should not be presented as if they were.
+
+    Generalised from a hardcoded six countries whose patterns required
+    whitespace, so "Saudi-built" was missed purely because of the hyphen.
     """
     leading = clean(text).lower()
-    patterns = [
-        r"\b(?:born|based|headquartered|founded|incorporated)\s+in\s+"
-        r"(?:saudi(?: arabia)?|singapore|canada|india|europe|africa)\b",
-        r"\b(?:saudi|singaporean|canadian|indian|european|african)\s+"
-        r"(?:ai\s+)?(?:company|startup|platform|healthcare|logistics|"
-        r"powerhouse)\b",
-        r"\b(?:platform|agent|software|infrastructure)\s+for\s+"
-        r"(?:europe|india|canada|saudi arabia|africa)\b",
-        r"\bbuilt\s+for\s+(?:indian|european|canadian|saudi|african)\b",
-        r"\|\s*(?:singapore|canada|india|saudi arabia)\b",
-    ]
+    if not leading:
+        return False, []
     hits = [
-        match.group(0)
-        for pattern in patterns
-        for match in re.finditer(pattern, leading, flags=re.I)
+        "origin:" + match.group(0).strip()
+        for pattern in _ORIGIN_PATTERNS
+        for match in pattern.finditer(leading)
+    ] + [
+        "market:" + match.group(0).strip()
+        for pattern in _MARKET_PATTERNS
+        for match in pattern.finditer(leading)
     ]
     return bool(hits), list(dict.fromkeys(hits))[:6]
 
