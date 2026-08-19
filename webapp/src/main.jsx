@@ -2449,25 +2449,6 @@ function SearchCorpusPage({ kind }) {
           )}
         </>
       )}
-      {!isAi && Boolean(metrics.data?.zone_funnel?.stages?.length) && (
-        <section className="funnel-page zone-funnel">
-          <h2>Where the day's new domains went</h2>
-          <p className="funnel-lede">
-            Every new domain in today's registry delta, IN and OUT at each
-            step. The top line is what the registry published; the bottom is
-            what got a page stored.
-          </p>
-          {metrics.data.zone_biggest_losses?.[0] && (
-            <p className="funnel-lede">
-              Biggest single loss: <strong>{metrics.data.zone_biggest_losses[0].label}</strong>
-              {" — "}{fmt(metrics.data.zone_biggest_losses[0].dropped)} domains,
-              {" "}{pct(metrics.data.zone_biggest_losses[0].shave_of_top)} of the top line.
-            </p>
-          )}
-          <FunnelTable funnel={metrics.data.zone_funnel} />
-          <p className="funnel-note">{metrics.data.zone_funnel.note}</p>
-        </section>
-      )}
       {isAi && metrics.data && (
         <section className={`corpus-status ${crawlerStale ? "stale" : ""}`}>
           <strong>
@@ -3262,6 +3243,21 @@ function FunnelTable({ funnel }) {
             <td>
               <strong>{stage.label}</strong>
               {stage.note && <div className="funnel-note">{stage.note}</div>}
+              {stage.reasons?.length > 0 && (
+                <details className="funnel-reasons">
+                  <summary>{stage.reasons.length} reasons</summary>
+                  <ul>
+                    {stage.reasons.map((reason) => (
+                      <li key={reason.key}>
+                        <span>{reason.label}</span>
+                        <span className="n">
+                          {num(reason.dropped)} · {pct(reason.share_of_stage)}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              )}
             </td>
             <td className="n">{num(stage.entered)}</td>
             <td className="n">{num(stage.dropped)}</td>
@@ -3283,24 +3279,34 @@ function FunnelPage() {
   if (!data) return null;
 
   const funnel = data.funnel || { stages: [] };
+  const sources = data.sources || {};
+  const sourceLabels = { certstream: "CertStream", zone: "Zone files" };
 
   return (
     <section className="funnel-page">
-      <h1>Filter funnel — this run</h1>
+      <h1>Pipeline — {data.day}</h1>
 
       <div className="throughput">
-        <div className="throughput-card">
-          <h3>Hostnames on the feed</h3>
-          <p className="throughput-verdict">{num(data.hostnames_seen)}</p>
-        </div>
         <div className="throughput-card ok">
-          <h3>Domains discovered</h3>
-          <p className="throughput-verdict">{num(data.domains_observed)}</p>
-          <dl><div><dt>every distinct domain, before any filtering</dt></div></dl>
+          <h3>Domains found today</h3>
+          <p className="throughput-verdict">{num(funnel.entered)}</p>
+          <dl>
+            {Object.entries(sources).map(([key, count]) => (
+              <div key={key}>
+                <dt>{sourceLabels[key] || key}</dt>
+                <dd>{num(count)}</dd>
+              </div>
+            ))}
+          </dl>
         </div>
         <div className="throughput-card">
-          <h3>Candidates out the bottom</h3>
+          <h3>Candidates</h3>
           <p className="throughput-verdict">{num(data.candidates)}</p>
+          <dl><div><dt>reached the three buckets</dt></div></dl>
+        </div>
+        <div className="throughput-card">
+          <h3>Claude said keep</h3>
+          <p className="throughput-verdict">{num(data.kept)}</p>
         </div>
       </div>
 
@@ -3311,17 +3317,9 @@ function FunnelPage() {
         <span><i className="swatch seg-dropped" /> Removed at this step</span>
       </div>
 
-      {data.counters_resyncing && (
-        <p className="funnel-warn">
-          Intake counters are resyncing after a restart — the guard steps read
-          zero until the next flush. This is "no data", not "nothing filtered".
-        </p>
-      )}
-
       {!data.funnel_live && (
         <p className="funnel-warn">
-          No counters for this run yet — they appear once the listener has
-          processed a frame. This is "no data", not zero.
+          No intake counted for {data.day} yet. This is "no data", not zero.
         </p>
       )}
 
@@ -3331,7 +3329,7 @@ function FunnelPage() {
       {data.biggest_losses?.length > 0 && (
         <p className="funnel-lede">
           Shaving most: {data.biggest_losses.map((l) => (
-            `${l.label} (${num(l.dropped)})`
+            `${l.label} (${num(l.dropped)}, ${pct(l.shave_of_top)} of the top)`
           )).join(" · ")}
         </p>
       )}

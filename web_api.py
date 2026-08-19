@@ -38,8 +38,8 @@ for source in (ROOT, AI_SRC, ZONE_SRC):
         sys.path.insert(0, str(source))
 
 from funnel import (
-    Throughput, biggest_losses, build_funnel, build_zone_funnel,
-    order_screening_reasons,
+    Throughput, biggest_losses, build_daily_funnel, build_funnel,
+    build_zone_funnel, order_screening_reasons,
 )
 from ai_search.og_bridge import enqueue_for_screening
 from ai_search.domains import normalize_any_domain
@@ -97,6 +97,7 @@ from common import (
 from continuous_pipeline import (
     claude_allowance,
     connect_db as connect_pipeline_db,
+    read_intake_daily,
     read_status as read_local_pipeline_status,
 )
 from diligence_logic import DILIGENCE_VERSION, normalize_green_flags
@@ -1115,68 +1116,70 @@ GUARD_LABELS = {
 
 
 @app.get("/api/funnel")
-def funnel_breakdown():
-    """The filter as one funnel, in domains, for the current run.
+def funnel_breakdown(day: str = ""):
+    """The whole pipeline as one funnel, for one day, in domains.
 
-    The top line is every distinct registrable domain CertStream has shown us
-    this run -- layer 0, before any judgement. It used to report the survivors
-    instead, which made the feed look like a trickle when it delivers orders
-    of magnitude more and the TLD gate removes most of it.
+    Six steps, because that is what the pipeline is: find domains, drop the
+    junk, drop what never served a usable page, drop what served one and did
+    not fit, bucket the rest, spend Claude on the top of that. Individual
+    rejection reasons nest inside the step they belong to rather than sitting
+    beside it -- as peers they turned six steps into a 28-row table where
+    "parked", "registrar placeholder" and "would not load" read as three
+    separate stages instead of three ways of failing one.
 
-    Every step is IN and OUT. There is no "waiting" column: a domain not yet
-    screened leaves the funnel at that step like any other, because the
-    question is what shaved the population and by how much.
+    Both discovery sources are summed into the top line. Below intake they
+    share every step -- the same route_company, the same buckets, the same
+    Claude budget -- so separate funnels duplicated fourteen identical rows to
+    distinguish two numbers that differ only at the top.
+
+    A day rather than a run: the two sources do not share a clock. CertStream
+    is a continuous listener whose run ends at every restart; the zone crawler
+    is one batch a morning. A calendar day is the only window that means the
+    same thing to both.
     """
-    from certstream_filter import DROP_REASONS
+    today = day or datetime.now(timezone.utc).date().isoformat()
+    sources: dict[str, int] = {}
+    junk_reasons: list[tuple[str, str, int]] = []
+    junk_dropped = 0
+    extra_no_page: list[tuple[str, str, int]] = []
+    extra_no_fit: list[tuple[str, str, int]] = []
 
-    status = (
-        read_pipeline_status()
-        if shared_pipeline_backend_available()
-        else read_local_pipeline_status()
-    )
-    run_id = str(status.get("run_id", "") or "")
-
-    observed = int(status.get("domains_observed", 0) or 0)
-    raw_drops = status.get("intake_drops")
-    guard_drops = (
-        {str(k): int(v or 0) for k, v in raw_drops.items()}
-        if isinstance(raw_drops, dict) else {}
-    )
-    counters_resyncing = sum(guard_drops.values()) > observed
-    if counters_resyncing:
-        # A breakdown that exceeds the population it describes means the two
-        # halves came from different builds or runs. Blanking it is right --
-        # showing it produces drop rates above 100% -- but it renders as
-        # "nothing was filtered", so the page is told to say so instead.
-        guard_drops = {}
-
-    # Verdicts come from the classification store, not the queue's own
-    # classification column. Measured live: 100 of this run's rows were marked
-    # complete with that column empty, so a funnel built on it counted them as
-    # having survived every screening step and reported 100 candidates where
-    # there were 5. The store is the authoritative record; the queue column is
-    # a best-effort copy written at mark_success time.
+    # CertStream: the durable daily tally, not the live run counters. The
+    # status record holds current state, so reading it here reported zero for
+    # the whole day after any worker restart.
     queued = classified = candidates = reviewed = kept = 0
+    unscreened = 0
     reason_counts: dict[str, int] = {}
     queue_live = False
     conn = None
     try:
         conn = connect_pipeline_db()
+        intake = read_intake_daily(conn, day=today)
+        certstream = intake.get("certstream", {})
+        sources["certstream"] = int(certstream.get("", 0) or 0)
+        junk_reasons = [
+            (reason, GUARD_LABELS.get(reason, reason.replace("_", " ")), count)
+            for reason, count in sorted(
+                ((r, c) for r, c in certstream.items() if r and c > 0),
+                key=lambda item: item[1], reverse=True,
+            )
+        ]
+        junk_dropped = sum(count for _, _, count in junk_reasons)
+
         queued = int(conn.execute(
-            "SELECT count(*) AS n FROM pipeline.domains WHERE first_seen_run_id = ?",
-            (run_id,),
+            "SELECT count(*) AS n FROM pipeline.domains WHERE first_seen >= ?",
+            (today,),
         ).fetchone()["n"] or 0)
         for row in conn.execute(
             """
             SELECT COALESCE(NULLIF(x.routing_reason, ''), '(unclassified)') AS reason,
                    COALESCE(x.routing_bucket, '') AS bucket,
                    count(*) AS n
-            FROM pipeline.domains d
-            LEFT JOIN public.classifications x ON x.domain = d.domain
-            WHERE d.first_seen_run_id = ?
+            FROM public.classifications x
+            WHERE x.classified_at >= ?
             GROUP BY 1, 2
             """,
-            (run_id,),
+            (today,),
         ):
             reason = str(row["reason"])
             bucket = str(row["bucket"])
@@ -1188,15 +1191,15 @@ def funnel_breakdown():
                 candidates += n
             else:
                 reason_counts[reason] = reason_counts.get(reason, 0) + n
+        unscreened = max(0, queued - classified)
         row = conn.execute(
             """
             SELECT count(*) AS reviewed,
                    sum(CASE WHEN g.decision='KEEP' THEN 1 ELSE 0 END) AS kept
-            FROM pipeline.domains d
-            JOIN public.claude_diligence g ON g.domain = d.domain
-            WHERE d.first_seen_run_id = ?
+            FROM public.claude_diligence g
+            WHERE g.updated_at >= ?
             """,
-            (run_id,),
+            (today,),
         ).fetchone()
         if row:
             reviewed = int(row["reviewed"] or 0)
@@ -1208,53 +1211,49 @@ def funnel_breakdown():
         if conn is not None:
             conn.close()
 
-    # Intake guards, then the queue boundary, then every screening guard that
-    # actually fired, then Claude. Composed as a list so the page renders
-    # however many steps the filter has rather than a hand-maintained set.
-    steps: list[tuple[str, str, int, str]] = [
-        (
-            reason,
-            GUARD_LABELS.get(reason, reason.replace("_", " ")),
-            guard_drops.get(reason, 0),
-            "",
-        )
-        for reason in DROP_REASONS
-        if reason in guard_drops or reason == "extension_not_tracked"
-    ]
-    survivors_after_guards = max(0, observed - sum(guard_drops.values()))
-    steps.append((
-        "repeat",
-        "Already seen — not a new domain",
-        max(0, survivors_after_guards - queued),
-        "A certificate renewal or another SAN for a domain already queued.",
-    ))
-    # Anything queued without a verdict leaves here explicitly. Letting it
-    # fall through is what inflated the bottom of the funnel.
-    steps.append((
-        "unclassified",
-        "No verdict yet",
-        max(0, queued - classified),
-        "Queued but not screened, still in flight, or the crawl produced no verdict.",
-    ))
-    steps += [
-        (reason, label, count, "")
-        for reason, label, count in order_screening_reasons(reason_counts)
-    ]
-    steps.append((
-        "not_diligenced",
-        "Not sent to Claude yet",
-        max(0, candidates - reviewed),
-        "Reached the candidate pool but no diligence call has run.",
-    ))
-    steps.append((
-        "claude_reject", "Claude said REJECT", max(0, reviewed - kept), "",
-    ))
+    # Zone: today's registry delta and the priority ceiling, read from the
+    # counters the crawler already keeps per shard.
+    try:
+        with zone_connect(ZONE_UNIVERSE_DB, read_only=True) as zconn:
+            zone = zone_diagnostics(zconn)
+        sources["zone"] = int(zone.get("queued_domains", 0) or 0)
+        quarantined = int(zone.get("low_priority_quarantined", 0) or 0)
+        if quarantined > 0:
+            junk_reasons.append((
+                "low_priority", "Below the priority ceiling", quarantined,
+            ))
+            junk_dropped += quarantined
+        zone_unreachable = int(zone.get("network_failed", 0) or 0)
+        if zone_unreachable > 0:
+            extra_no_page.append((
+                "zone_unreachable", "Zone crawl could not reach it",
+                zone_unreachable,
+            ))
+        zone_irrelevant = int(zone.get("preflight_rejected", 0) or 0)
+        if zone_irrelevant > 0:
+            extra_no_fit.append((
+                "zone_preflight_rejected",
+                "Zone crawl read the homepage, no signal",
+                zone_irrelevant,
+            ))
+    except Exception:
+        pass
 
-    funnel = build_funnel(
-        "pipeline", observed, steps,
+    funnel = build_daily_funnel(
+        sources=sources,
+        junk_dropped=junk_dropped,
+        junk_reasons=junk_reasons,
+        screening_counts=reason_counts,
+        unscreened=unscreened,
+        candidates=candidates,
+        sent_to_claude=reviewed,
+        claude_rejected=max(0, reviewed - kept),
+        extra_no_page=extra_no_page,
+        extra_no_fit=extra_no_fit,
         note=(
-            "One CertStream run, counted in domains at every step. The top is "
-            "every distinct domain the feed showed us before any judgement."
+            "One day, every source, counted in domains at each step. The top "
+            "is every domain discovered before any judgement; the bottom is "
+            "what Claude said to keep."
         ),
     )
 
@@ -1286,17 +1285,15 @@ def funnel_breakdown():
             conn.close()
 
     return {
-        "run_id": run_id,
+        "day": today,
+        "sources": sources,
         "funnel": funnel.to_dict(),
         "biggest_losses": biggest_losses(funnel),
-        "hostnames_seen": int(status.get("hostnames_seen", 0) or 0),
-        "domains_observed": observed,
         "candidates": candidates,
         "kept": kept,
         "throughput": throughput,
         "queue_counts_live": queue_live,
-        "funnel_live": bool(observed),
-        "counters_resyncing": counters_resyncing,
+        "funnel_live": bool(funnel.entered),
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
 

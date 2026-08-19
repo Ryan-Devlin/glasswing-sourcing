@@ -28,28 +28,31 @@ def test_returns_exactly_one_funnel():
 
 def test_total_drops_never_exceed_the_top_line():
     # A cumulative guard tally against a reset hostname count reported more
-    # rejections than observations and rendered as a 4040% drop rate. When the
-    # two are out of step the tally is discarded rather than shown.
+    # rejections than observations and rendered as a 4040% drop rate. Each
+    # stage is now clamped to what actually reached it, so the sum cannot
+    # exceed the population it describes.
     payload = _payload()
     dropped = sum(s["dropped"] for s in payload["funnel"]["stages"])
-    assert dropped <= max(payload["domains_observed"], 0)
+    assert dropped <= max(payload["funnel"]["entered"], 0)
 
 
-def test_the_funnel_runs_from_intake_to_claude():
-    # It used to stop at "hard-denied by a rule", so a reader could not see
-    # what happened to the candidates that survived.
+def test_the_funnel_is_the_six_steps_the_pipeline_actually_has():
+    # Find domains, drop junk, drop what never served a page, drop what did
+    # not fit, bucket, spend Claude. Rejection reasons nest inside the step
+    # they belong to; as peers they made this a 28-row table.
     keys = [s["key"] for s in _payload()["funnel"]["stages"]]
-    assert keys[0] == "extension_not_tracked"
-    assert "repeat" in keys and "unclassified" in keys
-    assert keys[-2:] == ["not_diligenced", "claude_reject"]
+    assert keys == [
+        "junk", "unscreened", "no_page", "no_fit",
+        "not_diligenced", "claude_reject",
+    ]
 
 
-def test_unclassified_domains_leave_the_funnel_explicitly():
+def test_unscreened_domains_leave_the_funnel_explicitly():
     # Measured live: 100 rows were marked complete with no verdict recorded.
     # Letting them fall through counted them as having survived every
     # screening step and reported 100 candidates where there were 5.
     keys = [s["key"] for s in _payload()["funnel"]["stages"]]
-    assert "unclassified" in keys
+    assert "unscreened" in keys
 
 
 def test_the_live_chain_stays_arithmetically_closed():
@@ -78,11 +81,12 @@ def test_no_stage_reports_a_backlog_column():
         assert "pending" not in stage
 
 
-def test_the_top_line_is_domains_observed_not_survivors():
+def test_the_top_line_is_every_source_summed():
     # "Domains discovered" used to report what survived the filter, which made
-    # layer 0 look like a trickle when the feed delivers far more.
+    # layer 0 look like a trickle when the feed delivers far more. It is now
+    # every domain either source found today, before any judgement.
     payload = _payload()
-    assert payload["funnel"]["entered"] == payload["domains_observed"]
+    assert payload["funnel"]["entered"] == sum(payload["sources"].values())
 
 
 def test_liveness_flags_distinguish_no_data_from_a_real_zero():
@@ -132,13 +136,23 @@ def test_a_failed_queue_read_reports_no_throughput_rather_than_zeros(monkeypatch
     assert payload["queue_counts_live"] is False
 
 
-def test_certstream_page_and_funnel_report_the_same_top_line():
-    # "Domains discovered" and the top of the funnel are the same claim --
-    # every distinct domain the feed showed us this run, before filtering --
-    # so they read the same counter rather than being two measurements that
-    # have to agree.
+def test_every_source_is_named_in_the_top_line():
+    # The two sources are summed rather than shown as separate funnels, so
+    # the split has to be readable somewhere or the top line is unaccountable.
     payload = _payload()
-    if payload["domains_observed"]:
-        status = client.get("/api/certstream/status").json()
-        assert status["domains_received"] == payload["domains_observed"]
-        assert payload["funnel"]["entered"] == payload["domains_observed"]
+    assert set(payload["sources"]) <= {"certstream", "zone"}
+    assert all(count >= 0 for count in payload["sources"].values())
+
+
+def test_the_day_is_reported_with_the_numbers():
+    # A per-day funnel that does not say which day is unreadable the moment
+    # it is stale.
+    payload = _payload()
+    assert len(payload["day"]) == 10 and payload["day"].count("-") == 2
+
+
+def test_reasons_nest_inside_their_stage():
+    # The specific fix: reasons are detail on a step, not steps themselves.
+    for stage in _payload()["funnel"]["stages"]:
+        assert isinstance(stage["reasons"], list)
+        assert sum(r["dropped"] for r in stage["reasons"]) <= stage["dropped"]

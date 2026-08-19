@@ -53,6 +53,13 @@ def queue_db(directory):
             last_seen_run_id TEXT NOT NULL DEFAULT ''
         )
     """)
+    conn.execute("""
+        CREATE TABLE intake_daily (
+            day TEXT NOT NULL, source TEXT NOT NULL,
+            reason TEXT NOT NULL DEFAULT '', count INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL, PRIMARY KEY (day, source, reason)
+        )
+    """)
     cp.ensure_domain_registry_schema(conn)
     return conn
 
@@ -175,3 +182,45 @@ class ListenerEndToEndTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DailyTallyIsNotLoadBearingTests(unittest.IsolatedAsyncioTestCase):
+    """The tally is bookkeeping. A broken one must not stop the feed.
+
+    The listener's except-clause treats any exception raised while processing
+    a frame as a connection fault and reconnects. That is how a shadowed
+    variable, a stale loop and a missing column each turned into a reconnect
+    storm publishing zeros with no error anywhere. Intake counting is the
+    least important thing in the loop and must fail quietest.
+    """
+
+    async def asyncSetUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        # Deliberately built without intake_daily, which is exactly the state
+        # of any database that predates the table.
+        self.conn = sqlite3.connect(Path(self._dir.name) / "queue.sqlite3")
+        self.conn.row_factory = sqlite3.Row
+        self.conn.execute("""
+            CREATE TABLE domains (
+                domain TEXT PRIMARY KEY, first_seen TEXT NOT NULL,
+                last_seen TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT,
+                last_processed_at TEXT, classification TEXT,
+                last_error TEXT DEFAULT '', seen_count INTEGER NOT NULL DEFAULT 1,
+                first_seen_run_id TEXT NOT NULL DEFAULT '',
+                last_seen_run_id TEXT NOT NULL DEFAULT ''
+            )
+        """)
+        cp.ensure_domain_registry_schema(self.conn)
+
+    async def asyncTearDown(self):
+        self.conn.close()
+        self._dir.cleanup()
+
+    def test_recording_into_a_missing_table_raises_on_its_own(self):
+        """Establishes that the call really would throw, so the listener test
+        below is proving the guard works rather than that nothing happened."""
+        with self.assertRaises(Exception):
+            cp.record_intake_daily(
+                self.conn, observed=5, drops={"motif_spam": 2},
+            )

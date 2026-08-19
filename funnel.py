@@ -48,6 +48,12 @@ class Stage:
     entered: int
     dropped: int = 0
     note: str = ""
+    # The individual reasons that add up to ``dropped``. A stage is a step of
+    # the pipeline; a reason is one way of failing it. Showing reasons as
+    # peers of stages is what turned a six-step funnel into a 28-row table --
+    # "parked", "registrar placeholder" and "would not load" are not three
+    # steps, they are three ways of failing one.
+    reasons: tuple[tuple[str, str, int], ...] = ()
 
     @property
     def survived(self) -> int:
@@ -79,6 +85,19 @@ class Stage:
                 self.survived / top_line if top_line else 0.0, 6
             ),
             "note": self.note,
+            "reasons": [
+                {
+                    "key": key,
+                    "label": label,
+                    "dropped": count,
+                    # Against what entered the stage, so the reasons inside
+                    # one stage sum to that stage's own drop rate.
+                    "share_of_stage": round(
+                        count / self.entered if self.entered else 0.0, 6
+                    ),
+                }
+                for key, label, count in self.reasons
+            ],
         }
 
 
@@ -337,3 +356,136 @@ def build_zone_funnel(details: dict) -> Funnel:
         ),
         stages=build_funnel("zone", queued, steps).stages,
     )
+
+
+# The pipeline as six steps, which is how it actually reads: find domains,
+# drop the junk, drop what never served a usable page, drop what served one
+# and did not fit, bucket the rest, then spend Claude on the top of that.
+#
+# Every screening reason belongs to exactly one step. Reasons not listed fall
+# into FIT, because a new guard in route_company is far more likely to be a
+# judgement about a site that loaded than a new way of failing to load.
+REACHABILITY_REASONS = (
+    "parked_or_for_sale",
+    "generic_hosting_or_registrar_placeholder",
+    "inaccessible_site",
+    "website_never_reachable_after_max_attempts",
+    "website_unavailable",
+)
+
+
+def _split_screening(counts: dict[str, int]) -> tuple[list, list]:
+    """Screening reasons into (never served a page, served one and did not fit)."""
+    labels = dict(SCREENING_ORDER)
+    unreachable: list[tuple[str, str, int]] = []
+    unfit: list[tuple[str, str, int]] = []
+    for key, label, count in order_screening_reasons(counts):
+        row = (key, labels.get(key, label), int(count or 0))
+        (unreachable if key in REACHABILITY_REASONS else unfit).append(row)
+    return unreachable, unfit
+
+
+def build_daily_funnel(
+    *,
+    sources: dict[str, int],
+    junk_dropped: int,
+    junk_reasons: list[tuple[str, str, int]],
+    screening_counts: dict[str, int],
+    unscreened: int,
+    candidates: int,
+    sent_to_claude: int,
+    claude_rejected: int,
+    extra_no_page: list[tuple[str, str, int]] | None = None,
+    extra_no_fit: list[tuple[str, str, int]] | None = None,
+    note: str = "",
+) -> Funnel:
+    """One funnel for one day, both discovery sources, six steps.
+
+    ``sources`` maps a discovery source to how many domains it found today.
+    They are summed into the top line rather than shown as separate funnels:
+    below intake the two share every step -- the same route_company, the same
+    buckets, the same Claude budget -- so splitting them duplicates fourteen
+    identical rows to distinguish two numbers that only differ at the top.
+    """
+    top_line = sum(max(0, int(n or 0)) for n in sources.values())
+    unreachable, unfit = _split_screening(screening_counts)
+    # The zone crawler decides reachability and relevance itself, before a
+    # domain ever reaches route_company, so its outcomes never appear in
+    # routing_reason. Without folding them in here they would land in "not
+    # screened yet" -- reported as still in flight when they were in fact
+    # rejected hours earlier.
+    unreachable += list(extra_no_page or [])
+    unfit += list(extra_no_fit or [])
+
+    def total(rows: list[tuple[str, str, int]]) -> int:
+        return sum(count for _, _, count in rows)
+
+    plan: list[tuple[str, str, int, str, tuple]] = [
+        (
+            "junk",
+            "Junk names and untracked extensions",
+            junk_dropped,
+            "Machine-generated or templated names, and extensions outside the "
+            "tracked set. Refused on the name alone, before any request.",
+            tuple(junk_reasons),
+        ),
+        (
+            "unscreened",
+            "Not screened yet",
+            unscreened,
+            "Queued today but no verdict yet. Not a rejection -- these can "
+            "still come back as candidates.",
+            (),
+        ),
+        (
+            "no_page",
+            "Never served a usable page",
+            total(unreachable),
+            "Parked, for sale, a registrar placeholder, or the site never "
+            "loaded. Nothing to judge.",
+            tuple(unreachable),
+        ),
+        (
+            "no_fit",
+            "Read the site — not a fit",
+            total(unfit),
+            "The site loaded and was read. These are judgements about the "
+            "company, not about the page.",
+            tuple(unfit),
+        ),
+    ]
+
+    stages: list[Stage] = []
+    remaining = top_line
+    for key, label, dropped, step_note, reasons in plan:
+        removed = max(0, min(int(dropped or 0), remaining))
+        stages.append(Stage(
+            key=key, label=label, entered=remaining, dropped=removed,
+            note=step_note, reasons=reasons,
+        ))
+        remaining = max(0, remaining - removed)
+
+    # The candidate pool is what survived screening. Claude is a budget
+    # applied to it, so "not sent" is a step like any other -- it is the
+    # single largest thing standing between a candidate and a verdict.
+    # From the chain, not from the measured candidate count. The two are read
+    # in separate statements and disagree by a few rows mid-write; taking the
+    # measured one here makes the funnel skip rows it already accounted for.
+    pool = remaining
+    stages.append(Stage(
+        key="not_diligenced",
+        label="Candidate, not sent to Claude",
+        entered=pool,
+        dropped=max(0, pool - int(sent_to_claude or 0)),
+        note="Reached the three buckets but the daily Claude budget did not "
+             "reach them.",
+    ))
+    reviewed = stages[-1].survived
+    stages.append(Stage(
+        key="claude_reject",
+        label="Claude said REJECT",
+        entered=reviewed,
+        dropped=max(0, min(int(claude_rejected or 0), reviewed)),
+    ))
+
+    return Funnel(name="pipeline", note=note, stages=stages)

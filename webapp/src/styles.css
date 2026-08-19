@@ -1402,3 +1402,26 @@ kbd {
 .throughput-card dt { color: var(--gw-muted); font-size: 0.85rem; }
 .throughput-card dd { margin: 0; font-variant-numeric: tabular-nums; }
 .throughput-card dd span { color: var(--gw-muted); font-size: 0.82rem; }
+
+/* Reasons are detail on a step, not steps themselves. Collapsed by default:
+   the six stages are the pipeline, and sixteen rejection reasons shown as
+   peers are what turned this page into a table nobody could read. */
+.funnel-reasons { margin-top: 0.4rem; }
+.funnel-reasons summary {
+  cursor: pointer;
+  font-size: 0.78rem;
+  opacity: 0.65;
+}
+.funnel-reasons ul {
+  list-style: none;
+  margin: 0.35rem 0 0;
+  padding: 0 0 0 0.75rem;
+  border-left: 2px solid rgba(128, 128, 128, 0.25);
+}
+.funnel-reasons li {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  font-size: 0.8rem;
+  padding: 0.1rem 0;
+}

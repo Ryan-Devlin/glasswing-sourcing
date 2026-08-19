@@ -355,6 +355,18 @@ _PIPELINE_POSTGRES_SCHEMA = """
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
     );
+    -- Intake counters that outlive the process. The status record holds
+    -- current state, not history, so a restart reset the top of the funnel to
+    -- zero mid-day. Written as deltas rather than absolutes because several
+    -- runs share a day and each one starts its own tally at zero.
+    CREATE TABLE IF NOT EXISTS intake_daily (
+        day TEXT NOT NULL,
+        source TEXT NOT NULL,
+        reason TEXT NOT NULL DEFAULT '',
+        count INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (day, source, reason)
+    );
 """
 
 
@@ -513,6 +525,20 @@ def _connect_db_sqlite() -> sqlite3.Connection:
             domain TEXT NOT NULL
         )
     """)
+    # Intake counters that outlive the process. The status record holds
+    # current state, not history, so a restart reset the top of the funnel to
+    # zero mid-day. Written as deltas rather than absolutes because several
+    # runs share a day and each one starts its own tally at zero.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS intake_daily (
+            day TEXT NOT NULL,
+            source TEXT NOT NULL,
+            reason TEXT NOT NULL DEFAULT '',
+            count INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (day, source, reason)
+        )
+    """)
     ensure_domain_registry_schema(conn)
 
     # Bootstrap only the real project registry. Temporary/test databases
@@ -590,6 +616,67 @@ def extension_counts(
         )
         results[extension]["total"] += 1
     return results
+
+
+CERTSTREAM_SOURCE = "certstream"
+
+
+def record_intake_daily(
+    conn: sqlite3.Connection,
+    *,
+    observed: int,
+    drops: dict[str, int],
+    source: str = CERTSTREAM_SOURCE,
+    day: str = "",
+) -> None:
+    """Add this flush's intake counts to the running daily tally.
+
+    Deltas, not absolutes. Several listener runs share a day and each starts
+    its own tally at zero, so writing absolutes would make the last run to
+    flush overwrite every earlier run's contribution -- the day would report
+    whatever the most recent process happened to have seen.
+
+    Negative deltas are dropped rather than clamped to the row: a run whose
+    counters were reset by the drops-exceed-observed invariant produces one,
+    and subtracting it would silently eat a real earlier count.
+    """
+    stamp = utc_now()
+    today = day or stamp[:10]
+    rows = [("", int(observed or 0))]
+    rows += [(str(reason), int(count or 0)) for reason, count in drops.items()]
+    pending = [(reason, count) for reason, count in rows if count > 0]
+    if not pending:
+        return
+    for reason, count in pending:
+        conn.execute(
+            """
+            INSERT INTO intake_daily(day, source, reason, count, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(day, source, reason) DO UPDATE SET
+                count = intake_daily.count + excluded.count,
+                updated_at = excluded.updated_at
+            """,
+            (today, source, reason, count, stamp),
+        )
+    conn.commit()
+
+
+def read_intake_daily(
+    conn: sqlite3.Connection,
+    *,
+    day: str = "",
+) -> dict[str, dict[str, int]]:
+    """One day's intake, as ``{source: {"": observed, reason: dropped}}``."""
+    today = day or utc_now()[:10]
+    out: dict[str, dict[str, int]] = {}
+    for row in conn.execute(
+        "SELECT source, reason, count FROM intake_daily WHERE day = ?",
+        (today,),
+    ).fetchall():
+        out.setdefault(str(row["source"]), {})[str(row["reason"])] = int(
+            row["count"] or 0
+        )
+    return out
 
 
 def register_domain_event(
@@ -1674,16 +1761,17 @@ async def listener(
     if sum(intake_drops.values()) > domains_observed:
         intake_drops = {}
         domains_observed = 0
-    # Per-guard attrition. A single "filtered" total cannot tell an untracked
-    # TLD from a bulk-registration farm, and those mean opposite things.
-    _stored_drops = listener_status.get("intake_drops")
-    intake_drops: dict[str, int] = {
-        str(k): int(v or 0) for k, v in _stored_drops.items()
-    } if isinstance(_stored_drops, dict) else {}
     intake_status_flushed_at = time.monotonic()
     intake_status_flush_seconds = max(
         1.0, float(os.getenv("INTAKE_STATUS_FLUSH_SECONDS", "5"))
     )
+    # Baseline for the durable daily tally. Seeded from whatever this run
+    # restored so a resumed run does not re-report counts it already wrote;
+    # a fresh run restores nothing, starts both at zero, and the first delta
+    # is the run's own work.
+    daily_baseline_observed = domains_observed
+    daily_baseline_drops = dict(intake_drops)
+    daily_tally_warned = False
     last_repeat_domain = ""
     repeat_status_dirty = False
     repeat_status_flush_seconds = max(
@@ -1973,6 +2061,35 @@ async def listener(
                         # would rewrite the status file thousands of times a
                         # minute for a number nobody reads that fast.
                         intake_status_flushed_at = time.monotonic()
+                        # Never fatal. The listener's except-clause treats
+                        # any exception here as a connection fault, so a
+                        # missing table or a locked row would silently become
+                        # a reconnect storm and publish zeros -- the same
+                        # failure signature this pipeline has hit three times.
+                        # A tally is bookkeeping; it does not get to stop
+                        # intake.
+                        try:
+                            record_intake_daily(
+                                conn,
+                                observed=(
+                                    domains_observed - daily_baseline_observed
+                                ),
+                                drops={
+                                    reason: count
+                                    - daily_baseline_drops.get(reason, 0)
+                                    for reason, count in intake_drops.items()
+                                },
+                            )
+                            daily_baseline_observed = domains_observed
+                            daily_baseline_drops = dict(intake_drops)
+                        except Exception as exc:
+                            if not daily_tally_warned:
+                                daily_tally_warned = True
+                                print(
+                                    "WARNING: daily intake tally not being "
+                                    f"recorded: {exc}",
+                                    file=sys.stderr,
+                                )
                         write_status(
                             hostnames_seen=hostnames_seen,
                             hostnames_filtered=hostnames_filtered,

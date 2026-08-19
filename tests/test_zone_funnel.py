@@ -83,3 +83,82 @@ def test_biggest_losses_are_measured_against_the_top_line():
     assert losses[0]["key"] == "low_priority"
     assert round(losses[0]["shave_of_top"], 3) == 0.826
     assert all("shave_of_top" in loss for loss in losses)
+
+
+# --- the single daily funnel -------------------------------------------------
+
+from funnel import build_daily_funnel
+
+
+def a_day(**over):
+    """One day's counters, shaped like the live ones."""
+    base = dict(
+        sources={"certstream": 27_226, "zone": 165_621},
+        junk_dropped=18_402,
+        junk_reasons=[("machine_generated", "Machine-generated name", 11_000),
+                      ("extension_not_tracked", "Extension not tracked", 7_402)],
+        screening_counts={
+            "parked_or_for_sale": 4_100,
+            "inaccessible_site": 2_925,
+            "confirmed_non_us": 1_200,
+            "consumer_b2c_product": 900,
+            "no_clear_enterprise_or_glasswing_fit": 6_000,
+        },
+        unscreened=160_000,
+        candidates=1_320,
+        sent_to_claude=100,
+        claude_rejected=82,
+    )
+    base.update(over)
+    return build_daily_funnel(**base)
+
+
+def test_the_funnel_is_six_steps_not_twenty_eight():
+    """Reasons nest inside stages. This is the whole point of the rework."""
+    assert [s.key for s in a_day().stages] == [
+        "junk", "unscreened", "no_page", "no_fit",
+        "not_diligenced", "claude_reject",
+    ]
+
+
+def test_reasons_live_inside_their_stage_and_sum_to_it():
+    stage = next(s for s in a_day().stages if s.key == "no_page")
+    assert {k for k, _, _ in stage.reasons} == {
+        "parked_or_for_sale", "inaccessible_site"}
+    assert sum(c for _, _, c in stage.reasons) == stage.dropped
+
+
+def test_unknown_reasons_are_judged_fit_not_reachability():
+    """A new guard added to route_company must land somewhere sensible
+    without anyone editing the funnel."""
+    funnel = a_day(screening_counts={"some_brand_new_guard": 42})
+    unfit = next(s for s in funnel.stages if s.key == "no_fit")
+    assert unfit.dropped == 42
+
+
+def test_top_line_is_every_source_summed():
+    funnel = a_day()
+    assert funnel.entered == 27_226 + 165_621
+    assert funnel.stages[0].entered == funnel.entered
+
+
+def test_each_step_sees_only_what_the_last_one_passed():
+    funnel = a_day()
+    for earlier, later in zip(funnel.stages, funnel.stages[1:]):
+        assert later.entered == earlier.survived
+
+
+def test_claude_stages_never_exceed_their_pool():
+    """Claude counts come from a different store than the queue and can run
+    ahead of it; the funnel must not show a negative survivor count."""
+    funnel = a_day(sent_to_claude=99_999, claude_rejected=99_999)
+    assert all(s.dropped >= 0 and s.survived >= 0 for s in funnel.stages)
+
+
+def test_a_quiet_day_does_not_divide_by_zero():
+    funnel = build_daily_funnel(
+        sources={}, junk_dropped=0, junk_reasons=[], screening_counts={},
+        unscreened=0, candidates=0, sent_to_claude=0, claude_rejected=0,
+    )
+    assert funnel.entered == 0
+    assert all(s.drop_rate == 0.0 for s in funnel.stages)

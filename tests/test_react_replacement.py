@@ -54,10 +54,14 @@ def test_react_app_has_every_primary_page_and_no_streamlit_dependency():
     ):
         assert zone_metric in source
     assert 'label="Waiting to check"' not in source
-    # The crawl funnel is rendered with the same component as the CertStream
-    # one, so a change to the table shape cannot silently apply to only one.
-    assert "zone_funnel" in source
-    assert "<FunnelTable funnel={metrics.data.zone_funnel} />" in source
+    # One funnel. The zone crawl had its own table on this page for exactly
+    # one commit; both sources now share the six-step funnel, because below
+    # intake they share every step.
+    assert "zone_funnel" not in source
+    assert source.count("<FunnelTable funnel=") == 1
+    # Reasons are detail on a step, not steps themselves.
+    assert "funnel-reasons" in source
+    assert "stage.reasons" in source
     assert "Deal-first mode · qualified-candidate storage only" not in source
     assert "controlCrawler" in source
     assert "function GlobalWorkerControls" in source
