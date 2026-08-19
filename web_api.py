@@ -38,8 +38,8 @@ for source in (ROOT, AI_SRC, ZONE_SRC):
         sys.path.insert(0, str(source))
 
 from funnel import (
-    Throughput, biggest_losses, build_daily_funnel, build_funnel,
-    build_zone_funnel, order_screening_reasons,
+    FEED_PARTS, Throughput, biggest_losses, build_daily_funnel, build_funnel,
+    build_zone_funnel, order_screening_reasons, partition_feed,
 )
 from ai_search.og_bridge import enqueue_for_screening
 from ai_search.domains import normalize_any_domain
@@ -1074,8 +1074,29 @@ def certstream_status():
         int(current_run_queue.get("total", 0) or 0) if queue_is_live else None
     )
     desired = bool(read_control()["desired"].get("pipeline", False))
+    # The tiles as disjoint parts of the feed, so the row adds back up to the
+    # box above it. Run-scoped: every value resets when a new run starts.
+    _drops = status.get("intake_drops")
+    feed_split = partition_feed(
+        observed=int(
+            (run_domains if run_domains is not None
+             else status.get("domains_received", 0)) or 0
+        ),
+        junk_dropped=sum(
+            int(v or 0) for v in _drops.values()
+        ) if isinstance(_drops, dict) else 0,
+        queued=int((counts or {}).get("queued", 0) or 0),
+        unscreened=int((counts or {}).get("unscreened", 0) or 0),
+        no_verdict=int((counts or {}).get("no_verdict", 0) or 0),
+        candidates=int(retained_in_buckets or 0),
+    )
     return {
         **status,
+        "feed_split": feed_split,
+        "feed_parts": [
+            {"key": key, "label": label, "value": feed_split[key]}
+            for key, label in FEED_PARTS
+        ],
         **(
             {
                 "domains_received": run_domains,

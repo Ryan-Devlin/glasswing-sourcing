@@ -847,15 +847,14 @@ def test_funnel_tiles_show_a_placeholder_before_data_arrives():
     source = Path("webapp/src/main.jsx").read_text(encoding="utf-8")
     page = source.split("function CertStreamPage()", 1)[1].split("\nfunction ", 1)[0]
     assert "const metric = (value) =>" in page
-    # Every funnel tile must go through it, not raw fmt().
-    # "Seen on the feed" is layer 0 and "Queued after filtering" is the step
-    # between it and screening; without that middle tile the two ends look
-    # like the same population disagreeing by a factor of 500.
-    for label in ("Seen on the feed", "Queued after filtering",
-                  "Screening complete", "Candidates retained",
-                  "Filtered out", "Still processing"):
-        block = page.split(label, 1)[1][:220]
-        assert "metric(" in block, label
+    # Every tile must go through it, not raw fmt(), so "no data yet" cannot
+    # render as a confident zero. The top line is written out; the parts are
+    # rendered from the server's own list, which is what keeps the row summing
+    # to the box above it.
+    top = page.split("Seen on the feed", 1)[1][:220]
+    assert "metric(" in top
+    assert "s.feed_parts" in page
+    assert "value={metric(part.value)}" in page
 
 
 def test_zone_stats_separate_a_baseline_snapshot_from_zero_new_domains(
@@ -1034,9 +1033,28 @@ def test_run_counts_are_internally_closed():
 
 def test_no_verdict_is_reported_rather_than_folded_into_filtered_out():
     # A crawl that produced nothing is not a judgement, and hiding it inside
-    # "filtered out" is what made the tile row impossible to add up.
-    from pathlib import Path
+    # "filtered out" is what made the tile row impossible to add up. The
+    # labels now come from the server so the tiles cannot drift from the
+    # arithmetic that produced them.
+    from funnel import FEED_PARTS
 
-    source = Path("webapp/src/main.jsx").read_text(encoding="utf-8")
-    page = source.split("function CertStreamPage()", 1)[1].split("\nfunction ", 1)[0]
-    assert "No verdict" in page
+    keys = [key for key, _ in FEED_PARTS]
+    assert "no_verdict" in keys
+    assert "filtered_out" in keys
+
+    payload = client.get("/api/certstream/status").json()
+    assert {part["key"] for part in payload["feed_parts"]} == set(keys)
+
+
+def test_the_feed_tiles_add_up_to_the_feed():
+    """The whole point of the row: the first box is the sum of the rest.
+
+    It could not be, because two of the boxes were subtotals of the rows
+    below them rather than siblings, so the row double-counted every screened
+    domain while the guards' own work had no box at all.
+    """
+    payload = client.get("/api/certstream/status").json()
+    split = payload["feed_split"]
+    parts = sum(part["value"] for part in payload["feed_parts"])
+    assert parts == split["observed"]
+    assert all(part["value"] >= 0 for part in payload["feed_parts"])

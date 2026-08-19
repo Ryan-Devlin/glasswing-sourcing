@@ -1919,42 +1919,20 @@ function CertStreamPage() {
       </div>
       {controlMessage && <p className="notice">{controlMessage}</p>}
       <div className="metrics">
-        {/* Read left to right as a chain. The first tile is layer 0 -- every
-            distinct domain the feed showed us -- while the rest are
-            post-filter. Without the middle tile the two ends look like one
-            population disagreeing by a factor of 500, which is how the
-            filter's own work becomes invisible. */}
+        {/* One box, then the parts it splits into. Every tile after the
+            first is a disjoint piece of it, so the row adds back up to the
+            top line. It used to include "queued after filtering" and
+            "screening complete", which are subtotals of the rows below them
+            rather than siblings -- the row double-counted every screened
+            domain, and the guards' own work, the largest share by far, had
+            no box at all. */}
         <Metric
           label="Seen on the feed"
           value={metric(s.new_domains_received ?? s.domains_received)}
         />
-        <Metric
-          label="Queued after filtering"
-          value={metric(s.queued_this_run ?? s.current_run_queue?.total)}
-        />
-        <Metric label="Screening complete" value={metric(s.screening_complete_count ?? s.current_run_queue?.complete)} />
-        <Metric
-          label="Candidates retained"
-          value={metric(s.retained_in_buckets)}
-        />
-        <Metric
-          label="Filtered out"
-          value={metric(s.discarded_after_screening)}
-        />
-        {/* Terminal with nothing recorded. It used to be folded into
-            "filtered out", which made a crawl that produced no verdict look
-            like a judgement and left the tiles refusing to add up. */}
-        <Metric label="No verdict" value={metric(s.no_verdict)} />
-        <Metric
-          label="Still processing"
-          value={metric(
-            s.still_processing ?? (s.current_run_queue
-              ? Number(s.current_run_queue.awaiting_first_attempt || 0) +
-                Number(s.current_run_queue.processing || 0) +
-                Number(s.current_run_queue.retrying || 0)
-              : undefined)
-          )}
-        />
+        {(s.feed_parts || []).map((part) => (
+          <Metric key={part.key} label={part.label} value={metric(part.value)} />
+        ))}
       </div>
       {s.classification_store_warning && (
         <p className="error inline-notice">{s.classification_store_warning}</p>

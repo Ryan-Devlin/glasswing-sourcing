@@ -489,3 +489,73 @@ def build_daily_funnel(
     ))
 
     return Funnel(name="pipeline", note=note, stages=stages)
+
+
+def partition_feed(
+    *,
+    observed: int,
+    junk_dropped: int,
+    queued: int,
+    unscreened: int,
+    no_verdict: int,
+    candidates: int,
+) -> dict[str, int]:
+    """Split what the feed showed us into parts that add back up to it.
+
+    The CertStream tiles did not sum to their own top line, and could not:
+    "queued after filtering" and "screening complete" are subtotals of the
+    rows below them, not siblings, so adding the row of boxes double-counted
+    every screened domain -- while the junk the guards removed, by far the
+    largest share, had no box at all.
+
+    Every value returned is one disjoint piece of ``observed``:
+
+        observed = junk + repeats + unscreened + no_verdict
+                   + candidates + filtered_out
+
+    Each piece is clamped to what is left after the pieces before it, and the
+    last one is whatever remains rather than its own measurement. The counts
+    come from a live queue and a live classification store read in separate
+    statements; taking each at face value makes the row miss its own total by
+    however much they disagree at that instant.
+    """
+    total = max(0, int(observed or 0))
+    remaining = total
+
+    def take(value: int) -> int:
+        nonlocal remaining
+        part = max(0, min(int(value or 0), remaining))
+        remaining -= part
+        return part
+
+    junk = take(junk_dropped)
+    # Repeats are the residual of intake, not a counter: a domain already on
+    # the queue is never written again, so nothing tallies it directly.
+    queued_part = max(0, min(int(queued or 0), remaining))
+    repeats = remaining - queued_part
+    remaining = queued_part
+
+    still_processing = take(unscreened)
+    without_verdict = take(no_verdict)
+    retained = take(candidates)
+    filtered_out = remaining
+
+    return {
+        "observed": total,
+        "junk": junk,
+        "repeats": repeats,
+        "still_processing": still_processing,
+        "no_verdict": without_verdict,
+        "candidates": retained,
+        "filtered_out": filtered_out,
+    }
+
+
+FEED_PARTS = (
+    ("junk", "Junk name or untracked extension"),
+    ("repeats", "Already seen before"),
+    ("still_processing", "Still screening"),
+    ("no_verdict", "Finished with no verdict"),
+    ("filtered_out", "Screened out"),
+    ("candidates", "Candidates retained"),
+)
