@@ -3279,6 +3279,13 @@ function FunnelPage() {
         <span><i className="swatch seg-dropped" /> Removed at this step</span>
       </div>
 
+      {data.counters_resyncing && (
+        <p className="funnel-warn">
+          Intake counters are resyncing after a restart — the guard steps read
+          zero until the next flush. This is "no data", not "nothing filtered".
+        </p>
+      )}
+
       {!data.funnel_live && (
         <p className="funnel-warn">
           No counters for this run yet — they appear once the listener has

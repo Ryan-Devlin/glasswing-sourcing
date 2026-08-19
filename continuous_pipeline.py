@@ -1915,6 +1915,18 @@ async def listener(
                         intake_drops[_reason] = (
                             intake_drops.get(_reason, 0) + _count
                         )
+                    if sum(intake_drops.values()) > domains_observed:
+                        # The tally is a breakdown of the domains observed, so
+                        # it can never exceed them. Checked here rather than
+                        # only at startup: observed live at 5,045,617 drops
+                        # against 56,617 domains, because the counter survived
+                        # from a build that tallied per hostname while
+                        # domains_observed started fresh. A start-only check
+                        # cannot correct a divergence that appears later, and
+                        # the page can only respond by blanking the tally,
+                        # which looks like "nothing was filtered".
+                        intake_drops = {}
+                        domains_observed = 0
                     if reading.penalized:
                         # A platform's shared certificate. Every apex on it
                         # used to be queued as an equal peer; they are now

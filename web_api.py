@@ -1050,11 +1050,13 @@ def funnel_breakdown():
         {str(k): int(v or 0) for k, v in raw_drops.items()}
         if isinstance(raw_drops, dict) else {}
     )
-    if sum(guard_drops.values()) > observed:
+    counters_resyncing = sum(guard_drops.values()) > observed
+    if counters_resyncing:
         # A breakdown that exceeds the population it describes means the two
-        # halves came from different runs; showing it produces drop rates
-        # above 100%.
-        guard_drops, observed = {}, observed
+        # halves came from different builds or runs. Blanking it is right --
+        # showing it produces drop rates above 100% -- but it renders as
+        # "nothing was filtered", so the page is told to say so instead.
+        guard_drops = {}
 
     counts = {k: 0 for k in (
         "queued", "unscreened", "ghost", "insufficient", "rejected", "candidates",
@@ -1164,6 +1166,7 @@ def funnel_breakdown():
         "throughput": throughput,
         "queue_counts_live": queue_live,
         "funnel_live": bool(observed),
+        "counters_resyncing": counters_resyncing,
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
 
