@@ -3286,11 +3286,15 @@ function FunnelPage() {
 
   return (
     <section className="funnel-page">
-      <h1>Pipeline — {data.day}</h1>
+      <h1>Pipeline — this pass</h1>
+      <p className="funnel-lede">
+        CertStream counts the current listener run and returns to zero when
+        the feed restarts. The zone crawler counts its current queue version.
+      </p>
 
       <div className="throughput">
         <div className="throughput-card ok">
-          <h3>Domains found today</h3>
+          <h3>Domains found</h3>
           <p className="throughput-verdict">{num(funnel.entered)}</p>
           <dl>
             {Object.entries(sources).map(([key, count]) => (
@@ -3319,9 +3323,18 @@ function FunnelPage() {
         <span><i className="swatch seg-dropped" /> Removed at this step</span>
       </div>
 
+      {data.counters_resyncing && (
+        <p className="funnel-warn">
+          Intake counters are resyncing after a restart — the junk step reads
+          zero until the next flush. This is "no data", not "nothing was
+          filtered".
+        </p>
+      )}
+
       {!data.funnel_live && (
         <p className="funnel-warn">
-          No intake counted for {data.day} yet. This is "no data", not zero.
+          No intake counted for this run yet — counters appear once the
+          listener has processed a frame. This is "no data", not zero.
         </p>
       )}
 

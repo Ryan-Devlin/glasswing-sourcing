@@ -113,12 +113,24 @@ def a_day(**over):
     return build_daily_funnel(**base)
 
 
-def test_the_funnel_is_six_steps_not_twenty_eight():
+def test_the_funnel_is_a_handful_of_steps_not_twenty_eight():
     """Reasons nest inside stages. This is the whole point of the rework."""
     assert [s.key for s in a_day().stages] == [
-        "junk", "unscreened", "no_page", "no_fit",
+        "junk", "source_rejected", "unscreened", "no_page", "no_fit",
         "not_diligenced", "claude_reject",
     ]
+
+
+def test_source_side_rejections_come_before_the_queue():
+    """The zone crawler judges reachability and relevance before a domain is
+    ever queued. Mixing those counts into the route_company steps subtracted
+    zone-sized numbers from a certstream-sized population and drove the whole
+    funnel to zero survivors."""
+    funnel = a_day(source_rejected=[("zone_unreachable", "Unreachable", 10_724)])
+    keys = [s.key for s in funnel.stages]
+    assert keys.index("source_rejected") < keys.index("unscreened")
+    stage = funnel.stages[keys.index("source_rejected")]
+    assert stage.dropped == 10_724
 
 
 def test_reasons_live_inside_their_stage_and_sum_to_it():
@@ -162,3 +174,21 @@ def test_a_quiet_day_does_not_divide_by_zero():
     )
     assert funnel.entered == 0
     assert all(s.drop_rate == 0.0 for s in funnel.stages)
+
+
+def test_a_large_source_rejection_cannot_drive_the_funnel_to_zero():
+    """The failure this step exists to prevent: zone attrition (27,025) was
+    being subtracted after a certstream-sized population had already been
+    taken out of the chain, so every later stage clamped to nothing and the
+    funnel reported zero candidates on a day that produced real ones."""
+    funnel = a_day(
+        source_rejected=[("zone_unreachable", "Unreachable", 10_724),
+                         ("zone_preflight", "No signal", 16_301)],
+        unscreened=400,
+    )
+    assert funnel.survived > 0
+    assert all(stage.survived >= 0 for stage in funnel.stages)
+    # Every step after the source rejection still sees a real population.
+    tail = funnel.stages[funnel.stages.index(
+        next(s for s in funnel.stages if s.key == "unscreened")):]
+    assert all(stage.entered > 0 for stage in tail)

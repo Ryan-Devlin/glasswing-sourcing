@@ -395,8 +395,7 @@ def build_daily_funnel(
     candidates: int,
     sent_to_claude: int,
     claude_rejected: int,
-    extra_no_page: list[tuple[str, str, int]] | None = None,
-    extra_no_fit: list[tuple[str, str, int]] | None = None,
+    source_rejected: list[tuple[str, str, int]] | None = None,
     note: str = "",
 ) -> Funnel:
     """One funnel for one day, both discovery sources, six steps.
@@ -409,13 +408,7 @@ def build_daily_funnel(
     """
     top_line = sum(max(0, int(n or 0)) for n in sources.values())
     unreachable, unfit = _split_screening(screening_counts)
-    # The zone crawler decides reachability and relevance itself, before a
-    # domain ever reaches route_company, so its outcomes never appear in
-    # routing_reason. Without folding them in here they would land in "not
-    # screened yet" -- reported as still in flight when they were in fact
-    # rejected hours earlier.
-    unreachable += list(extra_no_page or [])
-    unfit += list(extra_no_fit or [])
+    source_steps = [r for r in (source_rejected or []) if int(r[2] or 0) > 0]
 
     def total(rows: list[tuple[str, str, int]]) -> int:
         return sum(count for _, _, count in rows)
@@ -428,6 +421,15 @@ def build_daily_funnel(
             "Machine-generated or templated names, and extensions outside the "
             "tracked set. Refused on the name alone, before any request.",
             tuple(junk_reasons),
+        ),
+        (
+            "source_rejected",
+            "Rejected by the crawler that found it",
+            sum(int(count or 0) for _, _, count in source_steps),
+            "The zone crawler judges reachability and relevance itself, "
+            "before a domain is ever queued for screening. These never "
+            "reached route_company.",
+            tuple(source_steps),
         ),
         (
             "unscreened",

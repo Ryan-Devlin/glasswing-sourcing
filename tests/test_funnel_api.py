@@ -42,7 +42,7 @@ def test_the_funnel_is_the_six_steps_the_pipeline_actually_has():
     # they belong to; as peers they made this a 28-row table.
     keys = [s["key"] for s in _payload()["funnel"]["stages"]]
     assert keys == [
-        "junk", "unscreened", "no_page", "no_fit",
+        "junk", "source_rejected", "unscreened", "no_page", "no_fit",
         "not_diligenced", "claude_reject",
     ]
 
@@ -156,3 +156,53 @@ def test_reasons_nest_inside_their_stage():
     for stage in _payload()["funnel"]["stages"]:
         assert isinstance(stage["reasons"], list)
         assert sum(r["dropped"] for r in stage["reasons"]) <= stage["dropped"]
+
+
+def test_certstream_returns_to_zero_when_the_feed_restarts(monkeypatch):
+    """A restart starts a new run, and the funnel must show that run.
+
+    The counters are deliberately run-scoped: restarting the feed is how you
+    ask "what has this pass brought in", and a number that kept climbing
+    across restarts could not answer it.
+    """
+    monkeypatch.setattr(web_api, "shared_pipeline_backend_available", lambda: True)
+    monkeypatch.setattr(
+        web_api, "read_pipeline_status",
+        lambda: {
+            "run_id": "20260819T235959000000Z",
+            "domains_observed": 0,
+            "intake_drops": {},
+            "hostnames_seen": 0,
+        },
+    )
+    payload = _payload()
+    assert payload["sources"]["certstream"] == 0
+    assert payload["domains_observed"] == 0
+
+
+def test_the_funnel_reports_the_run_it_describes():
+    """Two sources on two clocks; without the run id the top line cannot be
+    checked against anything."""
+    assert "run_id" in _payload()
+
+
+def test_a_stale_guard_tally_is_blanked_and_declared(monkeypatch):
+    """Guard drops are a breakdown of domains observed. When a restored tally
+    exceeds the population it describes, showing it renders drop rates over
+    100% -- and hiding it silently reads as "nothing was filtered"."""
+    monkeypatch.setattr(web_api, "shared_pipeline_backend_available", lambda: True)
+    monkeypatch.setattr(
+        web_api, "read_pipeline_status",
+        lambda: {
+            "run_id": "r1",
+            "domains_observed": 10,
+            "intake_drops": {"machine_generated": 999_999},
+        },
+    )
+    payload = _payload()
+    assert payload["counters_resyncing"] is True
+    junk = next(s for s in payload["funnel"]["stages"] if s["key"] == "junk")
+    # Only the CertStream tally is stale. The zone crawler keeps its own
+    # counters per shard and they are unaffected, so blanking those too would
+    # hide a real filter to describe a different source's problem.
+    assert "machine_generated" not in {r["key"] for r in junk["reasons"]}
