@@ -55,14 +55,23 @@ class CoverageTests(unittest.TestCase):
             with self.subTest(reason=reason):
                 self.assertIn(reason, text)
 
-    def test_outcomes_that_route_onward_are_not_listed_as_removals(self):
-        # The document is only removal points. Listing a review outcome here
-        # would overstate what the filter discards -- seven of the twenty-one
-        # route a domain onward rather than dropping it.
+    def test_outcomes_that_route_onward_are_not_numbered_as_removals(self):
+        # They belong in the document -- omitting them is what made it look
+        # incomplete -- but never in a numbered row, which would overstate
+        # what the filter discards. Seven of the twenty-one route onward.
+        numbered = "\n".join(
+            line for line in doc_text().splitlines()
+            if re.match(r"^\| \d+ \|", line)
+        )
+        for reason in routing_reasons():
+            with self.subTest(reason=reason):
+                self.assertNotIn(reason, numbered)
+
+    def test_routing_outcomes_are_still_explained_somewhere(self):
         text = doc_text()
         for reason in routing_reasons():
             with self.subTest(reason=reason):
-                self.assertNotIn(reason, text)
+                self.assertIn(reason, text)
 
     def test_every_removal_point_is_numbered(self):
         # The count is the point: a reader should be able to say how many
@@ -75,6 +84,7 @@ class CoverageTests(unittest.TestCase):
             + 1                     # already queued
             + 1                     # no verdict
             + len(removing_reasons())
+            + 2                     # diligence selection: score floor, already done
             + 1                     # Claude REJECT
             + 1                     # human no
         )
@@ -87,6 +97,33 @@ class CoverageTests(unittest.TestCase):
         actual = removing_reasons()
         placed = [key for key in ordered if key in actual]
         self.assertEqual(placed, [key for key in actual if key in ordered])
+
+
+class DemotionTests(unittest.TestCase):
+    """Layers that touch every domain without shrinking the population.
+
+    apply_run_preferences reads like a filter -- include keywords, exclude
+    keywords, industries, required US evidence -- but its effect is
+    routing_bucket = "review". Leaving it out entirely made the document look
+    incomplete; listing it as a removal would have overstated what the filter
+    discards.
+    """
+
+    def test_run_preferences_are_described_as_demotion_not_removal(self):
+        text = doc_text()
+        self.assertIn("apply_run_preferences", text)
+        self.assertIn("demotion", text.lower())
+
+    def test_every_run_preference_reason_is_named(self):
+        source = Path("filter.py").read_text(encoding="utf-8")
+        index = source.index("include_keywords = keyword_list(")
+        start = source.rfind("\ndef ", 0, index)
+        body = source[start:source.index("\ndef ", index)]
+        reasons = re.findall(r'reasons\.append\(\s*\n?\s*"([^"]+)"', body)
+        self.assertTrue(reasons)
+        for reason in reasons:
+            with self.subTest(reason=reason):
+                self.assertIn(reason.rstrip("_:"), doc_text())
 
 
 class ClaimTests(unittest.TestCase):

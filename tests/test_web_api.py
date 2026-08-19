@@ -848,7 +848,11 @@ def test_funnel_tiles_show_a_placeholder_before_data_arrives():
     page = source.split("function CertStreamPage()", 1)[1].split("\nfunction ", 1)[0]
     assert "const metric = (value) =>" in page
     # Every funnel tile must go through it, not raw fmt().
-    for label in ("Domains discovered", "Screening complete", "Candidates retained",
+    # "Seen on the feed" is layer 0 and "Queued after filtering" is the step
+    # between it and screening; without that middle tile the two ends look
+    # like the same population disagreeing by a factor of 500.
+    for label in ("Seen on the feed", "Queued after filtering",
+                  "Screening complete", "Candidates retained",
                   "Filtered out", "Still processing"):
         block = page.split(label, 1)[1][:220]
         assert "metric(" in block, label

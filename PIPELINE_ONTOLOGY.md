@@ -4,7 +4,7 @@ Every point in the pipeline that can shrink the population, in the order it
 happens. Nothing else is listed — if a step cannot remove a domain it is not
 here.
 
-**27 removal points.** Read down: each one only ever sees what the ones above
+**29 removal points.** Read down: each one only ever sees what the ones above
 it passed.
 
 Two facts that govern the whole table:
@@ -127,13 +127,28 @@ removing domains invisibly.
 
 ---
 
+## Diligence selection — never reaches Claude
+
+`claude_classifier.prepare_input` · counts domains · 100 calls/day
+
+| # | Removal | What goes |
+|---|---|---|
+| 26 | `below_minimum_score` | scores under the operator's minimum (dashboard "Minimum score") |
+| 27 | `already_diligenced` | Claude has already ruled on it; not re-run unless forced |
+
+Step 26 is the operator's own dial and the last place a real company can be
+lost silently — it is measured against `max(stored score, a live rescore of the
+stored page copy)`, so a stale stored score cannot bury a company on its own.
+
+---
+
 ## Diligence — Claude says no
 
 `claude_classifier` · counts domains · 100 calls/day
 
 | # | Removal | What goes |
 |---|---|---|
-| 26 | `claude_reject` | reviewed against the rubric and rejected |
+| 28 | `claude_reject` | reviewed against the rubric and rejected |
 
 There is no maybe. Candidates that have not been called yet are not removed —
 they are waiting, and the funnel shows that as its own line.
@@ -146,9 +161,33 @@ they are waiting, and the funnel shows that as its own line.
 
 | # | Removal | What goes |
 |---|---|---|
-| 27 | `human_ground_truth_no` | a person said no |
+| 29 | `human_ground_truth_no` | a person said no |
 
 The only removal that is training truth. Python and Claude verdicts never are.
+
+---
+
+## What does *not* remove
+
+Two layers touch every domain and are easy to mistake for filters. Neither
+shrinks the population, so neither is numbered above — but their absence
+without explanation is what makes this document look incomplete.
+
+**`filter.apply_run_preferences`** — the dashboard's Run filters. Include
+keywords, exclude keywords, selected industries, required US evidence,
+conviction and signal-dimension floors. Each produces a reason
+(`missing_required_keywords`, `matched_excluded_keywords:…`,
+`outside_selected_industries`, `explicit_us_evidence_required`,
+`insufficient_conviction_for_investable`, `insufficient_signal_dimensions_`)
+but the effect is `routing_bucket = "review"` — a **demotion**, not a removal.
+A domain that fails every run filter is still in the candidate pool; it just
+stops being investable-grade.
+
+**Seven `route_company` outcomes** route onward rather than dropping:
+`verified_prelaunch_watch`, `trusted_high_conviction_product_fit`,
+`substantive_site_scored_for_human_review`, `venture_quality_investable`,
+`strong_investable_candidate`, `credible_venture_candidate_missing_one_dimension`,
+`thesis_fit_missing_wedge_or_moat`.
 
 ---
 
@@ -164,8 +203,9 @@ Measured, order of magnitude, one run:
  11  −  no verdict                              ~100
 12-25 − screening guards                         ~40
         candidate pool                            ~5
- 26  −  Claude REJECT                        0–1/day
+ 26  −  below minimum score                       ~4
+ 28  −  Claude REJECT                        0–1/day
 ```
 
-One step removes almost everything, and it is a setting. The other 26 share the
+One step removes almost everything, and it is a setting. The other 28 share the
 remaining 1%. Tuning them buys precision; only step 4 buys volume.

@@ -1919,9 +1919,18 @@ function CertStreamPage() {
       </div>
       {controlMessage && <p className="notice">{controlMessage}</p>}
       <div className="metrics">
+        {/* Read left to right as a chain. The first tile is layer 0 -- every
+            distinct domain the feed showed us -- while the rest are
+            post-filter. Without the middle tile the two ends look like one
+            population disagreeing by a factor of 500, which is how the
+            filter's own work becomes invisible. */}
         <Metric
-          label="Domains discovered"
+          label="Seen on the feed"
           value={metric(s.new_domains_received ?? s.domains_received)}
+        />
+        <Metric
+          label="Queued after filtering"
+          value={metric(s.current_run_queue?.total)}
         />
         <Metric label="Screening complete" value={metric(s.current_run_queue?.complete)} />
         <Metric
