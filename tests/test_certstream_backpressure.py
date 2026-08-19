@@ -413,5 +413,129 @@ class HotPathStatusWriteTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("certificate_events_received", write)
 
 
+class PerFrameWorkTests(unittest.IsolatedAsyncioTestCase):
+    """Nothing that opens a connection may sit on the per-certificate path."""
+
+    async def _flood(self, *, frames: int, runtime_mode: str):
+        """Run the real listener against a server flooding it with frames."""
+        shutdown = asyncio.Event()
+        sent = 0
+        control_reads = 0
+        consumed: list[int] = []
+
+        async def handler(websocket):
+            nonlocal sent
+            try:
+                while not shutdown.is_set() and sent < frames:
+                    await websocket.send(
+                        json.dumps({"data": [f"host{sent}.example"]})
+                    )
+                    sent += 1
+                    await asyncio.sleep(0)
+                await shutdown.wait()
+            except websockets.exceptions.ConnectionClosed:
+                pass
+
+        def read_control():
+            nonlocal control_reads
+            control_reads += 1
+            return {"desired": {"pipeline": True}}
+
+        def record(**updates):
+            if "stream_frames_received" in updates:
+                consumed.append(int(updates["stream_frames_received"]))
+
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        stop = asyncio.Event()
+        env = {
+            "CERTSTREAM_URL": f"ws://127.0.0.1:{port}",
+            "STREAM_IDLE_TIMEOUT_SECONDS": "99999",
+            "INTAKE_STATUS_FLUSH_SECONDS": "1",
+            "REPEAT_STATUS_FLUSH_SECONDS": "1",
+        }
+        started = 0.0
+        elapsed = 0.0
+        try:
+            with mock.patch.dict("os.environ", env), \
+                 mock.patch.object(
+                     continuous_pipeline, "RUNTIME_MODE", runtime_mode
+                 ), \
+                 mock.patch.object(continuous_pipeline, "write_status", record), \
+                 mock.patch.object(continuous_pipeline, "read_status", lambda: {}), \
+                 mock.patch.object(
+                     continuous_pipeline, "read_control", read_control
+                 ), \
+                 mock.patch.object(
+                     continuous_pipeline, "selected_extensions", lambda: {".ai"}
+                 ), \
+                 mock.patch.object(
+                     continuous_pipeline, "using_postgres", lambda *a, **k: False
+                 ), \
+                 mock.patch.object(
+                     continuous_pipeline,
+                     "register_domain_events",
+                     lambda conn, domains, *a, **k: [],
+                 ):
+                started = asyncio.get_running_loop().time()
+                task = asyncio.create_task(
+                    continuous_pipeline.listener(None, stop)
+                )
+                while sent < frames:
+                    await asyncio.sleep(0.01)
+                elapsed = asyncio.get_running_loop().time() - started
+                stop.set()
+                await asyncio.wait_for(task, timeout=5)
+        finally:
+            shutdown.set()
+            server.close()
+            await asyncio.wait_for(server.wait_closed(), timeout=5)
+        return sent, control_reads, elapsed
+
+    async def test_the_pause_flag_is_not_re_read_for_every_certificate(self):
+        # read_control() opens a fresh Postgres connection, runs one SELECT
+        # and closes it. It was called once per loop iteration, and the loop
+        # iterates once per certificate, so intake was capped at roughly one
+        # certificate per connection setup -- measured live at 30.3 a second
+        # while the feed server discarded ~580 a second it could not hand
+        # over. The cap is invisible from inside the process: no error, no
+        # disconnect, just a slow client.
+        sent, control_reads, _ = await self._flood(
+            frames=400, runtime_mode="cloud"
+        )
+        self.assertGreaterEqual(sent, 400)
+        self.assertLess(
+            control_reads,
+            sent / 10,
+            f"read_control() ran {control_reads} times for {sent} frames -- "
+            "a connection setup is still sitting on the intake hot path",
+        )
+
+    async def test_a_local_run_never_reads_the_control_store_at_all(self):
+        # Local mode has no cross-service control store; the short-circuit
+        # that kept it out of the loop must survive the caching.
+        _, control_reads, _ = await self._flood(
+            frames=200, runtime_mode="local"
+        )
+        self.assertEqual(control_reads, 0)
+
+    async def test_the_listener_keeps_up_with_a_flooding_feed(self):
+        # The property, rather than one instance of it: whatever ends up on
+        # this path, the listener has to consume the feed far faster than the
+        # feed server's patience. The floor is deliberately far below what
+        # parsing and a Public Suffix List lookup actually cost, so this fails
+        # only when per-frame I/O has crept back in -- the live rate when it
+        # last did was 30 frames a second.
+        sent, _, elapsed = await self._flood(
+            frames=1500, runtime_mode="cloud"
+        )
+        rate = sent / max(elapsed, 1e-6)
+        self.assertGreater(
+            rate,
+            200,
+            f"listener consumed only {rate:.0f} frames/second",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

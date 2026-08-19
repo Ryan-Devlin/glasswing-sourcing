@@ -1970,6 +1970,16 @@ async def listener(
     # instead of caching it for the task's entire lifetime.
     extensions_refresh_seconds = 5.0
     extensions_refreshed_at = time.monotonic()
+    # How often the pause flag is re-read while frames are arriving. This is
+    # not a cache for its own sake: read_control() opens a fresh Postgres
+    # connection, runs one SELECT and closes it, and the loop below runs once
+    # per certificate. Checking it per frame put ~30ms of connection setup in
+    # front of every certificate in the feed.
+    control_refresh_seconds = max(
+        0.1, float(os.getenv("STREAM_CONTROL_REFRESH_SECONDS", "1"))
+    )
+    control_checked_at = 0.0
+    pipeline_desired = True
 
     while not stop.is_set():
         if RUNTIME_MODE != "local" and not read_control()["desired"].get(
@@ -2052,9 +2062,25 @@ async def listener(
                 connection_delivered_frame = False
 
                 while not stop.is_set():
-                    if RUNTIME_MODE != "local" and not read_control()["desired"].get(
-                        "pipeline", True
+                    now_monotonic = time.monotonic()
+                    # Measured live 2026-08-19: this loop consumed 30.3
+                    # certificates a second while the feed server discarded
+                    # ~580 a second it could not hand over, and one fresh
+                    # Postgres connection per certificate is the whole
+                    # explanation -- ~33ms per frame is exactly the connect,
+                    # SELECT, close. Re-reading the flag once a second instead
+                    # keeps a pause taking effect well inside the time it
+                    # takes a person to notice, which is all it ever needed.
+                    if (
+                        RUNTIME_MODE != "local"
+                        and now_monotonic - control_checked_at
+                        >= control_refresh_seconds
                     ):
+                        control_checked_at = now_monotonic
+                        pipeline_desired = bool(
+                            read_control()["desired"].get("pipeline", True)
+                        )
+                    if not pipeline_desired:
                         # Exiting the context closes the socket promptly. The
                         # worker may safely finish its already-claimed batch.
                         write_status(
@@ -2064,7 +2090,6 @@ async def listener(
                             updated_at=utc_now(),
                         )
                         break
-                    now_monotonic = time.monotonic()
                     if (
                         now_monotonic - extensions_refreshed_at
                         >= extensions_refresh_seconds
