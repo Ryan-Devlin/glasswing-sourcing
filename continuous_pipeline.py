@@ -679,18 +679,22 @@ def read_intake_daily(
     return out
 
 
-def register_domain_event(
+def _register_event_statements(
     conn: sqlite3.Connection,
     domain: str,
-    allowed_extensions: set[str] | None = None,
+    allowed: set[str],
     *,
     run_id: str = "",
     intake_score: int | None = None,
     intake_evidence: str = "",
 ) -> dict[str, object]:
-    """Register one CertStream event without requeueing known domains."""
+    """One event's writes, without the commit.
+
+    Split out so a whole certificate's worth of domains can share a single
+    commit. A commit is a synchronous round trip to Postgres, and this ran one
+    per domain on the listener's hot path -- see ``register_domain_events``.
+    """
     domain = stable_domain(domain)
-    allowed = allowed_extensions or selected_extensions()
     extension = domain_extension(domain)
 
     if not domain or extension not in allowed:
@@ -737,7 +741,6 @@ def register_domain_event(
         ),
     )
     if cursor.rowcount == 1:
-        conn.commit()
         return {
             "accepted": True,
             "queued": True,
@@ -785,7 +788,6 @@ def register_domain_event(
             domain,
         ),
     ).fetchone()
-    conn.commit()
 
     # A repeat certificate event is evidence that the domain is active,
     # not evidence that a new startup launched. Never requeue it here.
@@ -799,6 +801,77 @@ def register_domain_event(
         "seen_count": int(row["seen_count"] or 1),
         "existing_status": str(row["status"]),
     }
+
+
+def register_domain_event(
+    conn: sqlite3.Connection,
+    domain: str,
+    allowed_extensions: set[str] | None = None,
+    *,
+    run_id: str = "",
+    intake_score: int | None = None,
+    intake_evidence: str = "",
+) -> dict[str, object]:
+    """Register one CertStream event without requeueing known domains."""
+    result = _register_event_statements(
+        conn,
+        domain,
+        allowed_extensions or selected_extensions(),
+        run_id=run_id,
+        intake_score=intake_score,
+        intake_evidence=intake_evidence,
+    )
+    # A refused domain executed no statements, so there is nothing to commit.
+    if result.get("accepted"):
+        conn.commit()
+    return result
+
+
+def register_domain_events(
+    conn: sqlite3.Connection,
+    domains: list[str],
+    allowed_extensions: set[str] | None = None,
+    *,
+    run_id: str = "",
+    intake_scores: dict[str, object] | None = None,
+) -> list[dict[str, object]]:
+    """Register every domain on one certificate under a single commit.
+
+    Same statements and same per-domain results as calling
+    :func:`register_domain_event` in a loop; the only difference is the
+    transaction boundary, which is now the certificate rather than the domain.
+    That matters because the listener awaited one commit per domain in
+    sequence before it could return to ``recv()``, and the websocket buffers
+    only a handful of frames before it stops reading the socket entirely.
+    """
+    allowed = allowed_extensions or selected_extensions()
+    scores = intake_scores or {}
+    results: list[dict[str, object]] = []
+    accepted_any = False
+    try:
+        for domain in domains:
+            entry = scores.get(domain)
+            result = _register_event_statements(
+                conn,
+                domain,
+                allowed,
+                run_id=run_id,
+                intake_score=getattr(entry, "score", None),
+                intake_evidence=str(getattr(entry, "evidence", "") or ""),
+            )
+            results.append(result)
+            accepted_any = accepted_any or bool(result.get("accepted"))
+    except Exception:
+        # Never leave a half-written certificate holding row locks. The
+        # listener's caller treats any exception as a connection fault and
+        # reconnects, which would otherwise abandon an open transaction on a
+        # connection it keeps using.
+        if accepted_any:
+            conn.rollback()
+        raise
+    if accepted_any:
+        conn.commit()
+    return results
 
 
 def enqueue(
@@ -1728,6 +1801,16 @@ async def listener(
     hostnames_filtered = int(
         listener_status.get("hostnames_filtered", 0) or 0
     ) if _counters_are_this_run else 0
+    # Certificates actually handed to us, as distinct from domains we kept.
+    # Nothing published the feed's own delivery rate, so a client that was
+    # being starved by the feed server looked exactly like a quiet feed:
+    # connected, no error, counters climbing slowly. This is the number to
+    # compare against the server's own throughput (~1,700 certificates a
+    # second) to see whether we are receiving the feed or a sample of it.
+    stream_frames_received = int(
+        listener_status.get("stream_frames_received", 0) or 0
+    ) if _counters_are_this_run else 0
+    stream_frames_at_last_flush = stream_frames_received
     # Apexes refused because their certificate carried too many unrelated
     # domains to be one company's. Tracked apart from junk-filtered hostnames:
     # this is a deliberate intake rejection, not malformed input.
@@ -1773,6 +1856,9 @@ async def listener(
     daily_baseline_drops = dict(intake_drops)
     daily_tally_warned = False
     last_repeat_domain = ""
+    last_new_domain = ""
+    last_new_extension = ""
+    new_domain_status_dirty = False
     repeat_status_dirty = False
     repeat_status_flush_seconds = max(
         0.5,
@@ -1781,9 +1867,20 @@ async def listener(
     repeat_status_flushed_at = time.monotonic()
 
     def flush_repeat_status(*, force: bool = False) -> None:
-        """Coalesce noisy repeat telemetry without losing its counters."""
+        """Coalesce noisy intake telemetry without losing its counters.
+
+        Covers new domains as well as repeats. A new domain used to publish
+        the moment it arrived: ``write_status`` reads the whole status file,
+        re-serialises it and atomically rewrites it, and the new-domain path
+        did that twice per domain (once via a forced repeat flush) on the
+        listener's hot path -- where the websocket buffers only
+        ``max_queue`` frames before it stops reading the socket. Both
+        counters stay exact; only the publish is coalesced, at a cadence far
+        faster than anyone reads the number.
+        """
         nonlocal repeat_status_dirty, repeat_status_flushed_at
-        if not repeat_status_dirty:
+        nonlocal new_domain_status_dirty
+        if not (repeat_status_dirty or new_domain_status_dirty):
             return
         now_monotonic = time.monotonic()
         if (
@@ -1792,14 +1889,28 @@ async def listener(
             < repeat_status_flush_seconds
         ):
             return
-        write_status(
-            certificate_events_received=certificate_events,
-            repeat_events_ignored=repeat_events,
-            repeats_by_extension=repeats_by_extension,
-            last_repeat_domain=last_repeat_domain,
-            updated_at=utc_now(),
-        )
+        updates: dict[str, object] = {
+            "certificate_events_received": certificate_events,
+            "repeat_events_ignored": repeat_events,
+            "repeats_by_extension": repeats_by_extension,
+            "last_repeat_domain": last_repeat_domain,
+            "updated_at": utc_now(),
+        }
+        if new_domain_status_dirty:
+            # Published in the same write as the repeat totals, so a reader
+            # can never see a new-domain count that disagrees with the repeat
+            # count it was tallied alongside -- which is the invariant the
+            # old forced flush was there to protect.
+            updates.update(
+                new_domains_received=new_domains,
+                domains_received=new_domains,
+                received_by_extension=received_by_extension,
+                last_domain_received=last_new_domain,
+                last_domain_extension=last_new_extension,
+            )
+        write_status(**updates)
         repeat_status_dirty = False
+        new_domain_status_dirty = False
         repeat_status_flushed_at = now_monotonic
 
     write_status(
@@ -1837,6 +1948,13 @@ async def listener(
     # which is what distinguishes "slow/delayed pong under load" from "dead".
     idle_timeout_seconds = float(
         os.getenv("STREAM_IDLE_TIMEOUT_SECONDS", "120")
+    )
+    # Frames the websocket may buffer before it stops reading the socket.
+    # Tunable without a redeploy because the right value depends on the feed
+    # rate and on how long this process's other work blocks the loop, and
+    # both move.
+    stream_max_queue = max(
+        16, int(os.getenv("STREAM_MAX_QUEUE", "16384"))
     )
     idle_report_seconds = 15.0
     idle_watchdog_count = int(
@@ -1890,6 +2008,34 @@ async def listener(
                 # pings enabled, but don't close a useful stream solely for
                 # a delayed pong; recv() still detects a real disconnect.
                 ping_timeout=None,
+                # This is the difference between seeing the feed and seeing a
+                # sliver of it, and it defaults to 16.
+                #
+                # websockets buffers at most ``max_queue`` frames, and when
+                # that buffer is full it stops reading the transport. TCP
+                # backpressure then reaches the feed server, and
+                # certstream-server-go's answer to a client it cannot hand a
+                # certificate to is to throw the certificate away:
+                #
+                #   Not providing client '...' with cert because client's
+                #   buffer is full. The client can't keep up.
+                #   Skipped certs: 4465001
+                #
+                # Measured live 2026-08-19 against 333,815 hostnames actually
+                # delivered in the same window -- the pipeline was receiving
+                # roughly 3% of the feed, and every counter on our side said
+                # "connected" with no error, because from the client's point
+                # of view nothing failed. The domains-only firehose runs at
+                # ~1,700 certificates a second, so 16 frames is about ten
+                # milliseconds of slack: one status write, one registration
+                # round trip, or any synchronous stretch of the screening
+                # worker that shares this event loop overruns it.
+                #
+                # Sized to absorb a stall, not to hide one: a domains-only
+                # frame is a few hundred bytes, so even the default here is
+                # single-digit megabytes, while the throughput work below is
+                # what keeps the queue from being needed in steady state.
+                max_queue=stream_max_queue,
             ) as websocket:
                 write_status(
                     connected=True,
@@ -2009,6 +2155,7 @@ async def listener(
                     # filter runs once per hostname: the comprehension form
                     # would need a second call per hostname to tally the
                     # rejects, doubling the work on the hottest path here.
+                    stream_frames_received += 1
                     raw_hostnames = names_from_message(raw)
                     hostnames_seen += len(raw_hostnames)
                     # Read the certificate as a whole rather than hostname by
@@ -2060,6 +2207,18 @@ async def listener(
                         # delivers frames constantly, so an unthrottled write
                         # would rewrite the status file thousands of times a
                         # minute for a number nobody reads that fast.
+                        _flush_interval = max(
+                            time.monotonic() - intake_status_flushed_at,
+                            1e-6,
+                        )
+                        frames_per_second = round(
+                            (
+                                stream_frames_received
+                                - stream_frames_at_last_flush
+                            ) / _flush_interval,
+                            1,
+                        )
+                        stream_frames_at_last_flush = stream_frames_received
                         intake_status_flushed_at = time.monotonic()
                         # Never fatal. The listener's except-clause treats
                         # any exception here as a connection fault, so a
@@ -2091,6 +2250,8 @@ async def listener(
                                     file=sys.stderr,
                                 )
                         write_status(
+                            stream_frames_received=stream_frames_received,
+                            stream_frames_per_second=frames_per_second,
                             hostnames_seen=hostnames_seen,
                             hostnames_filtered=hostnames_filtered,
                             domains_observed=domains_observed,
@@ -2101,7 +2262,16 @@ async def listener(
                             last_platform_cert=last_platform_cert,
                         )
 
-                    for domain in sorted(message_domains):
+                    # One await for the whole certificate, not one per
+                    # domain. Each of these is a blocking Postgres round trip
+                    # plus a commit, and awaiting them one at a time meant the
+                    # listener was parked -- not calling recv() -- for the sum
+                    # of them. Measured live, a single one of these took
+                    # 3.639s, which at ~1,700 certificates a second is the
+                    # whole feed on the floor while it ran.
+                    ordered_domains = sorted(message_domains)
+                    events: list[dict[str, object]] = []
+                    if ordered_domains:
                         _register_started = time.monotonic()
                         if using_postgres(PIPELINE_DATABASE_ENV_VAR):
                             # CertStream registration is synchronous SQL.
@@ -2110,23 +2280,21 @@ async def listener(
                             # repeat certificates surged. The listener owns a
                             # separate connection, so this blocking round trip
                             # is safe to move off-loop.
-                            event = await asyncio.to_thread(
-                                register_domain_event,
+                            events = await asyncio.to_thread(
+                                register_domain_events,
                                 conn,
-                                domain,
+                                ordered_domains,
                                 allowed_extensions,
                                 run_id=active_run_id,
-                                intake_score=intake_scores[domain].score,
-                                intake_evidence=intake_scores[domain].evidence,
+                                intake_scores=intake_scores,
                             )
                         else:
-                            event = register_domain_event(
+                            events = register_domain_events(
                                 conn,
-                                domain,
+                                ordered_domains,
                                 allowed_extensions,
                                 run_id=active_run_id,
-                                intake_score=intake_scores[domain].score,
-                                intake_evidence=intake_scores[domain].evidence,
+                                intake_scores=intake_scores,
                             )
                         _register_elapsed = (
                             time.monotonic() - _register_started
@@ -2142,11 +2310,14 @@ async def listener(
                             # dashboard reliably.
                             write_status(
                                 last_slow_register_domain_event={
-                                    "domain": domain,
+                                    "domain": ordered_domains[0],
+                                    "domains": len(ordered_domains),
                                     "seconds": round(_register_elapsed, 3),
                                     "logged_at": utc_now(),
                                 }
                             )
+
+                    for domain, event in zip(ordered_domains, events):
                         if not event.get("accepted"):
                             continue
 
@@ -2156,27 +2327,14 @@ async def listener(
                         certificate_events += 1
 
                         if event.get("is_new_domain"):
-                            # Flush repeat telemetry first so this immediate
-                            # new-domain update cannot publish stale totals.
-                            flush_repeat_status(force=True)
                             received_by_extension[extension] = (
                                 received_by_extension.get(extension, 0)
                                 + 1
                             )
                             new_domains += 1
-                            write_status(
-                                certificate_events_received=(
-                                    certificate_events
-                                ),
-                                new_domains_received=new_domains,
-                                domains_received=new_domains,
-                                received_by_extension=(
-                                    received_by_extension
-                                ),
-                                last_domain_received=domain,
-                                last_domain_extension=extension,
-                                updated_at=utc_now(),
-                            )
+                            last_new_domain = domain
+                            last_new_extension = extension
+                            new_domain_status_dirty = True
                         else:
                             repeats_by_extension[extension] = (
                                 repeats_by_extension.get(extension, 0)
@@ -2185,7 +2343,7 @@ async def listener(
                             repeat_events += 1
                             last_repeat_domain = domain
                             repeat_status_dirty = True
-                            flush_repeat_status()
+                    flush_repeat_status()
 
         except asyncio.CancelledError:
             raise

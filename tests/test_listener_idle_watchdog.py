@@ -79,6 +79,13 @@ class ListenerHarness:
                      continuous_pipeline,
                      "register_domain_event",
                      lambda *a, **k: {"accepted": False},
+                 ), \
+                 mock.patch.object(
+                     continuous_pipeline,
+                     "register_domain_events",
+                     lambda conn, domains, *a, **k: [
+                         {"accepted": False} for _ in domains
+                     ],
                  ):
                 task = asyncio.create_task(continuous_pipeline.listener(None, stop))
                 await asyncio.sleep(seconds)
