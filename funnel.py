@@ -197,12 +197,19 @@ def biggest_losses(funnel: Funnel, limit: int = 3) -> list[dict[str, object]]:
         key=lambda s: s.dropped,
         reverse=True,
     )
+    top_line = funnel.entered
     return [
         {
             "key": s.key,
             "label": s.label,
             "dropped": s.dropped,
             "drop_rate": round(s.drop_rate, 6),
+            # Against the top line, not against what reached this step: the
+            # caller is ranking stages by how much of the whole population
+            # each one removed, so it needs the same denominator throughout.
+            "shave_of_top": round(
+                s.dropped / top_line if top_line else 0.0, 6
+            ),
             "note": s.note,
         }
         for s in ranked[:limit]
@@ -251,3 +258,82 @@ def order_screening_reasons(counts: dict[str, int]) -> list[tuple[str, str, int]
         if reason not in seen and count:
             placed.append((reason, reason.replace("_", " ").capitalize(), int(count)))
     return placed
+
+
+def build_zone_funnel(details: dict) -> Funnel:
+    """The zone-file crawl as one funnel, in domains, for the active queue.
+
+    The top line is the day's registry delta -- the new registrations CZDS
+    published -- not the whole zone. Gibberish rejection is deliberately left
+    out: it is scored against the full 162M-name snapshot at import time, so
+    folding it in would mix two populations and stop the top line matching the
+    domains this queue actually received.
+
+    ``details`` is :func:`zone_universe.database.diagnostics` output.
+    """
+    queued = int(details.get("queued_domains", 0) or 0)
+    quarantined = int(details.get("low_priority_quarantined", 0) or 0)
+    attempted = int(details.get("attempted", 0) or 0)
+
+    steps: list[tuple[str, str, int, str]] = [
+        (
+            "already_crawled",
+            "Already crawled — not a new name",
+            int(details.get("skipped_existing", 0) or 0),
+            "Seen and successfully fetched under an earlier queue version.",
+        ),
+        (
+            "low_priority",
+            "Below the priority ceiling — never fetched",
+            quarantined,
+            "Parseable, but no thesis keyword and not short or brandable, so "
+            "it stays in the zone queue rather than spending a request. "
+            "Recoverable: raising ZONE_UNIVERSE_MAX_CRAWL_PRIORITY to 3 puts "
+            "these back in play.",
+        ),
+        (
+            "not_reached",
+            "Not reached this cycle",
+            max(0, queued - quarantined - attempted),
+            "Left in the queue when the cycle ended. Picked up next run.",
+        ),
+        (
+            "unreachable",
+            "Could not be reached",
+            int(details.get("network_failed", 0) or 0),
+            "DNS failure, timeout, block, HTTP error, or an empty response.",
+        ),
+        (
+            "preflight_rejected",
+            "Homepage read, not thesis-relevant",
+            int(details.get("preflight_rejected", 0) or 0),
+            "The site answered and was parsed, but the copy showed no sign of "
+            "an operating technology company.",
+        ),
+    ]
+
+    # Derived from the chain rather than from preflight_promising on purpose.
+    # The two counters are written by different statements and drift by a few
+    # rows mid-cycle -- measured 2026-08-19, promising ran 50 ahead of the
+    # attempted total it is drawn from. Subtracting a drifting counter from a
+    # chained one makes the funnel miss its own bottom line, so the last step
+    # is whatever the chain has left over the pages actually stored.
+    remaining = queued
+    for _, _, dropped, _ in steps:
+        remaining = max(0, remaining - max(0, int(dropped or 0)))
+    steps.append((
+        "no_page_stored",
+        "Passed screening, no page stored",
+        max(0, remaining - int(details.get("network_success", 0) or 0)),
+        "Cleared the quick screen but the full crawl produced nothing.",
+    ))
+
+    return Funnel(
+        name="zone",
+        note=(
+            "One zone-file cycle, counted in domains at every step. The top is "
+            "every new domain in the day's registry delta, before any "
+            "judgement."
+        ),
+        stages=build_funnel("zone", queued, steps).stages,
+    )

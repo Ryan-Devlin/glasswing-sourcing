@@ -2388,7 +2388,7 @@ function SearchCorpusPage({ kind }) {
           ) : (
             <>
               <Metric label="New domains today" value={fmt(metrics.data.new_today)} />
-              <Metric label="Waiting to check" value={fmt(metrics.data.pending)} />
+              <Metric label="Skipped — low priority" value={fmt(metrics.data.quarantined)} />
               <Metric label="Domains checked" value={fmt(metrics.data.attempted)} />
               <Metric label="Passed quick screen" value={fmt(metrics.data.promising)} />
               <Metric label="Successfully scraped" value={fmt(metrics.data.scraped)} />
@@ -2448,6 +2448,25 @@ function SearchCorpusPage({ kind }) {
             </ErrorBox>
           )}
         </>
+      )}
+      {!isAi && Boolean(metrics.data?.zone_funnel?.stages?.length) && (
+        <section className="funnel-page zone-funnel">
+          <h2>Where the day's new domains went</h2>
+          <p className="funnel-lede">
+            Every new domain in today's registry delta, IN and OUT at each
+            step. The top line is what the registry published; the bottom is
+            what got a page stored.
+          </p>
+          {metrics.data.zone_biggest_losses?.[0] && (
+            <p className="funnel-lede">
+              Biggest single loss: <strong>{metrics.data.zone_biggest_losses[0].label}</strong>
+              {" — "}{fmt(metrics.data.zone_biggest_losses[0].dropped)} domains,
+              {" "}{pct(metrics.data.zone_biggest_losses[0].shave_of_top)} of the top line.
+            </p>
+          )}
+          <FunnelTable funnel={metrics.data.zone_funnel} />
+          <p className="funnel-note">{metrics.data.zone_funnel.note}</p>
+        </section>
       )}
       {isAi && metrics.data && (
         <section className={`corpus-status ${crawlerStale ? "stale" : ""}`}>

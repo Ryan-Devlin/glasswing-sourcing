@@ -663,6 +663,11 @@ def diagnostics(conn: sqlite3.Connection) -> dict[str, int]:
             "FROM shards s JOIN zones z ON z.tld=s.tld "
             "AND z.active_queue_version=s.queue_version"
         ),
+        "skipped_existing": (
+            "SELECT coalesce(sum(skipped_existing),0) FROM shards s "
+            "JOIN zones z ON z.tld=s.tld "
+            "AND z.active_queue_version=s.queue_version"
+        ),
         "low_priority_quarantined": (
             "SELECT coalesce(sum(skipped_low_priority),0) FROM shards s "
             "JOIN zones z ON z.tld=s.tld "

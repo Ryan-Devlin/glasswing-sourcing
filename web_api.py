@@ -38,7 +38,8 @@ for source in (ROOT, AI_SRC, ZONE_SRC):
         sys.path.insert(0, str(source))
 
 from funnel import (
-    Throughput, biggest_losses, build_funnel, order_screening_reasons,
+    Throughput, biggest_losses, build_funnel, build_zone_funnel,
+    order_screening_reasons,
 )
 from ai_search.og_bridge import enqueue_for_screening
 from ai_search.domains import normalize_any_domain
@@ -1924,10 +1925,19 @@ def corpus_stats(kind: Literal["ai", "zone"]):
     except (TypeError, ValueError):
         batch_rate = 0
         instantaneous_batch_rate = 0
+    # The largest filter in the crawl had no representation on the page.
+    # Measured 2026-08-19: 136,358 of 161,721 new .com names -- 84% -- were
+    # quarantined below the priority ceiling and never got a DNS lookup, while
+    # the page only ever showed the 25,363 that did.
+    zone_funnel = build_zone_funnel(details)
+
     return {
         "new_today": new_domains_today,
         "zone_deltas": zone_deltas,
         "daily_intake": daily_intake,
+        "zone_funnel": zone_funnel.to_dict(),
+        "zone_biggest_losses": biggest_losses(zone_funnel),
+        "quarantined": int(details.get("low_priority_quarantined", 0) or 0),
         "available": details.get("queued_domains", 0),
         "pending": max(
             0,

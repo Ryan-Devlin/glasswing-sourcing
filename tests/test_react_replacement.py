@@ -38,15 +38,26 @@ def test_react_app_has_every_primary_page_and_no_streamlit_dependency():
         # substring of legitimate copy elsewhere (e.g. the "Discarded by rules"
         # audit page), and a loose check fails on unrelated additions.
         assert f'label="{zone_metric}"' not in source
+    # The crawler tiles as the page actually renders them. This list drifted
+    # from the UI once already and sat red on main; keep it matching the
+    # Metric labels in the !isAi branch of the corpus page.
     for zone_metric in (
-        "Domains screened",
-        "Live websites",
-        "Relevant companies",
-        "Investable deals",
-        "Qualified candidates",
-            "Average screening speed",
+        "New domains today",
+        # Not "Waiting to check": that read as a backlog when it is an 87-row
+        # queue residue, while the number worth showing -- 84% of the delta
+        # dropped below the priority ceiling before any request -- had no tile.
+        "Skipped — low priority",
+        "Domains checked",
+        "Passed quick screen",
+        "Successfully scraped",
+        "Failed to reach",
     ):
         assert zone_metric in source
+    assert 'label="Waiting to check"' not in source
+    # The crawl funnel is rendered with the same component as the CertStream
+    # one, so a change to the table shape cannot silently apply to only one.
+    assert "zone_funnel" in source
+    assert "<FunnelTable funnel={metrics.data.zone_funnel} />" in source
     assert "Deal-first mode · qualified-candidate storage only" not in source
     assert "controlCrawler" in source
     assert "function GlobalWorkerControls" in source
