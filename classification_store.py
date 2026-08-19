@@ -112,6 +112,7 @@ def _enrich_green_flags_in_connection(
     from filter import deal_green_flags
 
     changed = 0
+    pending: list[tuple[str, str]] = []
     for start in range(0, len(normalized), 700):
         batch = normalized[start:start + 700]
         marks = ",".join("?" for _ in batch)
@@ -144,11 +145,20 @@ def _enrich_green_flags_in_connection(
             merged = normalize_green_flags([*existing, *derived])
             record["website_green_flags"] = merged
             record["green_flags_checked_at"] = checked_at
-            conn.execute(
-                "UPDATE classifications SET record_json=? WHERE domain=?",
-                (json.dumps(record, ensure_ascii=False, separators=(",", ":")), row["domain"]),
-            )
+            pending.append((
+                json.dumps(record, ensure_ascii=False, separators=(",", ":")),
+                row["domain"],
+            ))
             changed += 1
+        if pending:
+            # One statement per row was a round trip per row. Over a WAN that
+            # is the entire cost of a backfill: measured at 8 rows/second
+            # against the live store, or five hours for the review bucket.
+            conn.executemany(
+                "UPDATE classifications SET record_json=? WHERE domain=?",
+                pending,
+            )
+            pending.clear()
     return changed
 
 
