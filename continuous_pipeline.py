@@ -1401,6 +1401,11 @@ def maybe_run_claude(batch_path: Path) -> int:
                     sys.executable,
                     str(ROOT / "build_claude_candidates.py"),
                     str(candidates),
+                    # The same floor the classifier applies. If the two
+                    # disagree the builder either starves it or hands it rows
+                    # it will throw away.
+                    "--minimum-score",
+                    str(CLAUDE_MINIMUM_SCORE),
                 ],
                 cwd=ROOT,
                 capture_output=True,
@@ -1410,10 +1415,19 @@ def maybe_run_claude(batch_path: Path) -> int:
             if build.returncode == 2:
                 return 0
             if build.returncode != 0 or not candidates.exists():
+                detail = (build.stderr or "").strip()[:300]
+                if not detail and build.returncode < 0:
+                    # Killed by a signal -- almost always the OOM killer, which
+                    # produces no stderr at all. The empty message this used to
+                    # write said only that something failed.
+                    detail = (
+                        f"killed by signal {-build.returncode} "
+                        "(out of memory while building candidates)"
+                    )
                 write_status(
                     claude_warning=(
                         "Claude skipped: building the candidate file failed: "
-                        f"{(build.stderr or '').strip()[:300]}"
+                        f"rc={build.returncode} {detail}"
                     )[:500],
                     updated_at=utc_now(),
                 )

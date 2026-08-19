@@ -3250,19 +3250,77 @@ def query_corpus_classifications(
     return results
 
 
+def iter_scoring_rows(
+    path: Path | str = CLASSIFICATION_DB,
+    *,
+    batch: int = 5000,
+):
+    """Stream the columns diligence eligibility needs, and nothing else.
+
+    Eligibility is ``max(stored score, a live rescore of the stored page
+    copy)``, which needs the title, description and excerpt -- not
+    ``record_json``, which is the bulk of the table. Yielding only those
+    columns keeps the pass memory-bounded regardless of corpus size.
+
+    Written because loading the whole store to choose at most ten candidates
+    stopped merely being slow: at 267,349 rows and 1.86 GB the child process
+    is OOM-killed outright, so no diligence runs at all and the failure
+    surfaces only as an empty warning string.
+    """
+    columns = (
+        "domain, company_name, description, excerpt, manual_override, "
+        "diligence_rank_score, fit_score, priority_score, routing_bucket"
+    )
+    with connect_store(path, read_only=True) as conn:
+        cursor = conn.execute(
+            f"SELECT {columns} FROM classifications ORDER BY domain"
+        )
+        while True:
+            rows = cursor.fetchmany(batch)
+            if not rows:
+                return
+            for row in rows:
+                yield dict(row)
+
+
 def frame_from_store(
     path: Path | str = CLASSIFICATION_DB,
+    *,
+    domains: list[str] | None = None,
 ) -> pd.DataFrame:
+    """Load full rows, optionally restricted to ``domains``.
+
+    ``record_json`` carries a full page copy per row, so an unrestricted load
+    materialises the entire corpus three times over -- fetchall, a list of
+    dicts, then the frame. Callers that already know which domains they want
+    should say so; at 267k rows the difference is an OOM kill.
+    """
     if not using_classification_postgres() and not Path(path).exists():
         return pd.DataFrame()
+    if domains is not None and not domains:
+        return pd.DataFrame()
+    select = (
+        "SELECT domain,company_name,final_url,description,excerpt,"
+        "crawl_status,content_source,http_status,fetch_error,routing_bucket,"
+        "routing_reason,fit_score,priority_score,thesis_pillar,evidence,"
+        "word_count,manual_override,manual_override_target,record_json "
+        "FROM classifications"
+    )
     with connect_store(path, read_only=True) as conn:
-        rows = conn.execute(
-            "SELECT domain,company_name,final_url,description,excerpt,"
-            "crawl_status,content_source,http_status,fetch_error,routing_bucket,"
-            "routing_reason,fit_score,priority_score,thesis_pillar,evidence,"
-            "word_count,manual_override,manual_override_target,record_json "
-            "FROM classifications ORDER BY domain"
-        ).fetchall()
+        if domains is None:
+            rows = conn.execute(select + " ORDER BY domain").fetchall()
+        else:
+            rows = []
+            unique = sorted(set(domains))
+            for start in range(0, len(unique), 500):
+                chunk = unique[start : start + 500]
+                marks = ",".join("?" for _ in chunk)
+                rows.extend(
+                    conn.execute(
+                        f"{select} WHERE domain IN ({marks}) ORDER BY domain",
+                        chunk,
+                    ).fetchall()
+                )
     records = []
     for row in rows:
         try:
