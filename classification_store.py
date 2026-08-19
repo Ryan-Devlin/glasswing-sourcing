@@ -3254,6 +3254,7 @@ def iter_scoring_rows(
     path: Path | str = CLASSIFICATION_DB,
     *,
     batch: int = 5000,
+    limit: int = 0,
 ):
     """Stream the columns diligence eligibility needs, and nothing else.
 
@@ -3273,10 +3274,14 @@ def iter_scoring_rows(
         "domain, company_name, description, excerpt, manual_override, "
         "fit_score, priority_score, routing_bucket"
     )
+    # Newest first and bounded. Rescoring is a Python call per row, so an
+    # unbounded pass over a quarter-million rows runs past the caller's
+    # subprocess timeout -- the failure mode this replaced an OOM with.
+    sql = f"SELECT {columns} FROM classifications ORDER BY updated_at DESC"
+    if limit:
+        sql += f" LIMIT {int(limit)}"
     with connect_store(path, read_only=True) as conn:
-        cursor = conn.execute(
-            f"SELECT {columns} FROM classifications ORDER BY domain"
-        )
+        cursor = conn.execute(sql)
         while True:
             rows = cursor.fetchmany(batch)
             if not rows:

@@ -26,7 +26,25 @@ import sys
 from pathlib import Path
 
 
-def eligible_domains(minimum_score: int) -> list[str]:
+def pool_domains() -> list[str]:
+    """Everything already in the candidate pool, straight from SQL.
+
+    This is the population Claude actually draws from, so it is never gated on
+    a score here and never rescored -- it is one indexed query regardless of
+    how large the corpus grows.
+    """
+    from classification_store import CLASSIFICATION_DB, connect_store
+
+    with connect_store(CLASSIFICATION_DB, read_only=True) as conn:
+        rows = conn.execute(
+            "SELECT domain FROM classifications "
+            "WHERE routing_bucket IN ('review','priority','comp') "
+            "   OR (manual_override IS NOT NULL AND manual_override <> '')"
+        ).fetchall()
+    return [str(row["domain"]) for row in rows if row["domain"]]
+
+
+def eligible_domains(minimum_score: int, rescue_limit: int) -> list[str]:
     """Domains that could clear the diligence bar, found in one cheap pass.
 
     Deliberately permissive. ``prepare_input`` re-derives everything from the
@@ -45,17 +63,13 @@ def eligible_domains(minimum_score: int) -> list[str]:
     from classification_store import iter_scoring_rows
     from filter import score_text
 
-    keep: list[str] = []
-    for row in iter_scoring_rows():
+    keep: list[str] = list(pool_domains())
+    if rescue_limit <= 0:
+        return keep
+    seen = set(keep)
+    for row in iter_scoring_rows(limit=rescue_limit):
         domain = str(row.get("domain") or "").strip()
-        if not domain:
-            continue
-        if str(row.get("manual_override") or "").strip():
-            keep.append(domain)
-            continue
-        if str(row.get("routing_bucket") or "") in ("review", "priority", "comp"):
-            # The pool Claude draws from. Never gate it on a score here.
-            keep.append(domain)
+        if not domain or domain in seen:
             continue
         stored = 0.0
         for column in ("fit_score", "priority_score"):
@@ -83,6 +97,15 @@ def main() -> int:
         help="CSV path to write the candidate frame to.",
     )
     parser.add_argument(
+        "--rescue-limit",
+        type=int,
+        default=int(os.getenv("CLAUDE_RESCUE_SCAN_ROWS", "25000")),
+        help=(
+            "How many recently-updated non-pool rows to rescore looking for "
+            "companies a stale stored score has buried. 0 disables the scan."
+        ),
+    )
+    parser.add_argument(
         "--minimum-score",
         type=int,
         default=int(os.getenv("CLAUDE_MINIMUM_SCORE", "60")),
@@ -96,7 +119,7 @@ def main() -> int:
     # the second loads full rows -- record_json and all -- for only those.
     # Loading everything to choose at most ten candidates is what got this
     # process OOM-killed once the corpus passed a quarter of a million rows.
-    domains = eligible_domains(args.minimum_score)
+    domains = eligible_domains(args.minimum_score, args.rescue_limit)
     if not domains:
         args.output.unlink(missing_ok=True)
         return 2
