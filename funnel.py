@@ -434,9 +434,19 @@ def build_daily_funnel(
         (
             "unscreened",
             "Not screened yet",
-            unscreened,
-            "Queued today but no verdict yet. Not a rejection -- these can "
-            "still come back as candidates.",
+            # Derived from the chain, not from the queue count passed in.
+            # The pool at this point holds both sources, but a measured
+            # "queued minus classified" only covers the CertStream run --
+            # zone survivors enter the queue under their own import id and
+            # are never classified against this run. Taking the measured
+            # value carried ~2,000 phantom survivors down the chain, so the
+            # funnel showed 2,022 candidates where there were 5.
+            #
+            # What is left after the verdicts we actually have is, by
+            # definition, what has no verdict yet.
+            0,
+            "Queued but no verdict yet. Not a rejection -- these can still "
+            "come back as candidates.",
             (),
         ),
         (
@@ -455,6 +465,27 @@ def build_daily_funnel(
             "company, not about the page.",
             tuple(unfit),
         ),
+    ]
+
+    # Everything the screening half accounts for: rows with a verdict,
+    # whichever way it went. Whatever the intake half leaves over and above
+    # this has not been screened.
+    accounted = (
+        sum(count for _, _, count in unreachable)
+        + sum(count for _, _, count in unfit)
+        + max(0, int(candidates or 0))
+    )
+    intake_dropped = sum(
+        max(0, int(dropped or 0))
+        for key, _, dropped, _, _ in plan
+        if key in ("junk", "source_rejected")
+    )
+    plan = [
+        (key, label,
+         max(0, top_line - intake_dropped - accounted) if key == "unscreened"
+         else dropped,
+         note_, reasons)
+        for key, label, dropped, note_, reasons in plan
     ]
 
     stages: list[Stage] = []
@@ -496,7 +527,8 @@ def build_daily_funnel(
 def partition_feed(
     *,
     observed: int,
-    junk_dropped: int,
+    junk_dropped: int = 0,
+    drops: dict[str, int] | None = None,
     queued: int,
     unscreened: int,
     no_verdict: int,
@@ -530,7 +562,22 @@ def partition_feed(
         remaining -= part
         return part
 
-    junk = take(junk_dropped)
+    # An untracked extension and a junk name are not the same event and must
+    # not share a tile. Measured live: of 108,563 intake drops, 108,551 were
+    # extensions outside the selected set and 12 were machine-generated
+    # names. Reporting that as "37,217 junk names" is why the row read as
+    # impossible -- it describes a filter nobody configured, when in fact it
+    # is the extension choice doing exactly what it was told.
+    tally = {str(k): max(0, int(v or 0)) for k, v in (drops or {}).items()}
+    if tally:
+        extension = take(tally.get("extension_not_tracked", 0))
+        junk = take(sum(
+            count for reason, count in tally.items()
+            if reason != "extension_not_tracked"
+        ))
+    else:
+        extension = 0
+        junk = take(junk_dropped)
     # Repeats are the residual of intake, not a counter: a domain already on
     # the queue is never written again, so nothing tallies it directly.
     queued_part = max(0, min(int(queued or 0), remaining))
@@ -544,6 +591,7 @@ def partition_feed(
 
     return {
         "observed": total,
+        "extension_not_selected": extension,
         "junk": junk,
         "repeats": repeats,
         "still_processing": still_processing,
@@ -554,7 +602,8 @@ def partition_feed(
 
 
 FEED_PARTS = (
-    ("junk", "Junk name or untracked extension"),
+    ("extension_not_selected", "Extension not selected"),
+    ("junk", "Junk or machine-generated name"),
     ("repeats", "Already seen before"),
     ("still_processing", "Still screening"),
     ("no_verdict", "Finished with no verdict"),

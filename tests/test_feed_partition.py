@@ -7,8 +7,8 @@ domain, while the guards' own work -- the largest share by far -- had no box.
 
 from funnel import FEED_PARTS, partition_feed
 
-PARTS = ("junk", "repeats", "still_processing", "no_verdict",
-         "candidates", "filtered_out")
+PARTS = ("extension_not_selected", "junk", "repeats", "still_processing",
+         "no_verdict", "candidates", "filtered_out")
 
 
 def total(split):
@@ -67,3 +67,44 @@ def test_every_part_has_a_tile_label():
     """A part with no label is a number that silently vanishes from the row
     and breaks the sum the user reads."""
     assert {key for key, _ in FEED_PARTS} == set(PARTS)
+
+
+def test_an_untracked_extension_is_not_reported_as_a_junk_name():
+    """They are different events and must not share a tile.
+
+    Measured live: of 108,563 intake drops, 108,551 were extensions outside
+    the selected set and 12 were machine-generated names. Reporting that as
+    "37,217 junk names" describes a filter nobody configured, when it is the
+    extension choice doing exactly what it was told -- which is why the row
+    read as impossible.
+    """
+    split = partition_feed(
+        observed=37_578,
+        drops={"extension_not_tracked": 37_205, "machine_generated": 12},
+        queued=361, unscreened=4, no_verdict=57, candidates=6,
+    )
+    assert split["extension_not_selected"] == 37_205
+    assert split["junk"] == 12
+    assert total(split) == 37_578
+
+
+def test_every_guard_that_is_not_the_extension_gate_counts_as_junk():
+    split = partition_feed(
+        observed=100,
+        drops={"machine_generated": 5, "motif_spam": 3, "templated_bulk": 2},
+        queued=90, unscreened=90, no_verdict=0, candidates=0,
+    )
+    assert split["extension_not_selected"] == 0
+    assert split["junk"] == 10
+    assert total(split) == 100
+
+
+def test_a_caller_with_only_a_total_still_gets_a_closed_partition():
+    """The older signature stays usable rather than silently reporting zero
+    for everything the guards removed."""
+    split = partition_feed(
+        observed=1_000, junk_dropped=600, queued=400,
+        unscreened=400, no_verdict=0, candidates=0,
+    )
+    assert split["junk"] == 600
+    assert total(split) == 1_000

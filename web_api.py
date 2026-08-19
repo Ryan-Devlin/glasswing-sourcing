@@ -1082,9 +1082,7 @@ def certstream_status():
             (run_domains if run_domains is not None
              else status.get("domains_received", 0)) or 0
         ),
-        junk_dropped=sum(
-            int(v or 0) for v in _drops.values()
-        ) if isinstance(_drops, dict) else 0,
+        drops=_drops if isinstance(_drops, dict) else {},
         queued=int((counts or {}).get("queued", 0) or 0),
         unscreened=int((counts or {}).get("unscreened", 0) or 0),
         no_verdict=int((counts or {}).get("no_verdict", 0) or 0),
