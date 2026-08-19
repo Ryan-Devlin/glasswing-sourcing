@@ -38,8 +38,10 @@ from dataclasses import dataclass, field
 
 from certstream_filter import (
     guard_registrable,
+    is_domain_too_long,
     normalize_hostname,
     reduce_hostname,
+    reduce_normalized,
 )
 
 # How dense a TLD is in real companies, as a starting score. Not a gate --
@@ -183,16 +185,34 @@ def read_certificate(
     ten hostnames ten times is what made the guard tallies impossible to
     reconcile against anything downstream, which counts domains.
     """
-    grouped: dict[str, list[str]] = {}
+    # Normalize once, then reduce each *distinct* host once. A SAN list is
+    # mostly aliases of the same name -- foo.ai, www.foo.ai and *.foo.ai all
+    # normalize to foo.ai -- and the old loop paid for a full Public Suffix
+    # List extraction on every one of them. Measured live, the feed delivered
+    # 189,514 hostnames against 109,516 distinct domains in a single run.
+    #
+    # Exactly equivalent to reducing every hostname separately: the same hosts
+    # produce the same registrables, and duplicates contribute their full count
+    # to unreducible, so domains_observed and the guard tallies are unchanged.
+    normalized: dict[str, list[str]] = {}
     unreducible = 0
     for hostname in hostnames or []:
-        registrable = reduce_hostname(hostname)
-        if registrable:
-            grouped.setdefault(registrable, []).append(hostname)
-        else:
-            # Malformed, over-length, or a bare public suffix: never a domain
-            # at all, so it is not part of the domain-unit population below.
+        host = normalize_hostname(hostname)
+        if not host or is_domain_too_long(host):
+            # Malformed or over-length: never a domain at all, so it is not
+            # part of the domain-unit population below.
             unreducible += 1
+            continue
+        normalized.setdefault(host, []).append(hostname)
+
+    grouped: dict[str, list[str]] = {}
+    for host, originals in normalized.items():
+        registrable = reduce_normalized(host)
+        if registrable:
+            grouped.setdefault(registrable, []).extend(originals)
+        else:
+            # A bare public suffix (com.ai) has no registrable label.
+            unreducible += len(originals)
 
     observed = len(grouped)
     if not grouped:

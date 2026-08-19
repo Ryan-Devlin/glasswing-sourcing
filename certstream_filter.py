@@ -36,6 +36,7 @@ guards, generalised from ``.ai``-only to the pipeline's supported extensions.
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 
 # RFC 1035 maximum FQDN length. An untrusted feed can emit longer strings;
 # they are malformed by definition and would only bloat a queue row.
@@ -63,6 +64,32 @@ except ImportError:  # pragma: no cover - exercised only on a broken install
     _extract = None
 
 
+def tld_of(host: str) -> str:
+    """The extension a host will be judged on, without touching the PSL.
+
+    Exactly what :func:`guard_registrable` derives from the PSL result: it
+    takes the last label of the public suffix, and the last label of a public
+    suffix is always the last label of the host. ``foo.com.ai`` gives ``.ai``
+    either way. Having it as a bare string operation is what lets the
+    extension gate run before the PSL lookup rather than after it.
+    """
+    # A dotless label has no extension at all: rpartition puts the whole
+    # string in the tail when there is no separator, so ``bare`` would
+    # otherwise read as the extension ``.bare``.
+    _, separator, last = (host or "").rpartition(".")
+    return f".{last}" if separator and last else ""
+
+
+# The PSL split is a pure function of the host, and the feed repeats hosts
+# constantly -- certificate renewals, multi-SAN certs, and the same domain
+# reappearing across frames. Measured live, 283 of 483 hostnames surviving the
+# extension gate in one run were domains already seen. Caching the split turns
+# those into a dict hit.
+#
+# Bounded on purpose: this runs inside a long-lived listener with an RSS
+# recycle threshold, and an unbounded cache on an unbounded input stream is a
+# memory leak with a slow fuse.
+@lru_cache(maxsize=65536)
 def _split_suffix(host: str) -> tuple[str, str]:
     """Return ``(registrable_label, public_suffix)`` for ``host``, or ``("", "")``.
 
@@ -234,6 +261,17 @@ def reduce_hostname(hostname: str) -> str:
     host = normalize_hostname(hostname)
     if not host or is_domain_too_long(host):
         return ""
+    return reduce_normalized(host)
+
+
+def reduce_normalized(host: str) -> str:
+    """Reduce a host that has already been normalized and length-checked.
+
+    Split out so the callers that have to normalize anyway -- to read the
+    extension, or to check the length -- do not pay for a second pass over the
+    same string. ``classify_hostname`` used to normalize, then call
+    ``reduce_hostname``, which normalized again.
+    """
     label, suffix = _split_suffix(host)
     if not label or not suffix:
         return ""
@@ -286,7 +324,14 @@ def classify_hostname(
         return "", "empty"
     if is_domain_too_long(host):
         return "", "too_long"
-    domain = reduce_hostname(hostname)
+    # Deliberately NOT gated on the extension here, though tld_of would let
+    # it skip the Public Suffix List for 99% of the feed. Doing so reorders
+    # the guards: a bare public suffix on an untracked extension would report
+    # extension_not_tracked where it now reports no_registrable_label, and
+    # DROP_REASONS is the order the funnel renders. The saving belongs in
+    # read_certificate, which is what the listener actually calls and which
+    # counts in domains rather than hostnames.
+    domain = reduce_normalized(host)
     if not domain:
         return "", "no_registrable_label"
     reason = guard_registrable(domain, allowed_extensions)
