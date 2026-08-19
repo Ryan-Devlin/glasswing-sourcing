@@ -26,28 +26,41 @@ import sys
 from pathlib import Path
 
 
-def pool_domains() -> list[str]:
-    """Everything already in the candidate pool, straight from SQL.
+def pool_domains(limit: int) -> list[str]:
+    """The best un-diligenced candidates, straight from SQL.
 
-    This is the population Claude actually draws from, so it is never gated on
-    a score here and never rescored -- it is one indexed query regardless of
-    how large the corpus grows.
+    Three things happen here that used to happen after loading the corpus:
+
+    * **Already-diligenced rows are excluded.** ``prepare_input`` drops them
+      anyway, so carrying them through the CSV is pure weight.
+    * **Ordered by score.** The classifier only ever calls at most a hundred,
+      so it needs the top of the pool, not all of it.
+    * **Bounded.** Passing every candidate in history produced a 454 MB CSV
+      that the classifier then loaded with pandas -- putting memory back where
+      the OOM fix had just moved it away from.
+
+    Manual overrides are kept regardless of score or diligence state, since an
+    operator asking for a domain outranks all of this.
     """
     from classification_store import CLASSIFICATION_DB, connect_store
 
     with connect_store(CLASSIFICATION_DB, read_only=True) as conn:
         rows = conn.execute(
-            "SELECT domain FROM classifications "
-            # manual_override is an integer column; comparing it to '' is a
-            # type error on Postgres, and str()-ing it in Python makes 0 read
-            # as truthy, so every row would have looked overridden.
-            "WHERE routing_bucket IN ('review','priority','comp') "
-            "   OR COALESCE(manual_override, 0) <> 0"
+            "SELECT c.domain FROM classifications c "
+            "LEFT JOIN claude_diligence g ON g.domain = c.domain "
+            "WHERE (c.routing_bucket IN ('review','priority','comp') "
+            "       OR COALESCE(c.manual_override, 0) <> 0) "
+            "  AND (g.domain IS NULL OR COALESCE(c.manual_override, 0) <> 0) "
+            "ORDER BY COALESCE(c.priority_score, 0) DESC, "
+            "         COALESCE(c.fit_score, 0) DESC "
+            f"LIMIT {int(limit)}"
         ).fetchall()
     return [str(row["domain"]) for row in rows if row["domain"]]
 
 
-def eligible_domains(minimum_score: int, rescue_limit: int) -> list[str]:
+def eligible_domains(
+    minimum_score: int, rescue_limit: int, pool_limit: int
+) -> list[str]:
     """Domains that could clear the diligence bar, found in one cheap pass.
 
     Deliberately permissive. ``prepare_input`` re-derives everything from the
@@ -66,7 +79,7 @@ def eligible_domains(minimum_score: int, rescue_limit: int) -> list[str]:
     from classification_store import iter_scoring_rows
     from filter import score_text
 
-    keep: list[str] = list(pool_domains())
+    keep: list[str] = list(pool_domains(pool_limit))
     if rescue_limit <= 0:
         return keep
     seen = set(keep)
@@ -100,6 +113,16 @@ def main() -> int:
         help="CSV path to write the candidate frame to.",
     )
     parser.add_argument(
+        "--pool-limit",
+        type=int,
+        default=int(os.getenv("CLAUDE_POOL_ROWS", "2000")),
+        help=(
+            "How many top-scoring un-diligenced candidates to hand the "
+            "classifier. It calls at most a hundred, so this only needs to be "
+            "comfortably above that."
+        ),
+    )
+    parser.add_argument(
         "--rescue-limit",
         type=int,
         default=int(os.getenv("CLAUDE_RESCUE_SCAN_ROWS", "25000")),
@@ -122,7 +145,9 @@ def main() -> int:
     # the second loads full rows -- record_json and all -- for only those.
     # Loading everything to choose at most ten candidates is what got this
     # process OOM-killed once the corpus passed a quarter of a million rows.
-    domains = eligible_domains(args.minimum_score, args.rescue_limit)
+    domains = eligible_domains(
+        args.minimum_score, args.rescue_limit, args.pool_limit
+    )
     if not domains:
         args.output.unlink(missing_ok=True)
         return 2
