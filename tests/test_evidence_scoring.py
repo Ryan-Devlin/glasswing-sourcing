@@ -133,3 +133,68 @@ def test_a_long_page_with_no_fit_evidence_scores_within_the_coverage_floor():
 def test_extraction_failure_is_the_only_way_to_score_zero():
     assert score_text("")[0] == 0
     assert score_text("   ")[0] == 0
+
+
+def test_former_role_at_employer_is_read_as_pedigree():
+    """The phrasing team pages actually use. The pattern set only matched the
+    adjacent forms -- "Ex-Meta", "former Meta" -- so "Former Director of
+    Product at Meta", which is how almost every team page writes it, produced
+    no flag at all. Real example: verdicore.ai, whose own description named
+    two Meta directors and one ex-Googler and scored as having no pedigree.
+    """
+    flags = founder_green_flags(
+        "The Team Behind Verdicore. Co-Founder and CEO Omry Pruzan Former "
+        "Director of Product at Meta and Lyft, Ex-Google. Co-Founder and CTO "
+        "Miri Pruzan Former Director of Engineering at Meta."
+    )
+    labels = {flag["label"] for flag in flags}
+    assert "Ex-Meta" in labels
+    assert "Ex-Google" in labels
+
+
+def test_employers_founders_actually_come_from_are_in_the_vocabulary():
+    """The list predated several of them, most glaringly "facebook" without
+    "meta" -- Meta renamed in 2021, so every current team page says Meta."""
+    for employer, expected in (
+        ("Meta", "Ex-Meta"),
+        ("OpenAI", "Ex-Openai"),
+        ("Anthropic", "Ex-Anthropic"),
+        ("DeepMind", "Ex-Deepmind"),
+        ("Databricks", "Ex-Databricks"),
+        ("Snowflake", "Ex-Snowflake"),
+        ("Waymo", "Ex-Waymo"),
+    ):
+        flags = founder_green_flags(
+            f"Our founder previously worked at {employer} on core "
+            "infrastructure before starting this company."
+        )
+        assert expected in {flag["label"] for flag in flags}, employer
+
+
+def test_a_relationship_is_not_a_job():
+    """The counterweight to reading "former <role> at <employer>": the same
+    shape covers "former customers at Meta" and "a former partner at Google
+    Ventures", neither of which says anyone worked there. The affiliation
+    block already claimed to exclude customer relationships and had no
+    pattern for one -- harmless until this phrasing was read as pedigree.
+    """
+    for text in (
+        "Our founder works with former customers at Meta and Google.",
+        "Our founder is a former partner at Google Ventures.",
+        "Our founding team supports former clients at Snowflake.",
+        "Our platform integrates with Snowflake, Databricks and OpenAI.",
+        "Built on Databricks. Powered by OpenAI. Our founders love data.",
+    ):
+        assert founder_green_flags(text) == [], text
+
+
+def test_words_that_merely_start_with_an_employer_name_are_not_pedigree():
+    """"meta" is the most ambiguous name in the vocabulary. Boundary matching
+    handles metadata and metaverse; the founder gate has to handle the rest.
+    """
+    for text in (
+        "Our founder built the metadata layer and our team ships metaverse assets.",
+        "Our founders published a meta-analysis of clinical outcomes.",
+        "Our founding team runs meta-learning experiments at scale.",
+    ):
+        assert founder_green_flags(text) == [], text

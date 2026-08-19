@@ -575,12 +575,23 @@ BAD_US_SCHOOLS = ["university of phoenix", "devry university", "strayer universi
                   "national american university", "robert morris university", "south university",
                   "trident university international", "westwood college"] 
 
-STRONG_WORK_EXPERIENCE = ["google", "microsoft", "amazon", "facebook", "apple", "netflix",
+# The list was written before several of the employers a 2026 founder is most
+# likely to have come from existed under their current name -- most glaringly
+# "facebook" without "meta", so "Former Director of Engineering at Meta" read
+# as no pedigree at all. Only ``founder_green_flags`` turns these into score,
+# and only inside a founder-context sentence that also matches an employment
+# pattern ("ex-", "previously at", "worked at"), which is what makes it safe
+# to carry a word as ambiguous as "meta": boundary matching already rejects
+# "metadata" and "metaverse", and the founder gate rejects the rest.
+STRONG_WORK_EXPERIENCE = ["google", "microsoft", "amazon", "facebook", "meta",
+                          "apple", "netflix",
                           "linkedin", "twitter", "uber", "airbnb", "salesforce",
                           "adobe", "intel", "nvidia", "ibm", "oracle", "dell",
                           "hp", "cisco", "vmware", "sap", "qualcomm", "tesla",
                           "space x", "palantir", "stripe", "square", "snap",
-                          "reddit", "dropbox", "slack", "zoom"]
+                          "reddit", "dropbox", "slack", "zoom",
+                          "openai", "anthropic", "deepmind", "databricks",
+                          "snowflake", "waymo"]
 
 NON_US_COUNTRIES = [
     "afghanistan", "albania", "algeria", "andorra", "angola",
@@ -1354,12 +1365,34 @@ def founder_green_flags(text: str) -> list[dict[str, str]]:
                 "certified partner",
                 "member of",
                 "powered by",
+                # This block already claimed to exclude customer
+                # relationships and had no pattern for one. It went unnoticed
+                # while the only employment pattern was the adjacent
+                # "Ex-Meta" form, which such a sentence never matches; once
+                # "former <role> at <employer>" was read as pedigree, "former
+                # customers at Meta" and "a former partner at Google
+                # Ventures" both became "Ex-" claims about people who never
+                # worked there. Singular covers the plural by substring.
+                "former customer",
+                "former client",
+                "former partner",
+                "former user",
+                "former vendor",
+                "former reseller",
+                "former investor",
             )
             if any(pattern in lowered for pattern in affiliation_patterns):
                 continue
             escaped = re.escape(employer_lower)
             employment_patterns = (
                 rf"\b(?:ex|former)[ -]?{escaped}\b",
+                # "Former Director of Product at Meta" -- by far the most
+                # common way a team page states pedigree, and the adjacent
+                # form above never matched it, so the pattern set was blind
+                # to the phrasing it most needed to read. Bounded to one
+                # sentence and to a short span so it cannot reach across a
+                # list into an unrelated company name.
+                rf"\b(?:ex|former)\b[^.]{{0,60}}?\bat\s+{escaped}\b",
                 rf"\b(?:formerly|previously)\b.{{0,70}}\b{escaped}\b",
                 rf"\b(?:worked|served|led|built|engineered|researched)\b"
                 rf".{{0,50}}\b(?:at|for|with)\s+{escaped}\b",
