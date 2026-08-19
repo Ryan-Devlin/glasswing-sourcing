@@ -704,6 +704,22 @@ tbody tr:hover {
   text-transform: capitalize;
   font-size: 11px;
 }
+.pill.signal {
+  /* Labels are proper nouns -- "Ex-Google", "MIT team" -- so this one opts
+     out of .pill's capitalize, which would otherwise restyle them. */
+  text-transform: none;
+  background: #eef1f7;
+  color: #33416b;
+  white-space: nowrap;
+}
+.signal-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+.cell-website_green_flags {
+  min-width: 120px;
+}
 .pill.priority {
   background: #d9f4e8;
   color: #116447;

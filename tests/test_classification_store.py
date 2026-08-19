@@ -1278,3 +1278,143 @@ def test_paginated_query_returns_persisted_green_flags(tmp_path):
         ["priority"], path=database
     )
     assert rows[0]["website_green_flags"][0]["label"] == "Repeat founder"
+
+
+def test_an_ordinary_screened_row_carries_its_own_green_flags(tmp_path):
+    """The gap this closes: flags reached the store only through a positive
+    transition -- tracking, a human yes, a Claude keep -- so an ordinary
+    screened row stored an empty list. Confirmed live on a review page: 0 of
+    100 rows had a single flag, while their own descriptions named
+    "Ex-Google" and "Former Director of Engineering at Meta"."""
+    database = tmp_path / "classifications.sqlite3"
+    upsert_classifications(pd.DataFrame([{
+        "domain": "verdicore.ai",
+        "page_title": "Home | Verdicore.AI",
+        "homepage_excerpt": (
+            "The Team Behind Verdicore. Co-Founder and CEO Omry Pruzan "
+            "Former Director of Product at Meta and Lyft, Ex-Google."
+        ),
+        "routing_bucket": "review",
+        "fit_score": 34,
+    }]), path=database)
+
+    row = query_classifications_by_domains(["verdicore.ai"], path=database)[0]
+    assert [flag["label"] for flag in row["website_green_flags"]] == ["Ex-Google"]
+    # The specific employer, not the category. "Ex-big tech team" is the one
+    # thing this column must not say.
+    assert row["website_green_flags"][0]["type"] == "ex_big_tech"
+    assert "Ex-Google" in row["website_green_flags"][0]["evidence"]
+    assert row["green_flags_checked_at"]
+
+
+def test_the_paged_table_query_returns_the_flags_too(tmp_path):
+    """The list endpoint, not just the per-domain one -- the table reads the
+    paged query, so a flag stored but not projected there is invisible."""
+    database = tmp_path / "classifications.sqlite3"
+    upsert_classifications(pd.DataFrame([{
+        "domain": "paged.ai", "routing_bucket": "review",
+        "homepage_excerpt": (
+            "Our cofounder was previously at Nvidia building AI "
+            "infrastructure for enterprise customers."
+        ),
+    }]), path=database)
+
+    rows = classification_store.query_classifications(
+        ["review"], path=database
+    )
+    assert [flag["label"] for flag in rows[0]["website_green_flags"]] == ["Ex-Nvidia"]
+
+
+def test_evidence_beyond_the_stored_excerpt_still_produces_a_flag(tmp_path):
+    """Why the derivation sits before compaction rather than after it.
+
+    Only 1,600 characters of the excerpt survive into storage, but the record
+    arrives holding up to 12,000, and a team section is usually well down the
+    page. Deriving from the stored copy -- which is what the existing
+    post-hoc enricher does -- cannot see this founder at all.
+    """
+    database = tmp_path / "classifications.sqlite3"
+    filler = "We build enterprise AI decision infrastructure. " * 80
+    assert len(filler) > 1600
+    upsert_classifications(pd.DataFrame([{
+        "domain": "deep.ai", "routing_bucket": "review",
+        "homepage_excerpt": (
+            filler
+            + "Our founder was previously at Nvidia researching "
+            + "accelerated computing."
+        ),
+    }]), path=database)
+
+    row = query_classifications_by_domains(["deep.ai"], path=database)[0]
+    assert [flag["label"] for flag in row["website_green_flags"]] == ["Ex-Nvidia"]
+
+
+def test_flags_already_on_the_record_are_never_overwritten(tmp_path):
+    """A Claude review's flags outrank a regex pass over the same page."""
+    database = tmp_path / "classifications.sqlite3"
+    supplied = [{
+        "type": "prior_exit",
+        "label": "Prior founder exit",
+        "evidence": "Founder sold her previous company to Stripe in 2023.",
+        "source": "https://claude.example/review",
+    }]
+    upsert_classifications(pd.DataFrame([{
+        "domain": "reviewed.ai", "routing_bucket": "priority",
+        "homepage_excerpt": "Our founder previously worked at Google.",
+        "website_green_flags": supplied,
+    }]), path=database)
+
+    row = query_classifications_by_domains(["reviewed.ai"], path=database)[0]
+    assert [flag["type"] for flag in row["website_green_flags"]] == ["prior_exit"]
+
+
+def test_looking_and_finding_nothing_is_recorded_as_having_looked(tmp_path):
+    """Distinguishable from never having looked, which is what lets a later
+    backfill know which rows it still needs to visit."""
+    database = tmp_path / "classifications.sqlite3"
+    upsert_classifications(pd.DataFrame([{
+        "domain": "plain.ai", "routing_bucket": "review",
+        "homepage_excerpt": "A simple landing page about our new product.",
+    }]), path=database)
+
+    row = query_classifications_by_domains(["plain.ai"], path=database)[0]
+    assert row["website_green_flags"] == []
+    assert row["green_flags_checked_at"]
+
+
+def test_a_row_with_no_text_at_all_is_not_marked_as_checked(tmp_path):
+    """An unreachable domain has no page to read, so claiming it was screened
+    for founder evidence would be a false negative dressed as a real one."""
+    database = tmp_path / "classifications.sqlite3"
+    upsert_classifications(pd.DataFrame([{
+        "domain": "unreachable.ai", "routing_bucket": "insufficient",
+    }]), path=database)
+
+    row = query_classifications_by_domains(["unreachable.ai"], path=database)[0]
+    assert row["website_green_flags"] == []
+    assert row["green_flags_checked_at"] == ""
+
+
+def test_a_rescore_does_not_erase_the_flags_it_reloaded(tmp_path):
+    """frame_from_store returns website_green_flags as a real list, and a
+    rescore feeds those rows straight back into upsert_classifications. The
+    frame path renders values with str(), so the flags arrived as a Python
+    repr, were stored as a truncated string, and read back as nothing --
+    every rescore quietly erased the flags of every company that had any.
+    """
+    database = tmp_path / "classifications.sqlite3"
+    upsert_classifications(pd.DataFrame([{
+        "domain": "rescored.ai", "routing_bucket": "review",
+        "homepage_excerpt": (
+            "Our founder previously worked at Nvidia building AI "
+            "infrastructure for enterprise customers."
+        ),
+    }]), path=database)
+    before = query_classifications_by_domains(["rescored.ai"], path=database)[0]
+    assert before["website_green_flags"]
+
+    reloaded = classification_store.frame_from_store(database)
+    upsert_classifications(reloaded, path=database)
+
+    after = query_classifications_by_domains(["rescored.ai"], path=database)[0]
+    assert after["website_green_flags"] == before["website_green_flags"]

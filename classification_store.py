@@ -759,6 +759,54 @@ def normalized_record(record: dict[str, object]) -> dict[str, object]:
         fit_score=fit_score,
         confidence_score=confidence_score,
     )
+    # Evidence-backed flags were only ever derived for companies an analyst
+    # had already tracked, so every screened row stored an empty list --
+    # confirmed live, 0 of 100 rows on a review page carried a single flag
+    # while their own descriptions named "Ex-Google" and "Former Director of
+    # Engineering at Meta". Derived here instead, for three reasons: this is
+    # the one funnel every writer passes through, it runs *before*
+    # compaction, so it reads the full ~12,000-character homepage excerpt
+    # rather than the 1,600 that survive into storage, and it costs about a
+    # millisecond of regex per persisted row against a screening rate of a
+    # few hundred a minute.
+    #
+    # It only ever fills a gap. A flag list already on the record -- from a
+    # Claude review, or an earlier enrichment -- is left exactly as it is.
+    #
+    # Read from ``record`` rather than ``plain``: ``_plain`` renders a list
+    # with ``str()``, so a rescore -- which feeds ``frame_from_store``'s rows
+    # straight back in, flags column included -- arrived here holding a
+    # Python repr. That was stored as a truncated string and read back as
+    # nothing, so every rescore silently erased the flags of every company
+    # that had any. Normalizing here also means the stored value is always a
+    # canonical list, whatever shape the writer passed.
+    existing_flags = normalize_green_flags(record.get("website_green_flags"))
+    if existing_flags:
+        plain["website_green_flags"] = existing_flags
+    else:
+        # Local import keeps the scoring module out of the store's import
+        # graph, matching _enrich_green_flags_in_connection.
+        from filter import deal_green_flags
+
+        flag_text = " ".join(clean(value) for value in (
+            plain.get("page_title", ""),
+            plain.get("meta_description", ""),
+            plain.get("homepage_excerpt", ""),
+            plain.get("venture_founder_evidence", ""),
+            plain.get("rule_evidence", ""),
+        ) if clean(value))
+        if flag_text:
+            derived = deal_green_flags(flag_text[:20000])
+            source = clean(plain.get("final_url", "")) or f"https://{domain}"
+            for flag in derived:
+                if flag.get("source") == "website":
+                    flag["source"] = source
+            # Recorded even when empty: "we looked and found nothing" and "we
+            # never looked" are different states, and only the timestamp
+            # tells them apart.
+            plain["website_green_flags"] = normalize_green_flags(derived)
+            plain["green_flags_checked_at"] = now
+
     raw_json = json.dumps(
         compact_classification_record(plain),
         ensure_ascii=False,

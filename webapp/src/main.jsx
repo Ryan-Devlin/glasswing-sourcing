@@ -726,6 +726,35 @@ const companyCols = [
   },
   { key: "fit_score", label: "Score", sortable: true },
   {
+    // Evidence-backed flags the screener already found in the page: the
+    // specific label, not a category, because "Ex-Google" and "MIT team" are
+    // the whole point and "Ex-big tech team" is not. Every pill carries the
+    // sentence it came from in its tooltip -- a pedigree claim with no
+    // evidence trail is not a signal anyone should act on. Not sortable:
+    // ordering happens in SQL, and these live inside record_json.
+    key: "website_green_flags",
+    label: "Signals",
+    render: (r) => {
+      const flags = Array.isArray(r.website_green_flags)
+        ? r.website_green_flags
+        : [];
+      if (!flags.length) return <span className="muted">—</span>;
+      return (
+        <span className="signal-pills">
+          {flags.map((flag, index) => (
+            <span
+              key={`${flag.type || "flag"}-${index}`}
+              className="pill signal"
+              title={flag.evidence || flag.label || ""}
+            >
+              {flag.label}
+            </span>
+          ))}
+        </span>
+      );
+    },
+  },
+  {
     key: "claude_decision",
     label: "Claude review",
     render: (r) =>
