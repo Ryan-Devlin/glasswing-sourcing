@@ -1242,7 +1242,11 @@ def query_source_classifications(
         rows = conn.execute(
             "SELECT domain,company_name,final_url,description,routing_bucket,"
             "routing_reason,fit_score,priority_score,thesis_pillar,"
-            "content_source,manual_override,manual_override_target,updated_at FROM classifications "
+            "content_source,manual_override,manual_override_target,updated_at,"
+            # When we first screened it, which is what "date added"
+            # means. updated_at is refreshed by every re-screen, so a
+            # column built on it dates every record as today.
+            "classified_at FROM classifications "
             f"WHERE ({source_clauses}) AND routing_bucket IN ({bucket_marks}) "
             f"ORDER BY {order} LIMIT ? OFFSET ?",
             params,

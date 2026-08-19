@@ -34,7 +34,9 @@ import "./styles.css";
 import "./polish.css";
 import glasswingLogo from "../../assets/glasswing_logo.svg";
 import glasswingMark from "../../assets/glasswing_mark.png";
-import { dealAgeLabel, formatCount as fmt, pageCount } from "./domain";
+import {
+  addedAtValue, daysAgoLabel, dealAgeLabel, formatCount as fmt, pageCount,
+} from "./domain";
 
 const NAV = [
   ["home", "Home", Home],
@@ -691,6 +693,16 @@ function BucketTabs({ value, onChange, tabs = BUCKET_TABS }) {
     </div>
   );
 }
+const ADDED_COLUMN = {
+  key: "added_at",
+  label: "Date added",
+  sortable: false,
+  render: (row) => (
+    <span className="added-at" title={addedAtValue(row) || "unknown"}>
+      {daysAgoLabel(addedAtValue(row))}
+    </span>
+  ),
+};
 const companyCols = [
   { key: "company_name", label: "Company", sortable: true },
   {
@@ -735,6 +747,7 @@ const companyCols = [
       );
     },
   },
+  ADDED_COLUMN,
   { key: "description", label: "Description" },
 ];
 function LabelModal({ target, onClose, onSaved }) {
@@ -1600,6 +1613,7 @@ function CompaniesTable({ showRunScope = false }) {
                 ),
               },
               { key: "rating", label: "Glasswing score" },
+              ADDED_COLUMN,
             ]}
             onReject={admin ? reject : requestLogin}
           />
@@ -2004,6 +2018,7 @@ function CorpusCompanies({ kind }) {
               ),
             },
             { key: "rating", label: "Glasswing score" },
+              ADDED_COLUMN,
           ]}
           onReject={reject}
         />
@@ -2251,6 +2266,7 @@ function FormDPage() {
           { key: "investors", label: "Investors" },
           { key: "reason", label: "Signal", sortable: false, render: signal },
           { key: "filing_url", label: "Filing", sortable: false, render: (row) => <a href={row.filing_url} target="_blank" rel="noreferrer">Open SEC filing</a> },
+          ADDED_COLUMN,
         ]} />
       </>}
     </>
@@ -2818,7 +2834,15 @@ function ClaudeQueuePage() {
               </span>
             ) : "Legacy review",
           },
-            { key: "requested_at", label: "Requested" },
+            {
+              key: "requested_at",
+              label: "Requested",
+              render: (row) => (
+                <span title={row.requested_at || "unknown"}>
+                  {daysAgoLabel(row.requested_at)}
+                </span>
+              ),
+            },
             { key: "error", label: "Error" },
             {
               key: "retry",
