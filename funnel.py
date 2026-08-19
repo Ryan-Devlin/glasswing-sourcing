@@ -207,3 +207,47 @@ def biggest_losses(funnel: Funnel, limit: int = 3) -> list[dict[str, object]]:
         }
         for s in ranked[:limit]
     ]
+
+
+# The screening guards in the order route_company applies them. Each one only
+# ever sees what the previous passed, which is what makes this a funnel rather
+# than a set of independent tallies. Reasons not listed here are appended in
+# whatever order they arrive, so a new guard shows up on the page without
+# anyone editing this list -- it just sorts last until it is placed.
+SCREENING_ORDER = (
+    ("parked_or_for_sale", "Parked or for sale"),
+    ("generic_hosting_or_registrar_placeholder", "Registrar placeholder page"),
+    ("inaccessible_site", "Site would not load"),
+    ("website_never_reachable_after_max_attempts", "Never reachable after retries"),
+    ("website_unavailable", "Website unavailable"),
+    ("predominantly_non_english", "Predominantly non-English"),
+    ("confirmed_non_us", "Confirmed non-US"),
+    ("consumer_b2c_product", "Consumer / B2C product"),
+    ("agency_or_consultancy", "Agency or consultancy"),
+    ("media_newsletter_or_aggregator", "Media, newsletter or aggregator"),
+    ("hosting_or_domain_registration_business", "Hosting or domain registrar"),
+    ("investor_or_venture_studio", "Investor or venture studio"),
+    ("commodity_ai_wrapper_or_service", "Commodity AI wrapper"),
+    ("human_ground_truth_no", "Human said no"),
+    ("substantive_no_fit_evidence", "Substantive site, no thesis fit"),
+    ("no_clear_enterprise_or_glasswing_fit", "No clear enterprise fit"),
+)
+
+
+def order_screening_reasons(counts: dict[str, int]) -> list[tuple[str, str, int]]:
+    """(reason, label, count) in guard order, with unknown reasons appended.
+
+    Keeps the page honest when the screening script grows a guard: it appears
+    at the end rather than being silently dropped from the funnel, which is
+    how a step can remove domains without anyone being able to see it.
+    """
+    placed = []
+    seen = set()
+    for reason, label in SCREENING_ORDER:
+        if counts.get(reason):
+            placed.append((reason, label, int(counts[reason])))
+            seen.add(reason)
+    for reason, count in sorted(counts.items(), key=lambda kv: -kv[1]):
+        if reason not in seen and count:
+            placed.append((reason, reason.replace("_", " ").capitalize(), int(count)))
+    return placed

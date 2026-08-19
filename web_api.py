@@ -37,7 +37,9 @@ for source in (ROOT, AI_SRC, ZONE_SRC):
     if str(source) not in sys.path:
         sys.path.insert(0, str(source))
 
-from funnel import Throughput, biggest_losses, build_funnel
+from funnel import (
+    Throughput, biggest_losses, build_funnel, order_screening_reasons,
+)
 from ai_search.og_bridge import enqueue_for_screening
 from ai_search.domains import normalize_any_domain
 from ai_search.database import (
@@ -1058,31 +1060,57 @@ def funnel_breakdown():
         # "nothing was filtered", so the page is told to say so instead.
         guard_drops = {}
 
-    counts = {k: 0 for k in (
-        "queued", "unscreened", "ghost", "insufficient", "rejected", "candidates",
-    )}
+    # Verdicts come from the classification store, not the queue's own
+    # classification column. Measured live: 100 of this run's rows were marked
+    # complete with that column empty, so a funnel built on it counted them as
+    # having survived every screening step and reported 100 candidates where
+    # there were 5. The store is the authoritative record; the queue column is
+    # a best-effort copy written at mark_success time.
+    queued = classified = candidates = reviewed = kept = 0
+    reason_counts: dict[str, int] = {}
     queue_live = False
     conn = None
     try:
         conn = connect_pipeline_db()
+        queued = int(conn.execute(
+            "SELECT count(*) AS n FROM pipeline.domains WHERE first_seen_run_id = ?",
+            (run_id,),
+        ).fetchone()["n"] or 0)
+        for row in conn.execute(
+            """
+            SELECT COALESCE(NULLIF(x.routing_reason, ''), '(unclassified)') AS reason,
+                   COALESCE(x.routing_bucket, '') AS bucket,
+                   count(*) AS n
+            FROM pipeline.domains d
+            LEFT JOIN public.classifications x ON x.domain = d.domain
+            WHERE d.first_seen_run_id = ?
+            GROUP BY 1, 2
+            """,
+            (run_id,),
+        ):
+            reason = str(row["reason"])
+            bucket = str(row["bucket"])
+            n = int(row["n"] or 0)
+            if reason == "(unclassified)":
+                continue
+            classified += n
+            if bucket in ("review", "priority", "comp"):
+                candidates += n
+            else:
+                reason_counts[reason] = reason_counts.get(reason, 0) + n
         row = conn.execute(
             """
-            SELECT
-              count(*) AS queued,
-              sum(CASE WHEN status IN ('pending','processing')
-                       THEN 1 ELSE 0 END) AS unscreened,
-              sum(CASE WHEN classification='ghost' THEN 1 ELSE 0 END) AS ghost,
-              sum(CASE WHEN classification IN ('insufficient','coming_soon')
-                       THEN 1 ELSE 0 END) AS insufficient,
-              sum(CASE WHEN classification='reject' THEN 1 ELSE 0 END) AS rejected,
-              sum(CASE WHEN classification IN ('review','priority','comp')
-                       THEN 1 ELSE 0 END) AS candidates
-            FROM domains WHERE first_seen_run_id = ?
+            SELECT count(*) AS reviewed,
+                   sum(CASE WHEN g.decision='KEEP' THEN 1 ELSE 0 END) AS kept
+            FROM pipeline.domains d
+            JOIN public.claude_diligence g ON g.domain = d.domain
+            WHERE d.first_seen_run_id = ?
             """,
             (run_id,),
         ).fetchone()
         if row:
-            counts = {k: int(row[k] or 0) for k in counts}
+            reviewed = int(row["reviewed"] or 0)
+            kept = int(row["kept"] or 0)
         queue_live = True
     except Exception:
         pass
@@ -1090,9 +1118,9 @@ def funnel_breakdown():
         if conn is not None:
             conn.close()
 
-    # Guards first, in the order they run, then the queue steps. Composed as a
-    # list so the page renders however many steps there are rather than a
-    # hand-maintained set that drifts away from the code.
+    # Intake guards, then the queue boundary, then every screening guard that
+    # actually fired, then Claude. Composed as a list so the page renders
+    # however many steps the filter has rather than a hand-maintained set.
     steps: list[tuple[str, str, int, str]] = [
         (
             reason,
@@ -1103,23 +1131,34 @@ def funnel_breakdown():
         for reason in DROP_REASONS
         if reason in guard_drops or reason == "extension_not_tracked"
     ]
-
     survivors_after_guards = max(0, observed - sum(guard_drops.values()))
     steps.append((
         "repeat",
         "Already seen — not a new domain",
-        max(0, survivors_after_guards - counts["queued"]),
+        max(0, survivors_after_guards - queued),
         "A certificate renewal or another SAN for a domain already queued.",
     ))
+    # Anything queued without a verdict leaves here explicitly. Letting it
+    # fall through is what inflated the bottom of the funnel.
+    steps.append((
+        "unclassified",
+        "No verdict yet",
+        max(0, queued - classified),
+        "Queued but not screened, still in flight, or the crawl produced no verdict.",
+    ))
     steps += [
-        ("unscreened", "Not screened yet", counts["unscreened"],
-         "Queued but not fetched yet."),
-        ("ghost", "Nothing served at the domain", counts["ghost"], ""),
-        ("insufficient", "Too thin to judge", counts["insufficient"],
-         "Parked, placeholder, or almost no content."),
-        ("rejected", "Hard-denied by a rule", counts["rejected"],
-         "Non-US, non-English, agency, consumer, wrapper, and the rest."),
+        (reason, label, count, "")
+        for reason, label, count in order_screening_reasons(reason_counts)
     ]
+    steps.append((
+        "not_diligenced",
+        "Not sent to Claude yet",
+        max(0, candidates - reviewed),
+        "Reached the candidate pool but no diligence call has run.",
+    ))
+    steps.append((
+        "claude_reject", "Claude said REJECT", max(0, reviewed - kept), "",
+    ))
 
     funnel = build_funnel(
         "pipeline", observed, steps,
@@ -1162,7 +1201,8 @@ def funnel_breakdown():
         "biggest_losses": biggest_losses(funnel),
         "hostnames_seen": int(status.get("hostnames_seen", 0) or 0),
         "domains_observed": observed,
-        "candidates": counts["candidates"],
+        "candidates": candidates,
+        "kept": kept,
         "throughput": throughput,
         "queue_counts_live": queue_live,
         "funnel_live": bool(observed),

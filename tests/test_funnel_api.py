@@ -35,9 +35,21 @@ def test_total_drops_never_exceed_the_top_line():
     assert dropped <= max(payload["domains_observed"], 0)
 
 
-def test_the_screening_steps_come_after_the_intake_guards():
+def test_the_funnel_runs_from_intake_to_claude():
+    # It used to stop at "hard-denied by a rule", so a reader could not see
+    # what happened to the candidates that survived.
     keys = [s["key"] for s in _payload()["funnel"]["stages"]]
-    assert keys[-4:] == ["unscreened", "ghost", "insufficient", "rejected"]
+    assert keys[0] == "extension_not_tracked"
+    assert "repeat" in keys and "unclassified" in keys
+    assert keys[-2:] == ["not_diligenced", "claude_reject"]
+
+
+def test_unclassified_domains_leave_the_funnel_explicitly():
+    # Measured live: 100 rows were marked complete with no verdict recorded.
+    # Letting them fall through counted them as having survived every
+    # screening step and reported 100 candidates where there were 5.
+    keys = [s["key"] for s in _payload()["funnel"]["stages"]]
+    assert "unclassified" in keys
 
 
 def test_the_live_chain_stays_arithmetically_closed():
