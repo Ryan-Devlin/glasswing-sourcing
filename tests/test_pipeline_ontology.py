@@ -19,14 +19,25 @@ def doc_text() -> str:
     return DOC.read_text(encoding="utf-8")
 
 
-def route_company_reasons() -> list[str]:
+REMOVING_BUCKETS = ("reject", "ghost", "screened_out")
+
+
+def route_company_outcomes() -> list[tuple[str, str]]:
     source = Path("filter.py").read_text(encoding="utf-8")
     body = source.split("def route_company(", 1)[1]
     body = body[: body.index("\ndef ")]
     return [
-        m.group(2).replace("{page_status}", "<status>")
+        (m.group(1), m.group(2).replace("{page_status}", "<status>"))
         for m in re.finditer(r'return\s+"(\w+)",\s*(?:f?")([^"]*)"', body)
     ]
+
+
+def removing_reasons() -> list[str]:
+    return [r for b, r in route_company_outcomes() if b in REMOVING_BUCKETS]
+
+
+def routing_reasons() -> list[str]:
+    return [r for b, r in route_company_outcomes() if b not in REMOVING_BUCKETS]
 
 
 class CoverageTests(unittest.TestCase):
@@ -36,19 +47,44 @@ class CoverageTests(unittest.TestCase):
             with self.subTest(guard=guard):
                 self.assertIn(guard, text)
 
-    def test_every_screening_outcome_is_documented(self):
-        # 21 outcomes today. A new one appearing without a line here means the
-        # document has started lying about what removes domains.
+    def test_every_screening_removal_is_documented(self):
+        # A new removal appearing without a line here means the document has
+        # started lying about what shrinks the population.
         text = doc_text()
-        for reason in route_company_reasons():
+        for reason in removing_reasons():
             with self.subTest(reason=reason):
                 self.assertIn(reason, text)
+
+    def test_outcomes_that_route_onward_are_not_listed_as_removals(self):
+        # The document is only removal points. Listing a review outcome here
+        # would overstate what the filter discards -- seven of the twenty-one
+        # route a domain onward rather than dropping it.
+        text = doc_text()
+        for reason in routing_reasons():
+            with self.subTest(reason=reason):
+                self.assertNotIn(reason, text)
+
+    def test_every_removal_point_is_numbered(self):
+        # The count is the point: a reader should be able to say how many
+        # places a domain can die.
+        numbered = re.findall(r"^\| \d+ \|", doc_text(), flags=re.M)
+        expected = (
+            3                       # reduction
+            + len(certstream_filter.DROP_REASONS) - 3   # intake guards
+            + 1                     # shared certificate
+            + 1                     # already queued
+            + 1                     # no verdict
+            + len(removing_reasons())
+            + 1                     # Claude REJECT
+            + 1                     # human no
+        )
+        self.assertEqual(len(numbered), expected)
 
     def test_the_screening_order_table_matches_route_company(self):
         # funnel.SCREENING_ORDER drives what the page renders; if it drifts
         # from the code, guards silently fall to the bottom of the funnel.
         ordered = [key for key, _ in funnel.SCREENING_ORDER]
-        actual = route_company_reasons()
+        actual = removing_reasons()
         placed = [key for key in ordered if key in actual]
         self.assertEqual(placed, [key for key in actual if key in ordered])
 
