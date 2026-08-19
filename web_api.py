@@ -298,7 +298,9 @@ class PipelineFilters(BaseModel):
     include_keywords: list[str] = []
     exclude_keywords: list[str] = []
     minimum_score: int = Field(55, ge=0, le=100)
-    claude_daily_limit: int = Field(400, ge=1, le=5000)
+    # Bounded by the same ceiling the worker enforces, so the dashboard
+    # cannot offer a number that will silently be clamped.
+    claude_daily_limit: int = Field(100, ge=1, le=100)
 
 
 class DomainIntakeRequest(BaseModel):

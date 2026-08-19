@@ -521,3 +521,29 @@ class NoWebSearchTests(unittest.TestCase):
     def test_the_evidence_budget_is_large_and_tunable(self):
         self.assertGreaterEqual(claude_classifier.HOMEPAGE_EXCERPT_CHARS, 12000)
         self.assertIn("CLAUDE_HOMEPAGE_EXCERPT_CHARS", self.source)
+
+
+class DailyCapTests(unittest.TestCase):
+    """The daily limit is a ceiling, not a default.
+
+    It was sitting at 151 in the live dashboard while the code claimed a
+    100/day budget: the worker took min(5000, config), so the constant only
+    applied when the operator had never touched the field.
+    """
+
+    def setUp(self):
+        self.source = Path("continuous_pipeline.py").read_text(encoding="utf-8")
+
+    def test_config_cannot_raise_the_cap(self):
+        self.assertIn("min(\n            CLAUDE_DAILY_LIMIT,", self.source)
+        self.assertNotIn("min(5000, int(config.get", self.source)
+
+    def test_the_cap_is_one_hundred(self):
+        import continuous_pipeline
+
+        self.assertEqual(continuous_pipeline.CLAUDE_DAILY_LIMIT, 100)
+
+    def test_the_api_offers_no_value_above_the_cap(self):
+        # A field the worker would clamp is a field that lies to the operator.
+        api = Path("web_api.py").read_text(encoding="utf-8")
+        self.assertIn("claude_daily_limit: int = Field(100, ge=1, le=100)", api)

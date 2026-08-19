@@ -1288,7 +1288,17 @@ def load_run_config() -> dict:
 
 def claude_allowance(conn: sqlite3.Connection) -> int:
     config = load_run_config()
-    daily_limit = max(1, min(5000, int(config.get("claude_daily_limit", CLAUDE_DAILY_LIMIT))))
+    # CLAUDE_DAILY_LIMIT is a ceiling, not a default. The dashboard could
+    # previously set anything up to 5000 and did -- it was sitting at 151 while
+    # the code claimed a 100/day budget, so the number in the constant meant
+    # nothing. The config can now only lower the cap, never raise it.
+    daily_limit = max(
+        1,
+        min(
+            CLAUDE_DAILY_LIMIT,
+            int(config.get("claude_daily_limit", CLAUDE_DAILY_LIMIT)),
+        ),
+    )
     hourly_limit = min(CLAUDE_HOURLY_LIMIT, daily_limit)
     now = datetime.now(timezone.utc)
     hour_cutoff = (
