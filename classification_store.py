@@ -2465,6 +2465,39 @@ def _missing_relation(exc: Exception, table: str) -> bool:
     return False
 
 
+def classified_domain_set(
+    domains: Iterable[str],
+    *,
+    path: Path | str = CLASSIFICATION_DB,
+) -> set[str]:
+    """Which of the given domains already carry a classification record.
+
+    Used to protect a good record from a later bad fetch: a domain that
+    screened successfully once and is merely unreachable today must not have
+    that record replaced by a terminal "could not read" state.
+    """
+    values = list(dict.fromkeys(
+        stable_domain(domain) for domain in domains if stable_domain(domain)
+    ))
+    if not values or (
+        not using_classification_postgres() and not Path(path).exists()
+    ):
+        return set()
+    try:
+        with connect_store(path, read_only=True) as conn:
+            rows = []
+            for start in range(0, len(values), 700):
+                batch = values[start : start + 700]
+                marks = ",".join("?" for _ in batch)
+                rows.extend(conn.execute(
+                    f"SELECT domain FROM classifications WHERE domain IN ({marks})",
+                    batch,
+                ).fetchall())
+    except Exception:
+        return set()
+    return {str(row["domain"]) for row in rows}
+
+
 def hidden_domain_set(
     domains: Iterable[str],
     *,

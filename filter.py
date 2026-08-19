@@ -5373,6 +5373,7 @@ def persist_screening_output(output: pd.DataFrame) -> dict[str, int]:
             "coming_soon": 0,
             "hard_denied": 0,
             "screened_out": 0,
+            "unreadable_recorded": 0,
         }
     output = apply_run_preferences(output, load_run_preferences())
     output = apply_persistent_overrides(output)
@@ -5427,6 +5428,31 @@ def persist_screening_output(output: pd.DataFrame) -> dict[str, int]:
         for domain in output.loc[retryable_inaccessible, "domain"].tolist()
         if stable_domain(domain)
     ]
+    # An unreadable site that is *not* retryable is terminal: the queue will
+    # never look at it again, so leaving it unrecorded is what produced the
+    # limbo state -- measured live 2026-08-19, 379,488 rows marked complete
+    # with no classification row and no exclusion row anywhere, indistinguishable
+    # from "not screened yet" in every count.
+    #
+    # It is recorded as an exclusion rather than a classification because it
+    # is not a judgement about a company; we never saw one. Two protections
+    # keep the original reasoning intact: a domain that already has a
+    # classification record is left alone, so one bad fetch cannot overwrite a
+    # good record, and these are deliberately not passed to
+    # purge_automated_rejections, so nothing is deleted.
+    terminal_unreadable = output.loc[
+        unreadable & ~retryable_inaccessible & ~manually_protected
+    ].copy()
+    if not terminal_unreadable.empty:
+        from classification_store import classified_domain_set
+
+        already_known = classified_domain_set(
+            list(terminal_unreadable["domain"])
+        )
+        terminal_unreadable = terminal_unreadable[
+            ~terminal_unreadable["domain"].map(stable_domain).isin(already_known)
+        ].copy()
+
     persistable_output = output.loc[
         ~output.index.isin(automated_discarded.index)
         & ~unreadable
@@ -5475,6 +5501,13 @@ def persist_screening_output(output: pd.DataFrame) -> dict[str, int]:
         purge_automated_rejections(
             automated_discarded["domain"],
             clean_csv=False,
+        )
+
+    unreadable_recorded = 0
+    if not terminal_unreadable.empty:
+        terminal_unreadable["routing_reason"] = "unreadable_no_retry_left"
+        unreadable_recorded = record_automated_exclusions(
+            terminal_unreadable.to_dict(orient="records")
         )
 
     approved = persistable_output[
@@ -5590,6 +5623,9 @@ def persist_screening_output(output: pd.DataFrame) -> dict[str, int]:
             ["screened_out", "review", "comp", "insufficient"]
         ).sum()),
         "ghost": int(output["routing_bucket"].eq("ghost").sum()),
+        # Unreadable and out of retries, so recorded as a terminal outcome
+        # rather than left as a row with no state anywhere.
+        "unreadable_recorded": unreadable_recorded,
         "storage_discarded": len(automated_discarded),
         # Per-batch write accounting. Without this, a batch that computed
         # discards but wrote nothing to the shared store was indistinguishable
