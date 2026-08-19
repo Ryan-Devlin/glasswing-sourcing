@@ -221,8 +221,8 @@ class DropTallyTests(unittest.TestCase):
 
     def test_the_tally_is_a_mapping_of_reason_to_count(self):
         reading = read_certificate(["exa.ai", "bar.net", "com.ai"], {".ai"})
-        self.assertIsInstance(reading.filtered_by_reason, dict)
-        for reason, count in reading.filtered_by_reason.items():
+        self.assertIsInstance(reading.dropped_by_guard, dict)
+        for reason, count in reading.dropped_by_guard.items():
             self.assertIsInstance(reason, str)
             self.assertIsInstance(count, int)
 
@@ -231,24 +231,33 @@ class DropTallyTests(unittest.TestCase):
             ["exa.ai", "000091fj.app", "auth-8510-system.ai", "bar.net", "com.ai"],
             {".ai", ".app"},
         )
-        self.assertEqual(reading.filtered_by_reason, {
+        # com.ai never reduces to a domain at all, so it is an unreducible
+        # hostname rather than a guarded domain -- the guard tally is a
+        # breakdown of the domain population, and a bare public suffix is not
+        # in it.
+        self.assertEqual(reading.dropped_by_guard, {
             "machine_generated": 1,
             "templated_bulk": 1,
             "extension_not_tracked": 1,
-            "no_registrable_label": 1,
         })
+        self.assertEqual(reading.unreducible_hostnames, 1)
 
     def test_the_tally_is_not_the_scoring_evidence(self):
         # The exact shape of the regression: evidence is per-domain prose,
         # the tally is per-guard counts, and they are not interchangeable.
         reading = read_certificate(["exa.ai", "www.exa.ai"], {".ai"})
-        self.assertEqual(reading.filtered_by_reason, {})
+        self.assertEqual(reading.dropped_by_guard, {})
         self.assertIn("tld:", reading.scored[0].evidence)
 
-    def test_the_counts_reconcile_with_the_total(self):
+    def test_guard_drops_are_a_breakdown_of_domains_observed(self):
+        # Guards run once per distinct domain, not once per hostname, so the
+        # tally can never exceed the population it describes. Counting per
+        # hostname charged a domain on ten certificates ten times and made
+        # this impossible to reconcile against anything downstream.
         reading = read_certificate(
-            ["exa.ai", "bar.net", "com.ai", "000091fj.app"], {".ai"}
+            ["exa.ai", "www.exa.ai", "bar.net", "000091fj.app"], {".ai"}
         )
-        self.assertEqual(
-            sum(reading.filtered_by_reason.values()), reading.filtered_hostnames
+        self.assertLessEqual(
+            sum(reading.dropped_by_guard.values()), reading.domains_observed
         )
+        self.assertEqual(reading.domains_observed, 3)

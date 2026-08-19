@@ -1607,6 +1607,13 @@ async def listener(
     hostnames_seen = int(
         listener_status.get("hostnames_seen", 0) or 0
     ) if _counters_are_this_run else 0
+    # The top of the funnel: every distinct registrable domain the feed has
+    # shown us this run, before any judgement. "Domains discovered" used to
+    # report the survivors instead, which made layer 0 look like a trickle
+    # when the feed is delivering orders of magnitude more.
+    domains_observed = int(
+        listener_status.get("domains_observed", 0) or 0
+    ) if _counters_are_this_run else 0
     hostnames_filtered = int(
         listener_status.get("hostnames_filtered", 0) or 0
     ) if _counters_are_this_run else 0
@@ -1637,8 +1644,12 @@ async def listener(
         if _counters_are_this_run and isinstance(_restored_drops, dict)
         else {}
     )
-    if sum(intake_drops.values()) > hostnames_seen:
+    # Guard drops are a breakdown of domains observed, so they can never
+    # exceed it; if they do, the two halves came from different runs and the
+    # tally is worthless.
+    if sum(intake_drops.values()) > domains_observed:
         intake_drops = {}
+        domains_observed = 0
     # Per-guard attrition. A single "filtered" total cannot tell an untracked
     # TLD from a bulk-registration farm, and those mean opposite things.
     _stored_drops = listener_status.get("intake_drops")
@@ -1898,12 +1909,9 @@ async def listener(
                         raw_hostnames,
                         allowed_extensions,
                     )
-                    hostnames_filtered += reading.filtered_hostnames
-                    for _reason, _count in reading.filtered_by_reason.items():
-                        intake_drops[_reason] = (
-                            intake_drops.get(_reason, 0) + _count
-                        )
-                    for _reason, _count in reading.filtered_by_reason.items():
+                    hostnames_filtered += reading.unreducible_hostnames
+                    domains_observed += reading.domains_observed
+                    for _reason, _count in reading.dropped_by_guard.items():
                         intake_drops[_reason] = (
                             intake_drops.get(_reason, 0) + _count
                         )
@@ -1932,6 +1940,7 @@ async def listener(
                         write_status(
                             hostnames_seen=hostnames_seen,
                             hostnames_filtered=hostnames_filtered,
+                            domains_observed=domains_observed,
                             intake_drops=dict(intake_drops),
                             intake_run_id=active_run_id,
                             platform_apexes_dropped=platform_apexes_dropped,

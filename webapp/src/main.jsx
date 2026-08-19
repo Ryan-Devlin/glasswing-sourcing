@@ -3191,20 +3191,15 @@ function StageBar({ stage }) {
   const part = (n) => (stage.entered > 0 ? (n / stage.entered) * 100 : 0);
   return (
     <div className="funnel-track" role="img"
-         aria-label={`${stage.label}: ${num(stage.survived)} passed, ` +
-                     `${num(stage.dropped)} dropped, ${num(stage.pending)} still waiting`}>
+         aria-label={`${stage.label}: ${num(stage.dropped)} removed, ${num(stage.survived)} continued`}>
       <div className="funnel-bar">
         {stage.survived > 0 && (
           <span className="seg seg-survived" style={{ flexGrow: part(stage.survived) }}
-                title={`Passed on: ${num(stage.survived)}`} />
+                title={`Continued: ${num(stage.survived)}`} />
         )}
         {stage.dropped > 0 && (
           <span className="seg seg-dropped" style={{ flexGrow: part(stage.dropped) }}
-                title={`Thrown out here: ${num(stage.dropped)} (${pct(stage.drop_rate)} of what this stage judged)`} />
-        )}
-        {stage.pending > 0 && (
-          <span className="seg seg-pending" style={{ flexGrow: part(stage.pending) }}
-                title={`Not reached yet: ${num(stage.pending)} — backlog, not a rejection`} />
+                title={`Removed here: ${num(stage.dropped)} (${pct(stage.drop_rate)} of what reached this step)`} />
         )}
       </div>
     </div>
@@ -3216,10 +3211,17 @@ function FunnelTable({ funnel }) {
     <table className="funnel-table">
       <thead>
         <tr>
-          <th>Stage</th><th className="n">In</th>
-          <th className="n">Thrown out</th><th className="n">Drop rate</th>
-          <th className="n">Waiting</th><th className="n">Passed on</th>
-          <th className="n">% of start</th><th>Split</th>
+          <th>Step</th>
+          <th className="n">In</th>
+          <th className="n">Out</th>
+          <th className="n">Continued</th>
+          <th className="n">Drop rate</th>
+          {/* What this step shaved off the original population. The number
+              that says which steps matter: a step removing 90% of a
+              population already down to 0.1% of the top line is doing almost
+              nothing to the funnel. */}
+          <th className="n">% of top-line</th>
+          <th>Split</th>
         </tr>
       </thead>
       <tbody>
@@ -3231,13 +3233,9 @@ function FunnelTable({ funnel }) {
             </td>
             <td className="n">{num(stage.entered)}</td>
             <td className="n">{num(stage.dropped)}</td>
-            {/* Drop rate excludes the backlog from its denominator: a stage
-                that has judged 10 of 1,000 rows and rejected 9 is dropping
-                90%, not 0.9%. */}
-            <td className="n">{stage.dropped > 0 ? pct(stage.drop_rate) : "—"}</td>
-            <td className="n">{stage.pending > 0 ? num(stage.pending) : "—"}</td>
             <td className="n">{num(stage.survived)}</td>
-            <td className="n">{pct(stage.share_of_start)}</td>
+            <td className="n">{stage.entered > 0 ? pct(stage.drop_rate) : "—"}</td>
+            <td className="n">{pct(stage.shave_of_top)}</td>
             <td><StageBar stage={stage} /></td>
           </tr>
         ))}
@@ -3253,41 +3251,38 @@ function FunnelPage() {
   if (!data) return null;
 
   const funnel = data.funnel || { stages: [] };
-  const intake = data.intake || {};
 
   return (
     <section className="funnel-page">
-      <h1>Pipeline — this run</h1>
+      <h1>Filter funnel — this run</h1>
+
+      <div className="throughput">
+        <div className="throughput-card">
+          <h3>Hostnames on the feed</h3>
+          <p className="throughput-verdict">{num(data.hostnames_seen)}</p>
+        </div>
+        <div className="throughput-card ok">
+          <h3>Domains discovered</h3>
+          <p className="throughput-verdict">{num(data.domains_observed)}</p>
+          <dl><div><dt>every distinct domain, before any filtering</dt></div></dl>
+        </div>
+        <div className="throughput-card">
+          <h3>Candidates out the bottom</h3>
+          <p className="throughput-verdict">{num(data.candidates)}</p>
+        </div>
+      </div>
 
       <Throughput windows={data.throughput} />
 
-      {/* Hostname-level rejections happen before a domain exists, so they are
-          deliberately one line and not funnel stages. Mixing them in is what
-          made the unit change halfway down the table and the percentages
-          stop reconciling. */}
-      {intake.live && (
-        <p className="funnel-lede">
-          CertStream showed {num(intake.hostnames_seen)} hostnames this run;{" "}
-          {num(intake.hostnames_rejected)} were rejected before becoming a
-          domain
-          {Object.keys(intake.by_guard || {}).length > 0 && (
-            <> — {Object.entries(intake.by_guard)
-              .map(([reason, n]) => `${reason.replace(/_/g, " ")} ${num(n)}`)
-              .join(" · ")}</>
-          )}
-          .
-        </p>
-      )}
-
       <div className="funnel-legend">
-        <span><i className="swatch seg-survived" /> Passed on</span>
-        <span><i className="swatch seg-dropped" /> Thrown out</span>
-        <span><i className="swatch seg-pending" /> Waiting (not a rejection)</span>
+        <span><i className="swatch seg-survived" /> Continued</span>
+        <span><i className="swatch seg-dropped" /> Removed at this step</span>
       </div>
 
-      {!data.queue_counts_live && (
+      {!data.funnel_live && (
         <p className="funnel-warn">
-          Queue unreadable right now — these counts may be stale.
+          No counters for this run yet — they appear once the listener has
+          processed a frame. This is "no data", not zero.
         </p>
       )}
 
@@ -3296,8 +3291,8 @@ function FunnelPage() {
 
       {data.biggest_losses?.length > 0 && (
         <p className="funnel-lede">
-          Losing most: {data.biggest_losses.map((l) => (
-            `${l.label} (${num(l.dropped)}, ${pct(l.drop_rate)})`
+          Shaving most: {data.biggest_losses.map((l) => (
+            `${l.label} (${num(l.dropped)})`
           )).join(" · ")}
         </p>
       )}

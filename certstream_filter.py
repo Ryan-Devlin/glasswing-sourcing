@@ -223,43 +223,74 @@ DROP_REASONS = (
 )
 
 
+def reduce_hostname(hostname: str) -> str:
+    """Hostname to its registrable domain, with no judgement applied.
+
+    Separate from the guards on purpose. Everything downstream counts
+    domains, so the guards must count domains too -- applied per hostname
+    they charge a domain appearing on ten certificates ten times, and the
+    funnel's top can never reconcile with its stages.
+    """
+    host = normalize_hostname(hostname)
+    if not host or is_domain_too_long(host):
+        return ""
+    label, suffix = _split_suffix(host)
+    if not label or not suffix:
+        return ""
+    return f"{label}.{suffix}"
+
+
+def guard_registrable(
+    domain: str,
+    allowed_extensions: set[str] | None = None,
+) -> str:
+    """Return the guard that refuses ``domain``, or ``""`` if it passes.
+
+    Guards in the order they run; each only ever sees what the previous
+    passed, which is what makes the tally a funnel rather than a set of
+    overlapping counts.
+    """
+    if not domain:
+        return "empty"
+    label, _, suffix = domain.partition(".")
+    if not suffix:
+        return "no_registrable_label"
+
+    if allowed_extensions is not None:
+        extension = f".{suffix.rsplit('.', 1)[-1]}"
+        if extension not in allowed_extensions:
+            return "extension_not_tracked"
+
+    if is_motif_spam(label):
+        return "motif_spam"
+    if len(label) > 1 and len(set(label)) == 1:
+        return "repeated_run"
+    if is_machine_generated(label):
+        return "machine_generated"
+    if is_templated_bulk_name(label):
+        return "templated_bulk"
+    return ""
+
+
 def classify_hostname(
     hostname: str,
     allowed_extensions: set[str] | None = None,
 ) -> tuple[str, str]:
-    """Reduce a hostname, and say which guard refused it if one did.
+    """Reduce a hostname and say which guard refused it, if one did.
 
-    Returns ``(registrable, "")`` when kept, or ``("", reason)`` naming the
-    first guard that rejected it. A single lumped "filtered" count cannot tell
-    an untracked TLD from a bulk-registration farm, and those call for
-    completely different responses -- one is a configuration choice, the other
-    is somebody spamming the certificate log.
+    Kept as the single-hostname entry point; callers that need domain-unit
+    counting should reduce first and guard the distinct domains.
     """
     host = normalize_hostname(hostname)
     if not host:
         return "", "empty"
     if is_domain_too_long(host):
         return "", "too_long"
-
-    label, suffix = _split_suffix(host)
-    if not label or not suffix:
+    domain = reduce_hostname(hostname)
+    if not domain:
         return "", "no_registrable_label"
-
-    if allowed_extensions is not None:
-        extension = f".{suffix.rsplit('.', 1)[-1]}"
-        if extension not in allowed_extensions:
-            return "", "extension_not_tracked"
-
-    if is_motif_spam(label):
-        return "", "motif_spam"
-    if len(label) > 1 and len(set(label)) == 1:
-        return "", "repeated_run"
-    if is_machine_generated(label):
-        return "", "machine_generated"
-    if is_templated_bulk_name(label):
-        return "", "templated_bulk"
-
-    return f"{label}.{suffix}", ""
+    reason = guard_registrable(domain, allowed_extensions)
+    return ("", reason) if reason else (domain, "")
 
 
 def to_registrable(

@@ -33,57 +33,50 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class Stage:
-    """One step of the funnel: what arrived, what was thrown out, what moved on."""
+    """One step of the filter: what arrived, what it removed, what went on.
+
+    IN and OUT only. There is deliberately no "waiting" column -- a domain
+    that has not been reached yet simply leaves the funnel at that step, the
+    same as one that was rejected, because the question this view answers is
+    "what shaved the population and by how much", not "what might come back".
+    Splitting the two put a third number in every row that most readers had
+    to mentally add back before the arithmetic closed.
+    """
 
     key: str
     label: str
     entered: int
     dropped: int = 0
-    pending: int = 0
     note: str = ""
 
     @property
     def survived(self) -> int:
-        """Rows that passed this stage. Never negative even on inconsistent
-        inputs — the two stores are read in separate queries and can be a few
-        rows apart mid-write, which must not render a negative count."""
-        return max(0, self.entered - self.dropped - self.pending)
-
-    @property
-    def decided(self) -> int:
-        """Rows this stage actually ruled on (excludes the backlog)."""
-        return max(0, self.entered - self.pending)
+        """Never negative: the counters behind a live funnel are read across
+        several statements and can disagree by a few rows mid-write."""
+        return max(0, self.entered - self.dropped)
 
     @property
     def drop_rate(self) -> float:
-        """Share of *decided* rows this stage threw out, 0.0-1.0.
+        """Share of what entered this step that this step removed."""
+        return self.dropped / self.entered if self.entered else 0.0
 
-        Deliberately excludes ``pending`` from the denominator: a stage that
-        has ruled on 10 of 1,000 rows and dropped 9 has a 90% drop rate, not a
-        0.9% one. The backlog is reported on its own so it can't hide in here.
-        """
-        return self.dropped / self.decided if self.decided else 0.0
-
-    @property
-    def pending_rate(self) -> float:
-        """Share of everything that entered which is still waiting."""
-        return self.pending / self.entered if self.entered else 0.0
-
-    def to_dict(self, *, funnel_entered: int) -> dict[str, object]:
+    def to_dict(self, *, top_line: int) -> dict[str, object]:
         return {
             "key": self.key,
             "label": self.label,
             "entered": self.entered,
             "dropped": self.dropped,
-            "pending": self.pending,
             "survived": self.survived,
             "drop_rate": round(self.drop_rate, 6),
-            "pending_rate": round(self.pending_rate, 6),
-            # Share of the funnel's own starting population still alive here,
-            # so a reader can see cumulative attrition without re-multiplying
-            # every stage's survival rate by hand.
-            "share_of_start": round(
-                self.survived / funnel_entered if funnel_entered else 0.0, 6
+            # What this one step shaved off the original population -- the
+            # number that says which steps actually matter. A step removing
+            # 90% of a population that is already 0.1% of the top line is
+            # doing almost nothing to the funnel.
+            "shave_of_top": round(
+                self.dropped / top_line if top_line else 0.0, 6
+            ),
+            "share_of_top": round(
+                self.survived / top_line if top_line else 0.0, 6
             ),
             "note": self.note,
         }
@@ -104,16 +97,16 @@ class Funnel:
         return self.stages[-1].survived if self.stages else 0
 
     def to_dict(self) -> dict[str, object]:
-        start = self.entered
+        top = self.entered
         return {
             "name": self.name,
-            "entered": start,
+            "entered": top,
             "survived": self.survived,
             "overall_survival_rate": round(
-                self.survived / start if start else 0.0, 6
+                self.survived / top if top else 0.0, 6
             ),
             "note": self.note,
-            "stages": [stage.to_dict(funnel_entered=start) for stage in self.stages],
+            "stages": [stage.to_dict(top_line=top) for stage in self.stages],
         }
 
 
@@ -166,94 +159,30 @@ class Throughput:
         }
 
 
-def run_funnel(
+def build_funnel(
+    name: str,
+    top_line: int,
+    steps: list[tuple[str, str, int, str]],
     *,
-    received: int,
-    unscreened: int,
-    no_verdict: int,
-    ghost: int,
-    insufficient: int,
-    rejected: int,
-    candidates: int,
+    note: str = "",
 ) -> Funnel:
-    """The whole pipeline for one CertStream run, in one unit.
+    """Chain ``steps`` from ``top_line`` down, each seeing the last's survivors.
 
-    Every stage counts **domains**, and the first stage is exactly the number
-    of domains CertStream handed the queue during this run. Earlier versions
-    split this across three tables and changed unit halfway -- hostname guards
-    in one, queue rows in another -- so a reader could not reconcile the top of
-    one with the bottom of the previous, and a cumulative guard tally against a
-    reset hostname count produced drop rates above 100%.
-
-    Hostname-level rejections (wrong TLD, junk names, bulk farms) happen
-    *before* a domain exists, so they are not stages here at all. They are
-    intake noise, reported separately as a single line rather than pretended
-    into this funnel's arithmetic.
-
-    Scoped to one run. A cumulative view cannot answer "is it working right
-    now", which is the only thing this is for.
+    ``steps`` is ``(key, label, dropped, note)`` in the order the filter
+    actually applies them. Generic on purpose: the screening script is a long
+    sequence of guards and the page should render however many there are,
+    rather than a hand-maintained six that drifts out of step with the code.
     """
-    return Funnel(
-        name="run",
-        note=(
-            "One CertStream run, counted in domains at every stage. The top is "
-            "exactly what CertStream added to the queue during this run."
-        ),
-        stages=[
-            Stage(
-                key="received",
-                label="Domains received from CertStream",
-                entered=received,
-                pending=unscreened,
-                note="Pending: queued but not fetched yet. Backlog, not a rejection.",
-            ),
-            Stage(
-                key="screened",
-                label="Fetched and screened",
-                entered=max(0, received - unscreened),
-                dropped=no_verdict,
-                note="Dropped: fetch or scrape failed, so no verdict was reached.",
-            ),
-            Stage(
-                key="resolved",
-                label="Site actually resolved",
-                entered=max(0, received - unscreened - no_verdict),
-                dropped=ghost,
-                note="Dropped: ghost — nothing served at the domain.",
-            ),
-            Stage(
-                key="substantive",
-                label="Site had real content",
-                entered=max(0, received - unscreened - no_verdict - ghost),
-                dropped=insufficient,
-                note="Dropped: parked, placeholder, or too thin to judge.",
-            ),
-            Stage(
-                key="passed_rules",
-                label="Survived the Python rules",
-                entered=max(
-                    0, received - unscreened - no_verdict - ghost - insufficient
-                ),
-                dropped=rejected,
-                note="Dropped: hard-denied by a classifier rule or a human decision.",
-            ),
-            Stage(
-                key="candidate",
-                label="Reached the candidate pool",
-                entered=max(
-                    0,
-                    received - unscreened - no_verdict - ghost - insufficient
-                    - rejected,
-                ),
-                dropped=max(
-                    0,
-                    received - unscreened - no_verdict - ghost - insufficient
-                    - rejected - candidates,
-                ),
-                note="Dropped: scored but not routed to review, priority, or competitor.",
-            ),
-        ],
-    )
+    stages: list[Stage] = []
+    remaining = top_line
+    for key, label, dropped, step_note in steps:
+        removed = max(0, min(int(dropped or 0), remaining))
+        stages.append(Stage(
+            key=key, label=label, entered=remaining,
+            dropped=removed, note=step_note,
+        ))
+        remaining = max(0, remaining - removed)
+    return Funnel(name=name, note=note, stages=stages)
 
 
 def biggest_losses(funnel: Funnel, limit: int = 3) -> list[dict[str, object]]:

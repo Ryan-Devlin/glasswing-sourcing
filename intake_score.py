@@ -36,7 +36,11 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
-from certstream_filter import classify_hostname, normalize_hostname, to_registrable
+from certstream_filter import (
+    guard_registrable,
+    normalize_hostname,
+    reduce_hostname,
+)
 
 # How dense a TLD is in real companies, as a starting score. Not a gate --
 # the extension allow-list still decides what is tracked at all; this only
@@ -128,11 +132,14 @@ class CertificateReading:
     penalty_reason: str = ""
     # Hostnames the junk/TLD filter refused. Counted here so the caller does
     # not have to run the filter a second time just to tally intake attrition.
-    filtered_hostnames: int = 0
-    # Which guard refused each rejected hostname. A single lumped count cannot
-    # tell an untracked TLD from a bulk-registration farm, and those call for
-    # opposite responses.
-    filtered_by_reason: dict[str, int] = field(default_factory=dict)
+    # Every distinct registrable domain this certificate showed us, before
+    # any judgement -- the true top of the funnel.
+    domains_observed: int = 0
+    # Hostnames that never reduced to a domain at all (malformed, over-length,
+    # bare public suffix). Not part of the domain-unit population.
+    unreducible_hostnames: int = 0
+    # Domains refused, by guard, in the order the guards run.
+    dropped_by_guard: dict[str, int] = field(default_factory=dict)
 
     @property
     def domains(self) -> list[str]:
@@ -167,51 +174,57 @@ def read_certificate(
     *,
     max_apexes: int = MAX_APEXES_PER_CERT,
 ) -> CertificateReading:
-    """Score every tracked domain on one certificate, or drop the whole cert.
+    """Score every tracked domain on one certificate, counted in domains.
 
-    Returns a reading rather than a bare mapping so the caller can record why
-    something was refused. Junk filtering stays in ``certstream_filter``; this
-    only ranks what survives it and refuses platform certificates.
+    Reduction happens first and guarding second, so ``domains_observed`` is
+    the true top of the funnel: every distinct registrable domain this
+    certificate showed us, before any judgement. Guards then run once per
+    domain rather than once per hostname -- charging a domain that appears on
+    ten hostnames ten times is what made the guard tallies impossible to
+    reconcile against anything downstream, which counts domains.
     """
     grouped: dict[str, list[str]] = {}
-    filtered = 0
-    # Named distinctly from the per-domain ``reasons`` list built in the
-    # scoring loop below. They collided once, and the loop's list silently
-    # replaced this tally -- every frame then raised AttributeError inside the
-    # listener, which caught it as a connection fault and reconnected, so a
-    # healthy feed produced zero domains and a reconnect storm.
-    drop_counts: dict[str, int] = {}
+    unreducible = 0
     for hostname in hostnames or []:
-        registrable, reason = classify_hostname(hostname, allowed_extensions)
+        registrable = reduce_hostname(hostname)
         if registrable:
             grouped.setdefault(registrable, []).append(hostname)
         else:
-            filtered += 1
-            drop_counts[reason] = drop_counts.get(reason, 0) + 1
+            # Malformed, over-length, or a bare public suffix: never a domain
+            # at all, so it is not part of the domain-unit population below.
+            unreducible += 1
 
+    observed = len(grouped)
     if not grouped:
         return CertificateReading(
-            filtered_hostnames=filtered, filtered_by_reason=drop_counts
+            domains_observed=0, unreducible_hostnames=unreducible
         )
 
-    if len(grouped) > max_apexes:
-        # A platform's shared certificate. Every apex on it used to be queued
-        # as an equal peer, which is a large and invisible noise source at the
-        # very top of the funnel.
-        reason = f"shared_cert:{len(grouped)}_apexes"
+    drop_counts: dict[str, int] = {}
+    kept: dict[str, list[str]] = {}
+    for registrable, hosts in grouped.items():
+        reason = guard_registrable(registrable, allowed_extensions)
+        if reason:
+            drop_counts[reason] = drop_counts.get(reason, 0) + 1
+        else:
+            kept[registrable] = hosts
+
+    if len(kept) > max_apexes:
+        reason = f"shared_cert:{len(kept)}_apexes"
         return CertificateReading(
             scored=[
-                ScoredDomain(domain=domain, score=SHARED_CERT_SCORE, evidence=reason)
-                for domain in sorted(grouped)
+                ScoredDomain(domain=d, score=SHARED_CERT_SCORE, evidence=reason)
+                for d in sorted(kept)
             ],
-            penalized=sorted(grouped),
+            penalized=sorted(kept),
             penalty_reason=reason,
-            filtered_hostnames=filtered,
-            filtered_by_reason=drop_counts,
+            domains_observed=observed,
+            unreducible_hostnames=unreducible,
+            dropped_by_guard=drop_counts,
         )
 
     scored: list[ScoredDomain] = []
-    for registrable, hosts in sorted(grouped.items()):
+    for registrable, hosts in sorted(kept.items()):
         labels: set[str] = set()
         has_wildcard = False
         for host in hosts:
@@ -222,9 +235,6 @@ def read_certificate(
             labels.update(parts)
 
         product = sorted(labels & PRODUCT_LABELS)
-        # Anything that is neither a known product label nor boilerplate still
-        # counts as structure -- a company's own naming ("tenant", "eu-west")
-        # is evidence of a build even when it is not on the list.
         custom = sorted(labels - PRODUCT_LABELS - NEUTRAL_LABELS)
 
         score = tld_weight(registrable)
@@ -250,21 +260,18 @@ def read_certificate(
             reasons.append(f"wildcard:+{_WILDCARD_POINTS}")
 
         if not product and not custom:
-            # Apex plus boilerplate only: a domain somebody registered, with
-            # no evidence anyone has built on it yet. Kept, ranked last -- it
-            # is the population this funnel exists to watch, and a later
-            # certificate will re-score it the moment that changes.
             reasons.append("bare_registration")
 
-        scored.append(
-            ScoredDomain(
-                domain=registrable,
-                score=max(0, score),
-                evidence=" ".join(reasons)[:200],
-                labels=tuple(sorted(labels)),
-            )
-        )
+        scored.append(ScoredDomain(
+            domain=registrable,
+            score=max(0, score),
+            evidence=" ".join(reasons)[:200],
+            labels=tuple(sorted(labels)),
+        ))
 
     return CertificateReading(
-        scored=scored, filtered_hostnames=filtered, filtered_by_reason=drop_counts
+        scored=scored,
+        domains_observed=observed,
+        unreducible_hostnames=unreducible,
+        dropped_by_guard=drop_counts,
     )

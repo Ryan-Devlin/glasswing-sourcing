@@ -37,7 +37,7 @@ for source in (ROOT, AI_SRC, ZONE_SRC):
     if str(source) not in sys.path:
         sys.path.insert(0, str(source))
 
-from funnel import Throughput, biggest_losses, run_funnel
+from funnel import Throughput, biggest_losses, build_funnel
 from ai_search.og_bridge import enqueue_for_screening
 from ai_search.domains import normalize_any_domain
 from ai_search.database import (
@@ -981,7 +981,13 @@ def certstream_status():
     # feed made them disagree by whatever arrived in between. The funnel is
     # built from these same rows, so sourcing both here makes them equal by
     # construction rather than by luck.
-    run_domains = (
+    # "Domains discovered" means every distinct domain CertStream showed us
+    # this run -- layer 0, before any filtering. It used to report the handful
+    # that survived every guard, which made the feed look like a trickle when
+    # it is delivering orders of magnitude more and the TLD gate removes most
+    # of it. The funnel's top line is the same number, from the same counter.
+    observed = int(status.get("domains_observed", 0) or 0)
+    run_domains = observed if observed else (
         int(current_run_queue.get("total", 0) or 0) if queue_is_live else None
     )
     desired = bool(read_control()["desired"].get("pipeline", False))
@@ -1005,21 +1011,32 @@ def certstream_status():
     }
 
 
+GUARD_LABELS = {
+    "extension_not_tracked": "TLD not in the tracked list",
+    "motif_spam": "Motif spam (aiaiai, mememe)",
+    "repeated_run": "Repeated-letter run (aaa, bb)",
+    "machine_generated": "Machine-generated name (000091fj)",
+    "templated_bulk": "Templated bulk farm (auth-8510-system)",
+    "no_registrable_label": "No registrable label",
+    "empty": "Empty hostname",
+}
+
+
 @app.get("/api/funnel")
 def funnel_breakdown():
-    """One pipeline for the current CertStream run, counted in domains.
+    """The filter as one funnel, in domains, for the current run.
 
-    Sourced from a single run-scoped query against the queue table, which
-    already carries each domain's status and its screening verdict. That is
-    what makes the top of the funnel exactly the number of domains CertStream
-    added during this run -- it is the same rows, not a second measurement
-    that has to be reconciled against the first.
+    The top line is every distinct registrable domain CertStream has shown us
+    this run -- layer 0, before any judgement. It used to report the survivors
+    instead, which made the feed look like a trickle when it delivers orders
+    of magnitude more and the TLD gate removes most of it.
 
-    Earlier versions split this across three tables and changed unit halfway,
-    with hostname-level guard counts in one and queue rows in another. Nothing
-    lined up, and a cumulative guard tally against a reset hostname count
-    produced drop rates above 100%.
+    Every step is IN and OUT. There is no "waiting" column: a domain not yet
+    screened leaves the funnel at that step like any other, because the
+    question is what shaved the population and by how much.
     """
+    from certstream_filter import DROP_REASONS
+
     status = (
         read_pipeline_status()
         if shared_pipeline_backend_available()
@@ -1027,9 +1044,20 @@ def funnel_breakdown():
     )
     run_id = str(status.get("run_id", "") or "")
 
+    observed = int(status.get("domains_observed", 0) or 0)
+    raw_drops = status.get("intake_drops")
+    guard_drops = (
+        {str(k): int(v or 0) for k, v in raw_drops.items()}
+        if isinstance(raw_drops, dict) else {}
+    )
+    if sum(guard_drops.values()) > observed:
+        # A breakdown that exceeds the population it describes means the two
+        # halves came from different runs; showing it produces drop rates
+        # above 100%.
+        guard_drops, observed = {}, observed
+
     counts = {k: 0 for k in (
-        "received", "unscreened", "no_verdict", "ghost",
-        "insufficient", "rejected", "candidates",
+        "queued", "unscreened", "ghost", "insufficient", "rejected", "candidates",
     )}
     queue_live = False
     conn = None
@@ -1038,20 +1066,16 @@ def funnel_breakdown():
         row = conn.execute(
             """
             SELECT
-              count(*) AS received,
+              count(*) AS queued,
               sum(CASE WHEN status IN ('pending','processing')
                        THEN 1 ELSE 0 END) AS unscreened,
-              sum(CASE WHEN status NOT IN ('pending','processing')
-                        AND (classification IS NULL OR classification='')
-                       THEN 1 ELSE 0 END) AS no_verdict,
               sum(CASE WHEN classification='ghost' THEN 1 ELSE 0 END) AS ghost,
               sum(CASE WHEN classification IN ('insufficient','coming_soon')
                        THEN 1 ELSE 0 END) AS insufficient,
               sum(CASE WHEN classification='reject' THEN 1 ELSE 0 END) AS rejected,
               sum(CASE WHEN classification IN ('review','priority','comp')
                        THEN 1 ELSE 0 END) AS candidates
-            FROM domains
-            WHERE first_seen_run_id = ?
+            FROM domains WHERE first_seen_run_id = ?
             """,
             (run_id,),
         ).fetchone()
@@ -1059,12 +1083,49 @@ def funnel_breakdown():
             counts = {k: int(row[k] or 0) for k in counts}
         queue_live = True
     except Exception:
-        # A transient queue read must not blank the page; the rate cards and
-        # the intake line below are independent.
         pass
     finally:
         if conn is not None:
             conn.close()
+
+    # Guards first, in the order they run, then the queue steps. Composed as a
+    # list so the page renders however many steps there are rather than a
+    # hand-maintained set that drifts away from the code.
+    steps: list[tuple[str, str, int, str]] = [
+        (
+            reason,
+            GUARD_LABELS.get(reason, reason.replace("_", " ")),
+            guard_drops.get(reason, 0),
+            "",
+        )
+        for reason in DROP_REASONS
+        if reason in guard_drops or reason == "extension_not_tracked"
+    ]
+
+    survivors_after_guards = max(0, observed - sum(guard_drops.values()))
+    steps.append((
+        "repeat",
+        "Already seen — not a new domain",
+        max(0, survivors_after_guards - counts["queued"]),
+        "A certificate renewal or another SAN for a domain already queued.",
+    ))
+    steps += [
+        ("unscreened", "Not screened yet", counts["unscreened"],
+         "Queued but not fetched yet."),
+        ("ghost", "Nothing served at the domain", counts["ghost"], ""),
+        ("insufficient", "Too thin to judge", counts["insufficient"],
+         "Parked, placeholder, or almost no content."),
+        ("rejected", "Hard-denied by a rule", counts["rejected"],
+         "Non-US, non-English, agency, consumer, wrapper, and the rest."),
+    ]
+
+    funnel = build_funnel(
+        "pipeline", observed, steps,
+        note=(
+            "One CertStream run, counted in domains at every step. The top is "
+            "every distinct domain the feed showed us before any judgement."
+        ),
+    )
 
     throughput: list[dict[str, object]] = []
     conn = None
@@ -1093,36 +1154,16 @@ def funnel_breakdown():
         if conn is not None:
             conn.close()
 
-    funnel = run_funnel(**counts)
-
-    # Hostname-level rejections happen before a domain exists, so they are not
-    # stages in the funnel above -- reporting them there is what made the unit
-    # change halfway and the percentages stop reconciling. One line instead.
-    seen = int(status.get("hostnames_seen", 0) or 0)
-    raw_drops = status.get("intake_drops")
-    drops = (
-        {str(k): int(v or 0) for k, v in raw_drops.items()}
-        if isinstance(raw_drops, dict) else {}
-    )
-    # Never report more rejections than hostnames observed; if the two are out
-    # of step the tally is stale and is worth nothing.
-    if sum(drops.values()) > seen:
-        drops = {}
-
     return {
         "run_id": run_id,
         "funnel": funnel.to_dict(),
         "biggest_losses": biggest_losses(funnel),
-        "intake": {
-            "hostnames_seen": seen,
-            "hostnames_rejected": sum(drops.values()),
-            "by_guard": dict(
-                sorted(drops.items(), key=lambda kv: kv[1], reverse=True)
-            ),
-            "live": bool(seen),
-        },
+        "hostnames_seen": int(status.get("hostnames_seen", 0) or 0),
+        "domains_observed": observed,
+        "candidates": counts["candidates"],
         "throughput": throughput,
         "queue_counts_live": queue_live,
+        "funnel_live": bool(observed),
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
 

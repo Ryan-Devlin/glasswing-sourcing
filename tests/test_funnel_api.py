@@ -21,24 +21,23 @@ def _payload():
 def test_returns_exactly_one_funnel():
     # One pipeline. Three tables in two different units was the whole problem.
     payload = _payload()
-    assert payload["funnel"]["name"] == "run"
+    assert payload["funnel"]["name"] == "pipeline"
     assert "screening" not in payload
     assert "certstream" not in payload
 
 
-def test_hostname_rejections_never_exceed_hostnames_seen():
+def test_total_drops_never_exceed_the_top_line():
     # A cumulative guard tally against a reset hostname count reported more
     # rejections than observations and rendered as a 4040% drop rate. When the
     # two are out of step the tally is discarded rather than shown.
-    intake = _payload()["intake"]
-    assert intake["hostnames_rejected"] <= max(intake["hostnames_seen"], 0)
+    payload = _payload()
+    dropped = sum(s["dropped"] for s in payload["funnel"]["stages"])
+    assert dropped <= max(payload["domains_observed"], 0)
 
 
-def test_the_funnel_stages_are_the_run_pipeline():
-    assert [s["key"] for s in _payload()["funnel"]["stages"]] == [
-        "received", "screened", "resolved",
-        "substantive", "passed_rules", "candidate",
-    ]
+def test_the_screening_steps_come_after_the_intake_guards():
+    keys = [s["key"] for s in _payload()["funnel"]["stages"]]
+    assert keys[-4:] == ["unscreened", "ghost", "insufficient", "rejected"]
 
 
 def test_the_live_chain_stays_arithmetically_closed():
@@ -57,21 +56,27 @@ def test_no_stage_reports_negative_counts():
         if True:
             assert stage["survived"] >= 0, stage["key"]
             assert stage["dropped"] >= 0, stage["key"]
-            assert stage["pending"] >= 0, stage["key"]
+            assert stage["drop_rate"] <= 1.0, stage["key"]
 
 
-def test_backlog_is_reported_separately_from_drops():
-    # The distinction the view exists to make: unscreened queue rows are
-    # pending, never dropped. Reading them as rejections would send you
-    # tuning a filter that never ran.
-    stages = {s["key"]: s for s in _payload()["funnel"]["stages"]}
-    assert stages["received"]["dropped"] == 0
+def test_no_stage_reports_a_backlog_column():
+    # IN and OUT only. "Waiting" was a third number in every row a reader had
+    # to add back before the arithmetic closed.
+    for stage in _payload()["funnel"]["stages"]:
+        assert "pending" not in stage
+
+
+def test_the_top_line_is_domains_observed_not_survivors():
+    # "Domains discovered" used to report what survived the filter, which made
+    # layer 0 look like a trickle when the feed delivers far more.
+    payload = _payload()
+    assert payload["funnel"]["entered"] == payload["domains_observed"]
 
 
 def test_liveness_flags_distinguish_no_data_from_a_real_zero():
     payload = _payload()
     assert isinstance(payload["queue_counts_live"], bool)
-    assert isinstance(payload["intake"]["live"], bool)
+    assert isinstance(payload["funnel_live"], bool)
 
 
 def test_a_failed_queue_read_still_renders_the_classification_half(monkeypatch):
@@ -82,7 +87,7 @@ def test_a_failed_queue_read_still_renders_the_classification_half(monkeypatch):
     payload = _payload()
     assert payload["queue_counts_live"] is False
     # The classification stages are independent of the queue and must survive.
-    assert payload["funnel"]["stages"][0]["key"] == "received"
+    assert payload["funnel"]["stages"]
 
 
 def test_biggest_losses_are_ranked_and_bounded():
@@ -115,16 +120,13 @@ def test_a_failed_queue_read_reports_no_throughput_rather_than_zeros(monkeypatch
     assert payload["queue_counts_live"] is False
 
 
-def test_certstream_page_and_funnel_report_the_same_run_total():
-    # The requirement: the top of the funnel must always equal the domains
-    # CertStream added this run. They used to be two counters -- an in-memory
-    # tally and a row count -- read at different instants against a live feed,
-    # so they disagreed by whatever arrived in between. Both now come from the
-    # same run-scoped query.
-    status = client.get("/api/certstream/status").json()
-    funnel_top = _payload()["funnel"]["stages"][0]["entered"]
-    if status.get("current_run_queue", {}).get("total") is not None and status.get(
-        "queue_counts_live"
-    ):
-        assert status["domains_received"] == status["current_run_queue"]["total"]
-        assert funnel_top == status["domains_received"]
+def test_certstream_page_and_funnel_report_the_same_top_line():
+    # "Domains discovered" and the top of the funnel are the same claim --
+    # every distinct domain the feed showed us this run, before filtering --
+    # so they read the same counter rather than being two measurements that
+    # have to agree.
+    payload = _payload()
+    if payload["domains_observed"]:
+        status = client.get("/api/certstream/status").json()
+        assert status["domains_received"] == payload["domains_observed"]
+        assert payload["funnel"]["entered"] == payload["domains_observed"]

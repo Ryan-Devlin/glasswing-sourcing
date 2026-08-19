@@ -7,101 +7,88 @@ is distinguished from a backlog is asserted directly.
 import unittest
 
 from funnel import (
-    Funnel, Stage, Throughput, biggest_losses, run_funnel,
+    Funnel, Stage, Throughput, biggest_losses, build_funnel,
 )
 
 
-class DropVersusBacklogTests(unittest.TestCase):
-    def test_backlog_is_excluded_from_the_drop_rate(self):
-        # The distinction the whole view rests on. A stage that has ruled on
-        # 10 of 1,000 rows and thrown out 9 is dropping 90% of what it judges,
-        # not 0.9%. Putting the backlog in the denominator would report this
-        # filter as harmless and send you tuning the wrong stage.
-        stage = Stage(key="s", label="S", entered=1000, dropped=9, pending=990)
-        self.assertEqual(stage.decided, 10)
+class StageTests(unittest.TestCase):
+    """IN and OUT only — there is deliberately no backlog column.
+
+    An earlier version reported "waiting" separately, which put a third
+    number in every row that a reader had to add back before the arithmetic
+    closed. A domain not yet reached leaves the funnel at that step like any
+    other; the question is what shaved the population and by how much.
+    """
+
+    def test_a_stage_is_only_in_and_out(self):
+        stage = Stage(key="s", label="S", entered=1000, dropped=900)
+        self.assertEqual(stage.survived, 100)
         self.assertAlmostEqual(stage.drop_rate, 0.9)
-        self.assertAlmostEqual(stage.pending_rate, 0.99)
-        self.assertEqual(stage.survived, 1)
-
-    def test_pending_rows_are_not_counted_as_survivors(self):
-        stage = Stage(key="s", label="S", entered=100, dropped=0, pending=70)
-        self.assertEqual(stage.survived, 30)
-
-    def test_a_stage_with_nothing_decided_has_a_zero_drop_rate(self):
-        stage = Stage(key="s", label="S", entered=500, dropped=0, pending=500)
-        self.assertEqual(stage.decided, 0)
-        self.assertEqual(stage.drop_rate, 0.0)
+        self.assertFalse(hasattr(stage, "pending"))
 
     def test_empty_stage_does_not_divide_by_zero(self):
         stage = Stage(key="s", label="S", entered=0)
         self.assertEqual(stage.drop_rate, 0.0)
-        self.assertEqual(stage.pending_rate, 0.0)
         self.assertEqual(stage.survived, 0)
 
     def test_counts_never_go_negative_on_inconsistent_input(self):
-        # The queue and classification stores are read in separate queries and
-        # can disagree by a few rows mid-write. That must not render a
-        # negative survivor count in the UI.
-        stage = Stage(key="s", label="S", entered=10, dropped=99, pending=0)
-        self.assertEqual(stage.survived, 0)
+        self.assertEqual(Stage(key="s", label="S", entered=10, dropped=99).survived, 0)
 
-
-class RunFunnelTests(unittest.TestCase):
-    """One pipeline, one unit, scoped to one CertStream run."""
-
-    def setUp(self):
-        self.funnel = run_funnel(
-            received=1_000, unscreened=300, no_verdict=200,
-            ghost=150, insufficient=250, rejected=40, candidates=55,
+    def test_shave_of_top_is_measured_against_the_original_population(self):
+        # The number that says which steps matter: a step removing 90% of a
+        # population already down to a fraction of the top line is doing
+        # almost nothing to the funnel overall.
+        payload = Stage(key="s", label="S", entered=100, dropped=90).to_dict(
+            top_line=100_000
         )
-        self.stages = {s.key: s for s in self.funnel.stages}
+        self.assertAlmostEqual(payload["drop_rate"], 0.9)
+        self.assertAlmostEqual(payload["shave_of_top"], 0.0009)
 
-    def test_the_top_is_exactly_the_domains_received_this_run(self):
-        # The requirement this view exists to satisfy: the number at the top
-        # must equal what CertStream added to the queue during this run, with
-        # no reconciliation step in between.
-        self.assertEqual(self.funnel.stages[0].entered, 1_000)
-        self.assertEqual(self.stages["received"].label,
-                         "Domains received from CertStream")
 
-    def test_the_chain_is_arithmetically_closed(self):
+class BuildFunnelTests(unittest.TestCase):
+    def setUp(self):
+        self.funnel = build_funnel("t", 100_000, [
+            ("tld", "TLD not tracked", 96_000, ""),
+            ("machine", "Machine-generated", 900, ""),
+            ("repeat", "Already seen", 2_000, ""),
+            ("ghost", "Nothing served", 260, ""),
+        ])
+
+    def test_each_step_sees_only_the_previous_survivors(self):
         for previous, nxt in zip(self.funnel.stages, self.funnel.stages[1:]):
-            with self.subTest(stage=nxt.key):
+            with self.subTest(step=nxt.key):
                 self.assertEqual(nxt.entered, previous.survived)
 
-    def test_every_stage_counts_domains_so_nothing_changes_unit(self):
-        # Mixing hostname-level guard counts into this table is what produced
-        # a 4040% drop rate: a cumulative tally measured against a reset
-        # population. No stage here counts anything but queue rows.
-        for stage in self.funnel.stages:
-            with self.subTest(stage=stage.key):
-                self.assertLessEqual(stage.dropped, stage.entered)
-                self.assertLessEqual(stage.drop_rate, 1.0)
+    def test_the_top_line_is_the_first_step_in(self):
+        self.assertEqual(self.funnel.entered, 100_000)
 
-    def test_unscreened_domains_are_pending_not_dropped(self):
-        self.assertEqual(self.stages["received"].pending, 300)
-        self.assertEqual(self.stages["received"].dropped, 0)
+    def test_the_chain_is_closed(self):
+        dropped = sum(s.dropped for s in self.funnel.stages)
+        self.assertEqual(self.funnel.survived, 100_000 - dropped)
 
-    def test_the_survivors_are_the_candidate_pool(self):
-        self.assertEqual(self.funnel.survived, 55)
+    def test_a_step_cannot_drop_more_than_reached_it(self):
+        # Guard tallies and queue counts come from different statements; an
+        # over-count must clamp rather than render a rate above 100%.
+        funnel = build_funnel("t", 10, [("a", "A", 999, "")])
+        self.assertEqual(funnel.stages[0].dropped, 10)
+        self.assertLessEqual(funnel.stages[0].drop_rate, 1.0)
+        self.assertEqual(funnel.survived, 0)
 
-    def test_an_idle_run_produces_no_negative_counts(self):
-        empty = run_funnel(received=0, unscreened=0, no_verdict=0, ghost=0,
-                           insufficient=0, rejected=0, candidates=0)
+    def test_an_arbitrary_number_of_steps_is_supported(self):
+        # The screening script is a long ordered chain; the page renders
+        # however many steps it is given rather than a hand-maintained set.
+        many = build_funnel("t", 1_000, [
+            (f"s{i}", f"Step {i}", 10, "") for i in range(25)
+        ])
+        self.assertEqual(len(many.stages), 25)
+        self.assertEqual(many.survived, 750)
+
+    def test_a_run_with_no_traffic_is_all_zero_not_negative(self):
+        empty = build_funnel("t", 0, [("a", "A", 0, ""), ("b", "B", 0, "")])
+        self.assertEqual(empty.survived, 0)
         for stage in empty.stages:
-            with self.subTest(stage=stage.key):
-                self.assertGreaterEqual(stage.survived, 0)
+            with self.subTest(step=stage.key):
                 self.assertEqual(stage.drop_rate, 0.0)
-
-    def test_inconsistent_inputs_never_render_negative(self):
-        # The two counts are read in one query, but a mid-write read can still
-        # disagree; the UI must not show a negative.
-        weird = run_funnel(received=10, unscreened=99, no_verdict=99, ghost=99,
-                           insufficient=99, rejected=99, candidates=99)
-        for stage in weird.stages:
-            with self.subTest(stage=stage.key):
-                self.assertGreaterEqual(stage.survived, 0)
-                self.assertGreaterEqual(stage.entered, 0)
 
 
 class BiggestLossesTests(unittest.TestCase):
@@ -117,7 +104,7 @@ class BiggestLossesTests(unittest.TestCase):
 
     def test_stages_that_drop_nothing_are_omitted(self):
         funnel = Funnel(name="t", stages=[
-            Stage(key="a", label="A", entered=100, dropped=0, pending=100),
+            Stage(key="a", label="A", entered=100, dropped=0),
             Stage(key="b", label="B", entered=100, dropped=5),
         ])
         self.assertEqual([l["key"] for l in biggest_losses(funnel)], ["b"])

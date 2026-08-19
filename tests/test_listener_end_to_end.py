@@ -165,8 +165,10 @@ class ListenerEndToEndTests(unittest.IsolatedAsyncioTestCase):
         await self._run()
         drops = self.latest("intake_drops", {})
         self.assertIsInstance(drops, dict)
+        # A bare public suffix never becomes a domain, so it is counted as an
+        # unreducible hostname rather than a guarded domain.
         for reason in ("machine_generated", "templated_bulk",
-                       "extension_not_tracked", "no_registrable_label"):
+                       "extension_not_tracked"):
             with self.subTest(reason=reason):
                 self.assertGreater(drops.get(reason, 0), 0)
 
