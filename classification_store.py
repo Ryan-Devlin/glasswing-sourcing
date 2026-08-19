@@ -3250,6 +3250,99 @@ def query_corpus_classifications(
     return results
 
 
+def read_store_meta(key: str, default: str = "",
+                    path: Path | str = CLASSIFICATION_DB) -> str:
+    if not using_classification_postgres() and not Path(path).exists():
+        return default
+    try:
+        with connect_store(path, read_only=True) as conn:
+            row = conn.execute(
+                "SELECT value FROM store_meta WHERE key=?", (key,)
+            ).fetchone()
+    except Exception:
+        return default
+    return str(row["value"]) if row else default
+
+
+def write_store_meta(key: str, value: str,
+                     path: Path | str = CLASSIFICATION_DB) -> None:
+    with connect_store(path) as conn:
+        conn.execute(
+            """
+            INSERT INTO store_meta(key, value, updated_at) VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value, updated_at = excluded.updated_at
+            """,
+            (key, str(value), utc_now()),
+        )
+        conn.commit()
+
+
+def count_eligible_for_diligence(path: Path | str = CLASSIFICATION_DB) -> int:
+    """How many un-diligenced rows sit in a bucket diligence can draw from."""
+    if not using_classification_postgres() and not Path(path).exists():
+        return 0
+    with connect_store(path, read_only=True) as conn:
+        row = conn.execute(
+            "SELECT count(*) AS n FROM classifications c "
+            "LEFT JOIN claude_diligence g ON g.domain = c.domain "
+            "WHERE c.routing_bucket IN ('review','priority','comp') "
+            "  AND g.domain IS NULL"
+        ).fetchone()
+    return int(row["n"] or 0) if row else 0
+
+
+def iter_eligible_scoring_rows(
+    path: Path | str = CLASSIFICATION_DB,
+    *,
+    batch: int = 5000,
+    limit: int = 0,
+    offset: int = 0,
+):
+    """Stream eligible rows for the rescue rescore, a window at a time.
+
+    Two differences from :func:`iter_scoring_rows`, both measured on the live
+    corpus 2026-08-19:
+
+    * **Only buckets diligence can draw from.** A newest-first pass over
+      everything spent 25,000 row-scores to look at 5,996 eligible rows; the
+      other 19,004 were ``reject`` and ``insufficient``, which is 64% of the
+      table and can never become a candidate this way.
+    * **Ordered by domain and offset, not newest-first.** A fixed newest-first
+      window can only ever see the same rows: 91,286 of 96,992 eligible rows
+      sat permanently outside it, so a company whose stored score went stale
+      was invisible to Claude forever -- the fluenci.ai bug, reintroduced by
+      the bound that was added to stop an OOM.
+
+    Ordering on the primary key makes the window stable as the table grows,
+    so a rotating offset covers the whole eligible set in a few passes rather
+    than resampling the same head.
+    """
+    if not using_classification_postgres() and not Path(path).exists():
+        return
+    columns = (
+        "c.domain, c.company_name, c.description, c.excerpt, "
+        "c.manual_override, c.fit_score, c.priority_score, c.routing_bucket"
+    )
+    sql = (
+        f"SELECT {columns} FROM classifications c "
+        "LEFT JOIN claude_diligence g ON g.domain = c.domain "
+        "WHERE c.routing_bucket IN ('review','priority','comp') "
+        "  AND g.domain IS NULL "
+        "ORDER BY c.domain"
+    )
+    if limit:
+        sql += f" LIMIT {int(limit)} OFFSET {max(0, int(offset))}"
+    with connect_store(path, read_only=True) as conn:
+        cursor = conn.execute(sql)
+        while True:
+            rows = cursor.fetchmany(batch)
+            if not rows:
+                return
+            for row in rows:
+                yield row
+
+
 def iter_scoring_rows(
     path: Path | str = CLASSIFICATION_DB,
     *,

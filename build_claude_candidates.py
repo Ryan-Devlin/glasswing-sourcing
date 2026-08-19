@@ -26,6 +26,9 @@ import sys
 from pathlib import Path
 
 
+_RESCUE_CURSOR_KEY = "claude_rescue_scan_offset"
+
+
 def pool_domains(limit: int) -> list[str]:
     """The best un-diligenced candidates, straight from SQL.
 
@@ -76,14 +79,35 @@ def eligible_domains(
     ``fit_score`` and ``priority_score`` are real columns and are taken as
     well, so a row clears on the highest of the three.
     """
-    from classification_store import iter_scoring_rows
+    from classification_store import (
+        count_eligible_for_diligence,
+        iter_eligible_scoring_rows,
+        read_store_meta,
+        write_store_meta,
+    )
     from filter import score_text
 
     keep: list[str] = list(pool_domains(pool_limit))
     if rescue_limit <= 0:
         return keep
     seen = set(keep)
-    for row in iter_scoring_rows(limit=rescue_limit):
+
+    # The scan window rotates. It used to be the newest `rescue_limit` rows of
+    # any bucket, which measured live meant 25,000 row-scores spent to look at
+    # 5,996 eligible rows while 91,286 eligible rows sat permanently outside
+    # the window -- a company whose stored score went stale could never be
+    # rescued, which is the exact bug the live rescore exists to prevent.
+    #
+    # Ordering on the primary key and advancing an offset each run covers the
+    # whole eligible set every few passes at the same cost per pass.
+    eligible_total = count_eligible_for_diligence()
+    try:
+        cursor = int(read_store_meta(_RESCUE_CURSOR_KEY, "0") or 0)
+    except (TypeError, ValueError):
+        cursor = 0
+    if cursor < 0 or (eligible_total and cursor >= eligible_total):
+        cursor = 0
+    for row in iter_eligible_scoring_rows(limit=rescue_limit, offset=cursor):
         domain = str(row.get("domain") or "").strip()
         if not domain or domain in seen:
             continue
@@ -102,6 +126,14 @@ def eligible_domains(
         ).strip()
         if copy and score_text(copy)[0] >= minimum_score:
             keep.append(domain)
+    # Advance even when the window found nothing: the point is coverage, and
+    # a window that only moves on success would stick on a barren stretch.
+    try:
+        write_store_meta(_RESCUE_CURSOR_KEY, str(cursor + rescue_limit))
+    except Exception as exc:
+        # A cursor that cannot be saved costs coverage, not correctness --
+        # the next run simply rescans the same window.
+        print(f"Rescue cursor not saved: {exc}", file=sys.stderr)
     return keep
 
 
