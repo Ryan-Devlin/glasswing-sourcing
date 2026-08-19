@@ -42,8 +42,8 @@ def test_the_funnel_is_the_six_steps_the_pipeline_actually_has():
     # they belong to; as peers they made this a 28-row table.
     keys = [s["key"] for s in _payload()["funnel"]["stages"]]
     assert keys == [
-        "junk", "source_rejected", "unscreened", "no_page", "no_fit",
-        "not_diligenced", "claude_reject",
+        "junk", "source_rejected", "awaiting", "unscreened", "no_page",
+        "no_fit", "not_diligenced", "claude_reject",
     ]
 
 

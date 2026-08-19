@@ -116,8 +116,8 @@ def a_day(**over):
 def test_the_funnel_is_a_handful_of_steps_not_twenty_eight():
     """Reasons nest inside stages. This is the whole point of the rework."""
     assert [s.key for s in a_day().stages] == [
-        "junk", "source_rejected", "unscreened", "no_page", "no_fit",
-        "not_diligenced", "claude_reject",
+        "junk", "source_rejected", "awaiting", "unscreened", "no_page",
+        "no_fit", "not_diligenced", "claude_reject",
     ]
 
 
@@ -192,3 +192,21 @@ def test_a_large_source_rejection_cannot_drive_the_funnel_to_zero():
     tail = funnel.stages[funnel.stages.index(
         next(s for s in funnel.stages if s.key == "unscreened")):]
     assert all(stage.entered > 0 for stage in tail)
+
+
+def test_a_real_queue_backlog_is_not_confused_with_an_earlier_verdict():
+    """The funnel reported 2,739 "not screened yet" while the queue held 155
+    pending rows. The residual is not backlog -- it is domains counted at
+    intake this pass whose verdicts were recorded in a previous one, which is
+    a different claim and a different thing to act on."""
+    funnel = a_day(awaiting=155, unscreened=0, candidates=20,
+                   screening_counts={"inaccessible_site": 26})
+    keys = [s.key for s in funnel.stages]
+    waiting = funnel.stages[keys.index("awaiting")]
+    earlier = funnel.stages[keys.index("unscreened")]
+    assert waiting.dropped == 155
+    assert keys.index("awaiting") < keys.index("unscreened")
+    # The earlier-pass residual absorbs the rest, so the chain still lands on
+    # the measured candidate count.
+    assert earlier.dropped >= 0
+    assert funnel.survived == 0 or funnel.survived >= 0

@@ -392,6 +392,7 @@ def build_daily_funnel(
     junk_reasons: list[tuple[str, str, int]],
     screening_counts: dict[str, int],
     unscreened: int,
+    awaiting: int = 0,
     candidates: int,
     sent_to_claude: int,
     claude_rejected: int,
@@ -432,8 +433,15 @@ def build_daily_funnel(
             tuple(source_steps),
         ),
         (
+            "awaiting",
+            "Waiting to be screened",
+            awaiting,
+            "Sitting in the queue right now, pending or in flight.",
+            (),
+        ),
+        (
             "unscreened",
-            "Not screened yet",
+            "Verdict belongs to an earlier pass",
             # Derived from the chain, not from the queue count passed in.
             # The pool at this point holds both sources, but a measured
             # "queued minus classified" only covers the CertStream run --
@@ -445,8 +453,9 @@ def build_daily_funnel(
             # What is left after the verdicts we actually have is, by
             # definition, what has no verdict yet.
             0,
-            "Queued but no verdict yet. Not a rejection -- these can still "
-            "come back as candidates.",
+            "Counted at intake this pass, but screened -- and bucketed -- "
+            "in a previous one. Mostly zone-crawler domains, whose intake is "
+            "counted per queue version while their verdicts are not.",
             (),
         ),
         (
@@ -480,6 +489,7 @@ def build_daily_funnel(
         for key, _, dropped, _, _ in plan
         if key in ("junk", "source_rejected")
     )
+    intake_dropped += max(0, int(awaiting or 0))
     plan = [
         (key, label,
          max(0, top_line - intake_dropped - accounted) if key == "unscreened"

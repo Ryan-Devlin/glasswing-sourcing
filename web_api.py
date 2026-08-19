@@ -1183,7 +1183,7 @@ def funnel_breakdown(day: str = ""):
 
     # Screening, scoped to the same run as the intake counters above so the
     # two halves describe one population.
-    queued = classified = candidates = reviewed = kept = 0
+    queued = classified = candidates = reviewed = kept = awaiting = 0
     reason_counts: dict[str, int] = {}
     queue_live = False
     conn = None
@@ -1229,6 +1229,10 @@ def funnel_breakdown(day: str = ""):
         if row:
             reviewed = int(row["reviewed"] or 0)
             kept = int(row["kept"] or 0)
+        awaiting = int(conn.execute(
+            "SELECT count(*) AS n FROM pipeline.domains "
+            "WHERE status IN ('pending','processing')"
+        ).fetchone()["n"] or 0)
         queue_live = True
     except Exception:
         pass
@@ -1270,6 +1274,7 @@ def funnel_breakdown(day: str = ""):
         junk_reasons=junk_reasons,
         screening_counts=reason_counts,
         unscreened=max(0, queued - classified),
+        awaiting=awaiting,
         candidates=candidates,
         sent_to_claude=reviewed,
         claude_rejected=max(0, reviewed - kept),
