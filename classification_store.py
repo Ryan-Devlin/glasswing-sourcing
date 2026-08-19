@@ -3267,9 +3267,11 @@ def iter_scoring_rows(
     is OOM-killed outright, so no diligence runs at all and the failure
     surfaces only as an empty warning string.
     """
+    # Real table columns only. diligence_rank_score is not one -- it lives
+    # inside record_json, which is the blob this pass exists to avoid reading.
     columns = (
         "domain, company_name, description, excerpt, manual_override, "
-        "diligence_rank_score, fit_score, priority_score, routing_bucket"
+        "fit_score, priority_score, routing_bucket"
     )
     with connect_store(path, read_only=True) as conn:
         cursor = conn.execute(

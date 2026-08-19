@@ -29,14 +29,18 @@ from pathlib import Path
 def eligible_domains(minimum_score: int) -> list[str]:
     """Domains that could clear the diligence bar, found in one cheap pass.
 
-    Applies the same eligibility rule ``prepare_input`` does -- the higher of
-    the stored rank score and a live rescore of the stored page copy -- but
-    streams the few columns it needs instead of the whole corpus. The live
-    rescore is the load-bearing half: the frozen stored score goes stale as
-    scoring improves, and filtering on it alone silently buries real companies.
+    Deliberately permissive. ``prepare_input`` re-derives everything from the
+    rows this returns and applies the real gate, so the only failure that
+    matters here is dropping a row it would have kept. Anything already in the
+    candidate pool passes regardless of score, as does any manual override.
 
-    A manually overridden row is always eligible regardless of score, matching
-    the forced path downstream.
+    The stored ``diligence_rank_score`` is not consulted, because it is not a
+    column -- it lives inside ``record_json``, the blob this pass exists to
+    avoid. What replaces it is the live rescore, which was already the
+    load-bearing half of the rule: the frozen score goes stale as scoring
+    improves, and the live one reflects current logic against the same copy.
+    ``fit_score`` and ``priority_score`` are real columns and are taken as
+    well, so a row clears on the highest of the three.
     """
     from classification_store import iter_scoring_rows
     from filter import score_text
@@ -49,8 +53,12 @@ def eligible_domains(minimum_score: int) -> list[str]:
         if str(row.get("manual_override") or "").strip():
             keep.append(domain)
             continue
+        if str(row.get("routing_bucket") or "") in ("review", "priority", "comp"):
+            # The pool Claude draws from. Never gate it on a score here.
+            keep.append(domain)
+            continue
         stored = 0.0
-        for column in ("diligence_rank_score", "fit_score", "priority_score"):
+        for column in ("fit_score", "priority_score"):
             try:
                 stored = max(stored, float(row.get(column) or 0))
             except (TypeError, ValueError):
