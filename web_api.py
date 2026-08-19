@@ -393,6 +393,21 @@ def _counts() -> dict[str, int]:
     return dict(result)
 
 
+def _selected_extension_label(status: dict) -> str:
+    """The chosen extensions as prose: ".ai or .app", ".ai, .app or .io"."""
+    chosen = status.get("selected_extensions")
+    values = [
+        str(value) for value in chosen if str(value).strip()
+    ] if isinstance(chosen, (list, tuple)) else []
+    if not values:
+        # Never invent a selection. Without one the tile says what it can
+        # stand behind rather than naming extensions nobody chose.
+        return "a selected extension"
+    if len(values) == 1:
+        return values[0]
+    return f"{', '.join(values[:-1])} or {values[-1]}"
+
+
 def run_counts(run_id: str) -> dict[str, int] | None:
     """One closed set of counts for a run, from one query.
 
@@ -1092,7 +1107,19 @@ def certstream_status():
         **status,
         "feed_split": feed_split,
         "feed_parts": [
-            {"key": key, "label": label, "value": feed_split[key]}
+            {
+                "key": key,
+                # The extension tile names the selection it is counting.
+                # "Extension not selected" left a reader guessing which
+                # extensions those were, on the row holding 99% of the feed --
+                # the one number on the page most worth being readable without
+                # going to another page to interpret it.
+                "label": (
+                    f"Not {_selected_extension_label(status)}"
+                    if key == "extension_not_selected" else label
+                ),
+                "value": feed_split[key],
+            }
             for key, label in FEED_PARTS
         ],
         **(
