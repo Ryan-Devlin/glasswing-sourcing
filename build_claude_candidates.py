@@ -38,8 +38,11 @@ def pool_domains() -> list[str]:
     with connect_store(CLASSIFICATION_DB, read_only=True) as conn:
         rows = conn.execute(
             "SELECT domain FROM classifications "
+            # manual_override is an integer column; comparing it to '' is a
+            # type error on Postgres, and str()-ing it in Python makes 0 read
+            # as truthy, so every row would have looked overridden.
             "WHERE routing_bucket IN ('review','priority','comp') "
-            "   OR (manual_override IS NOT NULL AND manual_override <> '')"
+            "   OR COALESCE(manual_override, 0) <> 0"
         ).fetchall()
     return [str(row["domain"]) for row in rows if row["domain"]]
 
