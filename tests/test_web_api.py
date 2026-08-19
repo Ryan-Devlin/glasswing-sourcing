@@ -1035,6 +1035,8 @@ def test_run_counts_are_internally_closed():
 def test_no_verdict_is_reported_rather_than_folded_into_filtered_out():
     # A crawl that produced nothing is not a judgement, and hiding it inside
     # "filtered out" is what made the tile row impossible to add up.
+    from pathlib import Path
+
     source = Path("webapp/src/main.jsx").read_text(encoding="utf-8")
     page = source.split("function CertStreamPage()", 1)[1].split("\nfunction ", 1)[0]
     assert "No verdict" in page
