@@ -653,7 +653,7 @@ def test_run_filters_cannot_change_while_certstream_is_running(monkeypatch):
             "include_keywords": [],
             "exclude_keywords": [],
             "minimum_score": 55,
-            "claude_daily_limit": 400,
+            "claude_daily_limit": 100,
         },
     )
     assert response.status_code == 409
@@ -677,7 +677,7 @@ def test_paused_cloud_worker_allows_filter_changes(monkeypatch, tmp_path):
             "include_keywords": [],
             "exclude_keywords": [],
             "minimum_score": 55,
-            "claude_daily_limit": 400,
+            "claude_daily_limit": 100,
         },
     )
     assert response.status_code == 200
