@@ -391,6 +391,72 @@ def _counts() -> dict[str, int]:
     return dict(result)
 
 
+def run_counts(run_id: str) -> dict[str, int] | None:
+    """One closed set of counts for a run, from one query.
+
+    The CertStream tiles used to come from three places -- the queue table for
+    "screening complete", the classification store for "candidates retained",
+    and a subtraction for "filtered out". Those cannot be made to agree: the
+    subtraction silently absorbed every row that finished screening without a
+    verdict, and the tiles were left describing populations that overlap
+    without adding up.
+
+    Everything here comes from the same run-scoped join, and satisfies:
+
+        queued = unscreened + no_verdict + classified
+        classified = candidates + filtered_out
+
+    Returns None if the queue cannot be read, so callers can say "no data"
+    rather than render a set of zeros that reads as a result.
+    """
+    conn = None
+    try:
+        conn = connect_pipeline_db()
+        row = conn.execute(
+            """
+            SELECT
+              count(*) AS queued,
+              sum(CASE WHEN d.status IN ('pending','processing')
+                       THEN 1 ELSE 0 END) AS unscreened,
+              sum(CASE WHEN x.domain IS NOT NULL THEN 1 ELSE 0 END) AS classified,
+              sum(CASE WHEN x.routing_bucket IN ('review','priority','comp')
+                       THEN 1 ELSE 0 END) AS candidates
+            FROM pipeline.domains d
+            LEFT JOIN public.classifications x ON x.domain = d.domain
+            WHERE d.first_seen_run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+    except Exception:
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+    if row is None:
+        return None
+    try:
+        queued = int(row["queued"] or 0)
+        unscreened = int(row["unscreened"] or 0)
+        classified = int(row["classified"] or 0)
+        candidates = int(row["candidates"] or 0)
+    except (KeyError, IndexError, TypeError, ValueError):
+        # A row that does not carry these columns is not a smaller answer, it
+        # is no answer. Returning None lets the caller say "no data" instead
+        # of publishing zeros that read as a measured result.
+        return None
+    return {
+        "queued": queued,
+        "unscreened": unscreened,
+        "classified": classified,
+        "candidates": candidates,
+        "filtered_out": max(0, classified - candidates),
+        # Terminal with nothing recorded. Previously invisible: it was folded
+        # into "filtered out", which made a crawl that produced no verdict
+        # look like a judgement.
+        "no_verdict": max(0, queued - unscreened - classified),
+    }
+
+
 def _bucket_counts_for_run(run_id: str) -> dict[str, int]:
     raw = classification_bucket_counts(run_id=run_id)
     total = sum(raw.values())
@@ -976,8 +1042,19 @@ def certstream_status():
     # domains are screened out and intentionally discarded; expose that side of
     # the funnel explicitly so the UI never implies that every completed screen
     # should appear in a classification bucket.
-    screening_complete = int(current_run_queue.get("complete", 0) or 0)
-    discarded_after_screening = max(screening_complete - retained_in_buckets, 0)
+    # Every tile from one query, so they add up by construction rather than
+    # by three sources happening to agree.
+    counts = run_counts(run_id) if run_id else None
+    screening_complete = (
+        counts["classified"] if counts
+        else int(current_run_queue.get("complete", 0) or 0)
+    )
+    if counts:
+        retained_in_buckets = counts["candidates"]
+    discarded_after_screening = (
+        counts["filtered_out"] if counts
+        else max(screening_complete - retained_in_buckets, 0)
+    )
     # Report the number of domains this run actually put on the queue, not the
     # listener's in-memory tally. The two are different measurements of the
     # same thing and drifted against each other -- the tally resets on restart
@@ -1003,6 +1080,16 @@ def certstream_status():
                 "new_domains_received": run_domains,
             }
             if run_domains is not None
+            else {}
+        ),
+        **(
+            {
+                "queued_this_run": counts["queued"],
+                "no_verdict": counts["no_verdict"],
+                "still_processing": counts["unscreened"],
+                "screening_complete_count": counts["classified"],
+            }
+            if counts
             else {}
         ),
         "current_run_queue": current_run_queue,

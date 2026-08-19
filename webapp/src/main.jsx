@@ -1930,9 +1930,9 @@ function CertStreamPage() {
         />
         <Metric
           label="Queued after filtering"
-          value={metric(s.current_run_queue?.total)}
+          value={metric(s.queued_this_run ?? s.current_run_queue?.total)}
         />
-        <Metric label="Screening complete" value={metric(s.current_run_queue?.complete)} />
+        <Metric label="Screening complete" value={metric(s.screening_complete_count ?? s.current_run_queue?.complete)} />
         <Metric
           label="Candidates retained"
           value={metric(s.retained_in_buckets)}
@@ -1941,14 +1941,18 @@ function CertStreamPage() {
           label="Filtered out"
           value={metric(s.discarded_after_screening)}
         />
+        {/* Terminal with nothing recorded. It used to be folded into
+            "filtered out", which made a crawl that produced no verdict look
+            like a judgement and left the tiles refusing to add up. */}
+        <Metric label="No verdict" value={metric(s.no_verdict)} />
         <Metric
           label="Still processing"
           value={metric(
-            s.current_run_queue
+            s.still_processing ?? (s.current_run_queue
               ? Number(s.current_run_queue.awaiting_first_attempt || 0) +
                 Number(s.current_run_queue.processing || 0) +
                 Number(s.current_run_queue.retrying || 0)
-              : undefined
+              : undefined)
           )}
         />
       </div>

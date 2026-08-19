@@ -1010,3 +1010,31 @@ def test_a_day_with_no_snapshot_is_not_reported_as_zero_intake(monkeypatch):
 
     assert intake["today"]["imported"] is False
     assert intake["yesterday"]["imported"] is False
+
+
+def test_run_counts_are_internally_closed():
+    """The tiles must add up, because they come from one query.
+
+    They used to come from three -- the queue table for "screening complete",
+    the classification store for "candidates retained", and a subtraction for
+    "filtered out". The subtraction silently absorbed every row that finished
+    screening without a verdict, so the tiles described overlapping
+    populations that could not be reconciled.
+    """
+    counts = web_api.run_counts("any-run-id")
+    if counts is None:
+        return  # queue unreadable here; the endpoint reports no data
+    assert counts["queued"] == (
+        counts["unscreened"] + counts["no_verdict"] + counts["classified"]
+    )
+    assert counts["classified"] == counts["candidates"] + counts["filtered_out"]
+    for key, value in counts.items():
+        assert value >= 0, key
+
+
+def test_no_verdict_is_reported_rather_than_folded_into_filtered_out():
+    # A crawl that produced nothing is not a judgement, and hiding it inside
+    # "filtered out" is what made the tile row impossible to add up.
+    source = Path("webapp/src/main.jsx").read_text(encoding="utf-8")
+    page = source.split("function CertStreamPage()", 1)[1].split("\nfunction ", 1)[0]
+    assert "No verdict" in page
