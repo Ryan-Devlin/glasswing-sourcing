@@ -548,6 +548,7 @@ function Table({
   claudeBusy,
   sort,
   onSort,
+  headerContext,
 }) {
   if (!rows?.length) return <div className="empty">No records found.</div>;
   return (
@@ -557,7 +558,9 @@ function Table({
           <tr>
             {columns.map((c) => (
               <th key={c.key}>
-                {c.sortable && onSort ? (
+                {c.renderHeader ? (
+                  c.renderHeader(headerContext || {})
+                ) : c.sortable && onSort ? (
                   <button className="sort-button" onClick={() => onSort(c.key)}>
                     {c.label}
                     <span>
@@ -698,15 +701,34 @@ function BucketTabs({ value, onChange, tabs = BUCKET_TABS }) {
 // browser's own timezone, so a "Today" option would promise an alignment
 // neither side can keep near midnight.
 const ADDED_WITHIN_OPTIONS = [
-  [0, "Any date"],
-  [1, "Last 24 hours"],
-  [7, "Last 7 days"],
-  [30, "Last 30 days"],
+  [0, "Date added"],
+  [1, "Added \u2264 24h"],
+  [7, "Added \u2264 7d"],
+  [30, "Added \u2264 30d"],
 ];
 const ADDED_COLUMN = {
   key: "added_at",
   label: "Date added",
   sortable: false,
+  // Cycles the window in place, the way the Score header cycles direction.
+  // Falls back to a plain label wherever no filter state is wired in, so the
+  // same column definition still serves the tables that have none.
+  renderHeader: ({ addedWithinDays, onCycleAdded }) => {
+    if (!onCycleAdded) return "Date added";
+    const active = ADDED_WITHIN_OPTIONS.find(
+      ([days]) => days === addedWithinDays,
+    ) || ADDED_WITHIN_OPTIONS[0];
+    return (
+      <button
+        className={`sort-button${addedWithinDays ? " filtered" : ""}`}
+        onClick={onCycleAdded}
+        title="Filter by date added: any date, 24 hours, 7 days, 30 days"
+      >
+        {active[1]}
+        <span>▾</span>
+      </button>
+    );
+  },
   render: (row) => (
     <span className="added-at" title={addedAtValue(row) || "unknown"}>
       {daysAgoLabel(addedAtValue(row))}
@@ -1628,19 +1650,6 @@ function CompaniesTable({ showRunScope = false }) {
           setPage(1);
         }}
       />
-      {!basket && (
-        <div className="segmented added-filter" aria-label="Filter by date added">
-          {ADDED_WITHIN_OPTIONS.map(([days, label]) => (
-            <button
-              key={days}
-              className={addedWithinDays === days ? "active" : ""}
-              onClick={() => { setAddedWithinDays(days); setPage(1); }}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-      )}
       <div className="export-row">
         <a
           className="button-link"
@@ -1681,6 +1690,17 @@ function CompaniesTable({ showRunScope = false }) {
           <Table
             rows={result.data.rows.filter((r) => !r.hidden)}
             columns={companyCols}
+            headerContext={{
+              addedWithinDays,
+              onCycleAdded: () => {
+                const order = ADDED_WITHIN_OPTIONS.map(([days]) => days);
+                const next = order[
+                  (order.indexOf(addedWithinDays) + 1) % order.length
+                ];
+                setAddedWithinDays(next);
+                setPage(1);
+              },
+            }}
             onLabel={admin ? save : (_, label) => requestLogin(label)}
             onReject={admin ? reject : requestLogin}
             onClaude={admin ? sendClaude : requestLogin}

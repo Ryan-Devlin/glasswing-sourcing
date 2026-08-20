@@ -1326,6 +1326,7 @@ def count_classifications(
     *,
     run_id: str = "",
     added_since: str = "",
+    minimum_score: int = 0,
     path: Path | str = CLASSIFICATION_DB,
 ) -> int:
     """How many rows a filtered page-through will actually find.
@@ -1351,6 +1352,9 @@ def count_classifications(
     if clean(added_since):
         clauses.append(ADDED_AT_SQL + " >= ?")
         params.append(clean(added_since))
+    if int(minimum_score or 0) > 0:
+        clauses.append("fit_score >= ?")
+        params.append(int(minimum_score))
     with connect_store(path, read_only=True) as conn:
         row = conn.execute(
             "SELECT count(*) AS n FROM classifications WHERE "
@@ -1368,6 +1372,7 @@ def query_classifications(
     sort: str = "Priority: high to low",
     run_id: str = "",
     added_since: str = "",
+    minimum_score: int = 0,
     path: Path | str = CLASSIFICATION_DB,
 ) -> list[dict[str, object]]:
     """Page through the master classification table without loading its HTML."""
@@ -1404,6 +1409,9 @@ def query_classifications(
         # shows rather than quietly using a different timestamp.
         clauses.append(ADDED_AT_SQL + " >= ?")
         params.append(clean(added_since))
+    if int(minimum_score or 0) > 0:
+        clauses.append("fit_score >= ?")
+        params.append(int(minimum_score))
     params.extend([bounded_limit, bounded_offset])
     with connect_store(path, read_only=True) as conn:
         rows = conn.execute(

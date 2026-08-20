@@ -191,7 +191,33 @@ def is_machine_generated(label: str) -> bool:
     # "gptprompts", one vowel in ten letters. Acronym-dense names are exactly
     # what this sector produces, so vowel scarcity is not evidence of a machine.
     runs = re.findall(r"[^aeiouy0-9]+", core)
-    return max((len(run) for run in runs), default=0) >= _MAX_CONSONANT_RUN
+    if max((len(run) for run in runs), default=0) >= _MAX_CONSONANT_RUN:
+        return True
+    return False
+
+
+# A tripled letter beside a numeric counter: zzzb1653, zzzb1085, zzzb1097,
+# zzzbvip764, pppp128, kppp698, heee555. Observed live as a sequential run of
+# .app registrations, and none of the existing guards saw them -- the
+# repeated-run test needs the *whole* label to be one character, and a
+# four-digit counter sits under the five-digit run threshold.
+#
+# Both halves are required, and that is the whole reason this is safe. A
+# tripled letter alone would refuse a plausible coined brand (buzzz.ai); a
+# counter alone is ordinary branding, and refusing it is the mistake this
+# module already made once and fixed (387labs.ai, eco360.ai, 101gen.ai).
+# Together they describe a generator. Checked against the live corpus: zero of
+# the 28,762 rows scoring 25 or better, or sitting in a candidate bucket, are
+# refused by this; it catches 445 rows, none of which ever scored above 5.
+_TRIPLED_LETTER = re.compile(r"([a-z])\1{2,}")
+
+
+def is_counter_farm_name(label: str) -> bool:
+    """True for a tripled letter paired with a digit counter."""
+    core = re.sub(r"[^a-z0-9]", "", (label or "").lower())
+    if not _TRIPLED_LETTER.search(core):
+        return False
+    return any(character.isdigit() for character in core)
 
 
 # A hyphen-delimited number sitting between two words is a template, not a
@@ -303,7 +329,7 @@ def guard_registrable(
         return "motif_spam"
     if len(label) > 1 and len(set(label)) == 1:
         return "repeated_run"
-    if is_machine_generated(label):
+    if is_machine_generated(label) or is_counter_farm_name(label):
         return "machine_generated"
     if is_templated_bulk_name(label):
         return "templated_bulk"

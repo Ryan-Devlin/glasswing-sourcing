@@ -248,6 +248,9 @@ BUCKETS = {
     "review": ("review", "coming_soon", "insufficient", "screened_out", "comp"),
     "denied": ("reject",),
 }
+# Needs Review shows rows a human could actually act on. score 0 means no
+# usable text was extracted at all.
+REVIEW_MINIMUM_SCORE = 1
 CORPUS_SOURCES = {
     "ai": ("crawler_cache",),
     "zone": ("zone_universe",),
@@ -736,6 +739,14 @@ def classifications(
         added_since = (
             datetime.now(timezone.utc) - timedelta(days=added_within_days)
         ).isoformat().replace("+00:00", "Z")
+    # A score of 0 is reserved for pages where no usable text was extracted,
+    # so a 0 in Needs Review is a row with nothing on it for a human to read.
+    # 44,313 of them were sitting in this tab -- sequential bulk registrations
+    # like zzzb1085.app through zzzb1099.app -- burying the real candidates.
+    # The `ghost` bucket is already excluded from this tab for exactly this
+    # reason; unreadable `insufficient` rows are the same thing and were left
+    # in. They are still retained and still reachable under All history.
+    minimum_score = REVIEW_MINIMUM_SCORE if bucket == "review" else 0
     rows = query_classifications(
         BUCKETS[bucket],
         limit=page_size,
@@ -743,6 +754,7 @@ def classifications(
         sort=sort,
         run_id=run_id,
         added_since=added_since,
+        minimum_score=minimum_score,
     )
     hidden = hidden_domain_set([row["domain"] for row in rows])
     tracked = tracked_domain_set([row["domain"] for row in rows])
@@ -760,11 +772,17 @@ def classifications(
         # The cached bucket counts know nothing about a date filter, so with
         # one applied the pager would still advertise every page of the
         # unfiltered bucket.
+        # The cached bucket counts know nothing about either filter, so with
+        # one applied the pager would still advertise every page of the
+        # unfiltered bucket.
         "total": (
             count_classifications(
-                BUCKETS[bucket], run_id=run_id, added_since=added_since
+                BUCKETS[bucket],
+                run_id=run_id,
+                added_since=added_since,
+                minimum_score=minimum_score,
             )
-            if added_since else counts[bucket]
+            if (added_since or minimum_score) else counts[bucket]
         ),
         "page": page,
         "page_size": page_size,

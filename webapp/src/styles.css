@@ -1446,6 +1446,7 @@ kbd {
    digit. The exact timestamp stays on the title attribute. */
 .added-at { white-space: nowrap; opacity: 0.8; }
 
-.added-filter {
-  margin-bottom: 10px;
+.sort-button.filtered {
+  font-weight: 600;
+  color: #116447;
 }

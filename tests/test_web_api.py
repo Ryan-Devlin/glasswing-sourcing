@@ -132,12 +132,52 @@ def test_classifications_are_server_paginated(monkeypatch):
 
     monkeypatch.setattr(web_api, "query_classifications", query)
     monkeypatch.setattr(web_api, "hidden_domain_set", lambda domains: set())
+    # Needs Review carries a score floor, so its total comes from a filtered
+    # count rather than the cached bucket counts -- otherwise the pager would
+    # advertise pages of unreadable rows the query will not return.
+    monkeypatch.setattr(
+        web_api, "count_classifications",
+        lambda buckets, **kwargs: captured.update(count=kwargs) or 501,
+    )
     response = client.get("/api/classifications?bucket=review&page=3&page_size=100&sort=Fit%3A%20low%20to%20high")
     assert response.status_code == 200
     assert response.json()["total"] == 501
     assert captured["limit"] == 100
     assert captured["offset"] == 200
     assert captured["sort"] == "Fit: low to high"
+
+
+def test_needs_review_hides_rows_with_nothing_to_read(monkeypatch):
+    """A score of 0 is reserved for pages where no usable text was extracted,
+    so a 0 in Needs Review is a row with nothing on it for a human to act on.
+    44,313 of them were in this tab -- sequential bulk registrations such as
+    zzzb1085.app through zzzb1099.app -- burying the real candidates. The
+    `ghost` bucket is already excluded from this tab for exactly this reason.
+    """
+    captured = {}
+    monkeypatch.setattr(web_api, "_count_cache", None)
+    monkeypatch.setattr(
+        web_api, "classification_bucket_counts",
+        lambda: {"review": 900, "reject": 1, "priority": 1},
+    )
+    monkeypatch.setattr(
+        web_api, "query_classifications",
+        lambda buckets, **kwargs: captured.update(kwargs) or [],
+    )
+    monkeypatch.setattr(
+        web_api, "count_classifications", lambda buckets, **kwargs: 7,
+    )
+    monkeypatch.setattr(web_api, "hidden_domain_set", lambda domains: set())
+
+    assert client.get("/api/classifications?bucket=review").status_code == 200
+    assert captured["minimum_score"] == web_api.REVIEW_MINIMUM_SCORE
+    assert captured["minimum_score"] >= 1
+
+    # Investable and Denied are unaffected: a 0 there is a decision already
+    # taken, not a row waiting on a human.
+    for bucket in ("investable", "denied"):
+        client.get(f"/api/classifications?bucket={bucket}")
+        assert captured["minimum_score"] == 0, bucket
 
 
 def test_current_run_scope_reaches_counts_and_rows(monkeypatch):

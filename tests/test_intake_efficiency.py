@@ -107,3 +107,36 @@ def test_guard_tallies_stay_in_domain_units():
     )
     assert reading.domains_observed == 1
     assert reading.dropped_by_guard == {"extension_not_tracked": 1}
+
+
+def test_a_tripled_letter_beside_a_counter_is_refused():
+    """Observed live as a sequential run of .app registrations reaching Needs
+    Review: zzzb1085, zzzb1086, zzzb1087, zzzb1089 ... zzzb1099, plus
+    zzzbvip764, pppp128, kppp698, heee555. None of the existing guards saw
+    them -- the repeated-run test needs the *whole* label to be one character,
+    and a four-digit counter sits under the five-digit run threshold.
+    """
+    for domain in (
+        "zzzb1653.app", "zzzbvip764.app", "zzzb1085.app", "zzzb1099.app",
+        "pppp128.xyz", "kppp698.xyz", "heee555.app", "ycyyy888.xyz",
+    ):
+        assert cf.guard_registrable(
+            domain, {".app", ".ai", ".xyz"}
+        ) == "machine_generated", domain
+
+
+def test_it_takes_both_halves_to_be_a_farm_name():
+    """The reason this is safe. A tripled letter alone would refuse a
+    plausible coined brand; a counter alone is ordinary branding, and refusing
+    it is the mistake this module already made once and fixed. Checked against
+    the live corpus, zero of the 28,762 rows scoring 25 or better are refused.
+    """
+    for domain in (
+        "buzzz.ai",       # tripled letter, no counter
+        "eco360.ai",      # counter, no tripled letter
+        "387labs.ai",
+        "101gen.ai",
+        "gpt7prompts.ai",
+        "figma.ai",
+    ):
+        assert cf.guard_registrable(domain, {".app", ".ai"}) == "", domain
