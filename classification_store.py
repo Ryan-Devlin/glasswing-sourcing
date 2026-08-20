@@ -590,7 +590,7 @@ COMPACT_CLASSIFICATION_FIELDS = {
     "website_green_flags", "green_flags_checked_at", "scorecard",
     # How long this one domain took to fetch and score, so the funnel can
     # report a per-domain median rather than a batch average.
-    "screen_seconds",
+    "screen_seconds", "fetch_seconds",
 }
 
 

@@ -4556,6 +4556,13 @@ async def process(
                 timeout,
                 homepage_only=homepage_only,
             )
+    # Split out so the per-domain figure can be read honestly. Nearly all of a
+    # domain's wall clock is this: waiting for a concurrency slot and then the
+    # HTTP round trip. The checks that follow operate on text already in
+    # memory -- the non-English test, for one, measures 1.3ms -- so quoting a
+    # domain's total time as the cost of any single check overstates it by
+    # three orders of magnitude.
+    fetch_seconds = round(time.monotonic() - started_monotonic, 3)
 
     def _score_and_bucket_domain():
         # The live CertStream pass only needs enough homepage evidence to
@@ -5032,6 +5039,8 @@ async def process(
             # Wall clock for this one domain: its fetch plus its scoring,
             # excluding the time it sat in the queue beforehand.
             "screen_seconds": round(time.monotonic() - started_monotonic, 3),
+            # Of which this much was getting the page at all.
+            "fetch_seconds": fetch_seconds,
             "final_url": page.url or f"https://{domain}",
             "website_attempted": page.url or f"https://{domain}",
             "http_status": page.status or "",
