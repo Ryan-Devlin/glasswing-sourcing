@@ -54,6 +54,28 @@ class Stage:
     # "parked", "registrar placeholder" and "would not load" are not three
     # steps, they are three ways of failing one.
     reasons: tuple[tuple[str, str, int], ...] = ()
+    # Median seconds from the certificate arriving to this verdict being
+    # written, per reason key. How fast a check is answers a different
+    # question from how much it removes, and the two are worth reading side by
+    # side: a check that cuts 44% of the population in eight seconds is doing
+    # something very different from one that takes hours to reach the same
+    # conclusion. Absent rather than zero when it cannot be measured, because
+    # "instant" and "unknown" must not render the same.
+    latency_seconds: dict[str, float] = field(default_factory=dict)
+
+    @property
+    def median_seconds(self) -> float | None:
+        """The stage's own latency: the median of its reasons, weighted by how
+        many rows each accounts for, so a rare slow check cannot dominate."""
+        weighted = [
+            (count, self.latency_seconds[key])
+            for key, _, count in self.reasons
+            if key in self.latency_seconds and count > 0
+        ]
+        if not weighted:
+            return None
+        total = sum(count for count, _ in weighted)
+        return sum(count * value for count, value in weighted) / total
 
     @property
     def survived(self) -> int:
@@ -95,9 +117,17 @@ class Stage:
                     "share_of_stage": round(
                         count / self.entered if self.entered else 0.0, 6
                     ),
+                    "median_seconds": (
+                        round(self.latency_seconds[key], 1)
+                        if key in self.latency_seconds else None
+                    ),
                 }
                 for key, label, count in self.reasons
             ],
+            "median_seconds": (
+                round(self.median_seconds, 1)
+                if self.median_seconds is not None else None
+            ),
         }
 
 
@@ -781,6 +811,7 @@ def build_flow_funnel(
     awaiting: int,
     reason_counts: dict[str, int],
     claude_sent: int,
+    reason_latency: dict[str, float] | None = None,
     note: str = "",
 ) -> dict[str, Funnel]:
     """The pipeline as two chains, because that is what it is.
@@ -869,6 +900,11 @@ def build_flow_funnel(
         stages.append(Stage(
             key=key, label=label, entered=remaining, dropped=removed,
             note=phase_note, reasons=tuple(rows),
+            latency_seconds={
+                reason: seconds
+                for reason, _, _ in rows
+                if (seconds := (reason_latency or {}).get(reason)) is not None
+            },
         ))
         remaining = max(0, remaining - removed)
 

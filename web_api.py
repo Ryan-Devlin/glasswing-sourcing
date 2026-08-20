@@ -1264,6 +1264,7 @@ def funnel_breakdown(day: str = ""):
     # two halves describe one population.
     queued = classified = candidates = reviewed = kept = awaiting = 0
     reason_counts: dict[str, int] = {}
+    reason_latency: dict[str, float] = {}
     queue_live = False
     conn = None
     try:
@@ -1317,6 +1318,42 @@ def funnel_breakdown(day: str = ""):
             "WHERE status IN ('pending','processing')"
         ).fetchone()["n"] or 0)
         queue_live = True
+        # How long each check took to reach its verdict, from the certificate
+        # arriving to the row being written. Measured per reason and rolled up
+        # per phase, because "this check removes 44% of the population" and
+        # "this check answers in eight seconds" are different facts and the
+        # page was only carrying the first.
+        #
+        # Its own try/except: percentile_disc is Postgres-only, and a funnel
+        # without timings is still a funnel, while a funnel that fails to
+        # render because a timing query did is not.
+        try:
+            for row in conn.execute(
+                """
+                SELECT x.routing_reason AS reason,
+                       percentile_disc(0.5) WITHIN GROUP (
+                           ORDER BY EXTRACT(EPOCH FROM (
+                               x.classified_at::timestamptz
+                               - d.first_seen::timestamptz))
+                       ) AS median_seconds
+                FROM pipeline.domains d
+                JOIN public.classifications x ON x.domain = d.domain
+                WHERE d.first_seen_run_id = ?
+                  AND d.first_seen <> '' AND x.classified_at <> ''
+                GROUP BY x.routing_reason
+                """,
+                (run_id,),
+            ):
+                seconds = row["median_seconds"]
+                if seconds is None:
+                    continue
+                seconds = float(seconds)
+                # A negative gap means the two clocks disagree mid-write, not
+                # that a verdict preceded its own certificate.
+                if seconds >= 0:
+                    reason_latency[str(row["reason"]).split("+")[0]] = seconds
+        except Exception:
+            pass
     except Exception:
         pass
     finally:
@@ -1362,6 +1399,7 @@ def funnel_breakdown(day: str = ""):
         awaiting=awaiting,
         reason_counts=reason_counts,
         claude_sent=reviewed,
+        reason_latency=reason_latency,
         note=(
             "Two chains, because intake and screening do not share a unit or "
             "a window. Intake counts sightings -- one per certificate a "

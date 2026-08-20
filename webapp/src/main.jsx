@@ -3350,6 +3350,19 @@ function StageBar({ stage }) {
   );
 }
 
+function durationLabel(seconds) {
+  // Absent and instant must not render the same: a check we cannot time is
+  // not a check that answered immediately.
+  if (seconds === null || seconds === undefined) return "";
+  const value = Number(seconds);
+  if (!Number.isFinite(value) || value < 0) return "";
+  if (value < 1) return "<1s";
+  if (value < 90) return `${Math.round(value)}s`;
+  if (value < 5400) return `${(value / 60).toFixed(value < 600 ? 1 : 0)}m`;
+  if (value < 172800) return `${(value / 3600).toFixed(1)}h`;
+  return `${(value / 86400).toFixed(1)}d`;
+}
+
 function FunnelTable({ funnel, openReasons = false }) {
   return (
     <table className="funnel-table">
@@ -3373,6 +3386,15 @@ function FunnelTable({ funnel, openReasons = false }) {
           <tr key={stage.key}>
             <td>
               <strong>{stage.label}</strong>
+              {stage.median_seconds !== null &&
+                stage.median_seconds !== undefined && (
+                  <span
+                    className="stage-latency"
+                    title="Median time from the certificate arriving to this verdict being written"
+                  >
+                    {durationLabel(stage.median_seconds)}
+                  </span>
+                )}
               {stage.note && <div className="funnel-note">{stage.note}</div>}
               {stage.reasons?.length > 0 && (
                 <details className="funnel-reasons" open={openReasons}>
@@ -3386,6 +3408,14 @@ function FunnelTable({ funnel, openReasons = false }) {
                         <span>{reason.label}</span>
                         <span className="n">
                           {num(reason.dropped)} · {pct(reason.share_of_stage)}
+                          {durationLabel(reason.median_seconds) && (
+                            <span
+                              className="reason-latency"
+                              title="Median time from the certificate arriving to this verdict"
+                            >
+                              {durationLabel(reason.median_seconds)}
+                            </span>
+                          )}
                         </span>
                       </li>
                     ))}

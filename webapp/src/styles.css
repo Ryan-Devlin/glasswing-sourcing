@@ -1450,3 +1450,18 @@ kbd {
   font-weight: 600;
   color: #116447;
 }
+
+.stage-latency {
+  margin-left: 8px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: #eef1f7;
+  color: #33416b;
+  font-size: 11px;
+  font-weight: 600;
+}
+.reason-latency {
+  margin-left: 8px;
+  color: #6b7280;
+  font-variant-numeric: tabular-nums;
+}
