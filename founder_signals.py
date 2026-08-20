@@ -48,6 +48,10 @@ DEFAULT_SIGNAL_WEIGHTS = {
     "new_personal_repository": 5,
     "activity_acceleration": 8,
     "commit_step_change": 18,
+    # The strongest corroboration available here: an independent system
+    # watching certificate transparency saw somebody provision the domain this
+    # person's repository points at.
+    "domain_in_certificate_feed": 30,
     "focus_left_the_day_job": 25,
     "new_organization": 15,
     "former_colleague_contributes": 15,
@@ -1144,6 +1148,70 @@ def focus_shift(candidate_id: str, *, now: datetime | None = None) -> dict[str, 
     }
 
 
+def certificate_feed_matches(candidate_id: str, *, now: datetime | None = None, window_days: int = 180) -> list[dict[str, Any]]:
+    """Domains on this person's repositories that the certificate feed has seen.
+
+    This is the corroboration only this system can produce. The sourcing
+    pipeline watches certificate transparency logs, so a domain appearing in
+    the classification corpus means a TLS certificate was issued for it --
+    which happens when somebody provisions it, typically weeks before there
+    is a site to look at.
+
+    A repository homepage on its own is weak: engineers link their blog, their
+    employer, a docs site. The same domain turning up independently in the
+    certificate feed, recently, is a different claim -- somebody stood
+    something up. Matching the two is what turns "this person has a side
+    project" into "this person registered infrastructure for it".
+
+    Read-only against the classification store, and deliberately not a
+    judgement about the company: what the screening pipeline concluded is
+    reported alongside, not folded in.
+    """
+    now = now or datetime.now(timezone.utc)
+    with _store(True) as conn:
+        repos = conn.execute(
+            "SELECT full_name,homepage,created_at FROM founder_github_repositories "
+            "WHERE candidate_id=? AND homepage<>''",
+            (candidate_id,),
+        ).fetchall()
+    wanted: dict[str, dict[str, Any]] = {}
+    for row in repos:
+        domain = stable_domain(str(row["homepage"] or ""))
+        if domain:
+            wanted.setdefault(domain, {"repository": str(row["full_name"]), "repo_created_at": str(row["created_at"] or "")})
+    if not wanted:
+        return []
+
+    cutoff = (now - timedelta(days=window_days)).isoformat().replace("+00:00", "Z")
+    matches: list[dict[str, Any]] = []
+    names = sorted(wanted)
+    with _store(True) as conn:
+        for start in range(0, len(names), 400):
+            batch = names[start:start + 400]
+            marks = ",".join("?" for _ in batch)
+            for row in conn.execute(
+                "SELECT domain,company_name,routing_bucket,fit_score,"
+                "COALESCE(NULLIF(classified_at,''),updated_at) AS first_seen "
+                f"FROM classifications WHERE domain IN ({marks})",
+                batch,
+            ).fetchall():
+                domain = str(row["domain"])
+                seen = str(row["first_seen"] or "")
+                matches.append({
+                    "domain": domain,
+                    "repository": wanted[domain]["repository"],
+                    "first_seen": seen,
+                    "company_name": str(row["company_name"] or ""),
+                    "routing_bucket": str(row["routing_bucket"] or ""),
+                    "fit_score": int(row["fit_score"] or 0),
+                    # Old registrations are the founder's blog or their
+                    # employer. Recency is what makes this a formation signal.
+                    "is_recent": bool(seen and seen >= cutoff),
+                })
+    matches.sort(key=lambda item: (not item["is_recent"], item["domain"]))
+    return matches
+
+
 COMMERCIAL_TERMS = ("design partner", "waitlist", "request access", "book a demo", "enterprise", "pricing")
 HIRING_TERMS = ("founding engineer", "first engineer", "early team", "join our founding team")
 
@@ -1174,6 +1242,24 @@ def calculate_signals(candidate_id: str, *, now: datetime | None = None) -> dict
                 "", weights["commit_step_change"], 80,
                 "Public activity stepped outside this person's own established "
                 "variation, rather than exceeding a fixed threshold.",
+            )
+        for match in certificate_feed_matches(candidate_id, now=now):
+            if not match["is_recent"]:
+                continue
+            verdict = (
+                f'; screening called it {match["routing_bucket"]} at '
+                f'{match["fit_score"]}' if match["routing_bucket"] else ""
+            )
+            added += _insert_signal(
+                conn, candidate_id, "domain_in_certificate_feed",
+                match["first_seen"] or now.isoformat(),
+                f'{match["domain"]}, linked from {match["repository"]}, was seen '
+                f'in the certificate feed on {match["first_seen"][:10]}{verdict}',
+                f'https://{match["domain"]}',
+                weights["domain_in_certificate_feed"], 90,
+                "A domain this person's repository points at was independently "
+                "observed being provisioned in certificate transparency logs.",
+                match["domain"],
             )
         shift = focus_shift(candidate_id, now=now)
         if shift["is_shift"]:

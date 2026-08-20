@@ -565,3 +565,92 @@ def test_two_people_in_the_same_org_both_collect(monkeypatch, tmp_path):
             ("anthropics",),
         ).fetchall()
     assert {str(row["candidate_id"]) for row in rows} == {first, second}
+
+
+def add_repo(database, candidate_id, full_name, homepage):
+    with classification_store.connect_store(database) as conn:
+        conn.execute(
+            "INSERT INTO founder_github_repositories(repository_id,candidate_id,"
+            "full_name,owner_login,homepage,created_at,updated_at,first_seen_at,"
+            "last_seen_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (f"{candidate_id}:{full_name}", candidate_id, full_name,
+             full_name.split("/")[0], homepage, fs.utc_now(), fs.utc_now(),
+             fs.utc_now(), fs.utc_now()),
+        )
+        conn.commit()
+
+
+def add_screened_domain(database, domain, *, days_ago=5, bucket="review", score=41):
+    import pandas as pd
+
+    when = (
+        datetime.now(timezone.utc) - timedelta(days=days_ago)
+    ).isoformat().replace("+00:00", "Z")
+    classification_store.upsert_classifications(pd.DataFrame([{
+        "domain": domain, "routing_bucket": bucket, "rule_score": score,
+        "page_title": f"{domain} homepage", "screened_at": when,
+    }]), path=database)
+
+
+def test_a_repo_domain_the_certificate_feed_saw_is_the_corroboration(monkeypatch, tmp_path):
+    """The signal only this system can compute. A repository homepage on its
+    own is weak -- engineers link their blog or their employer. The same
+    domain turning up independently in certificate transparency, recently, is
+    somebody having provisioned infrastructure.
+    """
+    database = setup_store(monkeypatch, tmp_path)
+    who = fs.create_candidate(person("Provisioning Pia"))["candidate_id"]
+    add_repo(database, who, "pia/vectorforge", "https://vectorforge.ai")
+    add_screened_domain(database, "vectorforge.ai", days_ago=4)
+
+    matches = fs.certificate_feed_matches(who)
+    assert [m["domain"] for m in matches] == ["vectorforge.ai"]
+    assert matches[0]["repository"] == "pia/vectorforge"
+    assert matches[0]["is_recent"] is True
+    # The screening verdict travels alongside rather than being folded in.
+    assert matches[0]["routing_bucket"] == "review"
+
+
+def test_a_long_standing_domain_is_not_a_formation_signal(monkeypatch, tmp_path):
+    """Old registrations are the founder's blog or their employer. Recency is
+    what makes the match mean anything."""
+    database = setup_store(monkeypatch, tmp_path)
+    who = fs.create_candidate(person("Blogging Bo"))["candidate_id"]
+    add_repo(database, who, "bo/notes", "https://bo-writes.com")
+    add_screened_domain(database, "bo-writes.com", days_ago=900)
+
+    matches = fs.certificate_feed_matches(who)
+    assert matches and matches[0]["is_recent"] is False
+    result = fs.calculate_signals(who)
+    with classification_store.connect_store(database, read_only=True) as conn:
+        kinds = {r["signal_type"] for r in conn.execute(
+            "SELECT signal_type FROM founder_signals WHERE candidate_id=?", (who,)
+        )}
+    assert "domain_in_certificate_feed" not in kinds
+
+
+def test_a_repo_domain_nobody_has_seen_produces_nothing(monkeypatch, tmp_path):
+    """No match is the common case and must stay silent rather than guessing."""
+    database = setup_store(monkeypatch, tmp_path)
+    who = fs.create_candidate(person("Unseen Uma"))["candidate_id"]
+    add_repo(database, who, "uma/tool", "https://never-registered-anywhere.ai")
+    assert fs.certificate_feed_matches(who) == []
+
+
+def test_the_correlation_reaches_the_score(monkeypatch, tmp_path):
+    database = setup_store(monkeypatch, tmp_path)
+    who = fs.create_candidate(person("Scoring Sky"))["candidate_id"]
+    add_repo(database, who, "sky/inferloop", "https://inferloop.ai")
+    add_screened_domain(database, "inferloop.ai", days_ago=3)
+
+    fs.calculate_signals(who)
+    with classification_store.connect_store(database, read_only=True) as conn:
+        row = conn.execute(
+            "SELECT evidence,strength FROM founder_signals WHERE candidate_id=? "
+            "AND signal_type='domain_in_certificate_feed'", (who,),
+        ).fetchone()
+    assert row is not None
+    assert "inferloop.ai" in row["evidence"]
+    assert "sky/inferloop" in row["evidence"]
+    assert int(row["strength"]) >= 25, "this is the strongest available corroboration"
+    assert fs.recalculate_scores(who)["founder_transition_score"] > 0
