@@ -1523,6 +1523,68 @@ ELITE_SCHOOL_SCORE_FLOOR = max(
     0, min(100, int(os.getenv("ELITE_SCHOOL_SCORE_FLOOR", "80")))
 )
 
+# Breadth, not repetition. A team that is ex-Google *and* has an MIT PhD *and*
+# sold its last company is a different proposition from one with three
+# mentions of Google, and the pedigree sum could not tell them apart -- it
+# capped each type and added them, so two employers scored the same as an
+# employer plus an exit. These floors key off how many *independent kinds* of
+# strong founder evidence a page carries.
+PEDIGREE_BREADTH_FLOORS = (
+    (3, max(0, min(100, int(os.getenv("PEDIGREE_BREADTH_3_FLOOR", "95"))))),
+    (2, max(0, min(100, int(os.getenv("PEDIGREE_BREADTH_2_FLOOR", "88"))))),
+)
+
+# The kinds that count as strong founder evidence in their own right. A named
+# founder is deliberately absent: knowing who someone is says nothing about
+# what they have done.
+STRONG_PEDIGREE_TYPES = (
+    "ivy_league_spinout",
+    "top_university_spinout",
+    "ex_big_tech",
+    "repeat_founder",
+    "prior_exit",
+    "deep_tech_ip",
+)
+
+
+def pedigree_breadth(flags: list[dict[str, str]]) -> int:
+    """How many independent kinds of strong founder evidence are present.
+
+    An elite school counts as its own kind, distinct from a merely strong one,
+    so an MIT founder who also went to a state school for a masters does not
+    read as two kinds while an MIT founder who sold a company does.
+    """
+    kinds: set[str] = set()
+    for flag in flags:
+        kind = str(flag.get("type", ""))
+        if kind not in STRONG_PEDIGREE_TYPES:
+            continue
+        if kind.endswith("_spinout"):
+            kinds.add(
+                "elite_school" if elite_school_flags([flag]) else "school"
+            )
+        else:
+            kinds.add(kind)
+    return len(kinds)
+
+
+def pedigree_score_floor(flags: list[dict[str, str]]) -> int:
+    """The score a founder team earns on its own, before the company.
+
+    Deliberately a floor and not a bonus: an exceptional team whose page is
+    still a paragraph is the single case where the page tells you least and
+    the row matters most.
+    """
+    floor = 0
+    if elite_school_flags(flags):
+        floor = ELITE_SCHOOL_SCORE_FLOOR
+    breadth = pedigree_breadth(flags)
+    for required, value in PEDIGREE_BREADTH_FLOORS:
+        if breadth >= required:
+            floor = max(floor, value)
+            break
+    return floor
+
 
 def elite_school_flags(
     flags: list[dict[str, str]],
@@ -1869,13 +1931,13 @@ def score_text(text: str) -> tuple[int, str, list[str], dict[str, int]]:
         )
         score = max(score, coverage_score)
 
-    # An Ivy League or MIT founder lifts the row on its own. Deliberately
+    # The founder team lifts the row on its own -- an Ivy or MIT education, or
+    # two and three independent kinds of strong pedigree stacking. Deliberately
     # after the low-value and dimension ceilings: those exist to stop keyword
     # density from inflating a thin page, and this is a claim about who is
-    # building it, which is exactly the case where a thin page is still worth
-    # a human's attention. Only the gated flag can trigger it.
-    if elite_school_flags(founder_flags):
-        score = max(score, ELITE_SCHOOL_SCORE_FLOOR)
+    # building it, which is exactly the case where a thin page is still worth a
+    # human's attention. Only gated flags can trigger it.
+    score = max(score, pedigree_score_floor(founder_flags))
 
     evidence = list(dict.fromkeys(
         pillar_hits[best]

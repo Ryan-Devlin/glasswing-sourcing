@@ -314,3 +314,54 @@ def test_a_keyword_list_is_not_a_sentence():
         "Our founder. Close researcher; mit; stanford physical ai; robotics"
     )
     assert [f for f in flags if f["type"].endswith("_spinout")] == []
+
+
+def test_breadth_of_pedigree_outranks_more_of_the_same():
+    """A team that is ex-Google *and* an MIT PhD *and* sold its last company
+    is a different proposition from one with three mentions of Google. The
+    pedigree sum could not tell them apart: it capped each type and added
+    them, so two employers scored the same as an employer plus an exit.
+    """
+    from filter import pedigree_breadth
+
+    one_kind = founder_green_flags(
+        "Our founder previously worked at Google and at Microsoft."
+    )
+    three_kinds = founder_green_flags(
+        "Our founder Jane Doe is an MIT PhD who previously worked at "
+        "Google; her previous company was acquired in 2023."
+    )
+    assert pedigree_breadth(one_kind) == 1
+    assert pedigree_breadth(three_kinds) == 3
+
+
+def test_a_well_rounded_elite_team_scores_near_the_top():
+    from filter import PEDIGREE_BREADTH_FLOORS
+
+    by_breadth = dict(PEDIGREE_BREADTH_FLOORS)
+    two = "Our cofounder previously worked at Nvidia and her previous company was acquired in 2022."
+    three = (
+        "Our founder Jane Doe is an MIT PhD who previously worked at "
+        "Google; her previous company was acquired in 2023."
+    )
+    assert score_text(two)[0] >= by_breadth[2]
+    assert score_text(three)[0] >= by_breadth[3]
+    # And breadth has to beat depth, not merely reach the same place.
+    assert by_breadth[3] > by_breadth[2]
+
+
+def test_one_kind_of_pedigree_alone_does_not_float_a_page():
+    """The instruction was well-rounded teams with exceptional pedigree. A
+    lone ex-big-tech mention is neither, and floors are strong enough that
+    handing one out on a single signal would refill the top of the funnel.
+    """
+    from filter import PEDIGREE_BREADTH_FLOORS, pedigree_score_floor
+
+    flags = founder_green_flags(
+        "Our founder previously worked at Google on infrastructure."
+    )
+    assert [f["type"] for f in flags] == ["ex_big_tech"]
+    assert pedigree_score_floor(flags) == 0
+    assert score_text(
+        "Our founder previously worked at Google on infrastructure."
+    )[0] < dict(PEDIGREE_BREADTH_FLOORS)[2]
