@@ -38,7 +38,8 @@ for source in (ROOT, AI_SRC, ZONE_SRC):
         sys.path.insert(0, str(source))
 
 from funnel import (
-    FEED_PARTS, Throughput, biggest_losses, build_daily_funnel, build_funnel,
+    FEED_PARTS, Throughput, biggest_losses, build_daily_funnel, build_flow_funnel,
+    build_funnel,
     build_zone_funnel, order_screening_reasons, partition_feed,
 )
 from ai_search.og_bridge import enqueue_for_screening
@@ -1278,8 +1279,12 @@ def funnel_breakdown(day: str = ""):
             classified += n
             if bucket in ("review", "priority", "comp"):
                 candidates += n
-            else:
-                reason_counts[reason] = reason_counts.get(reason, 0) + n
+            # Every reason, survivor or not. build_flow_funnel decides which
+            # ended a row's journey from the decision itself; splitting on the
+            # bucket here is what made "read the site -- not a fit" a single
+            # opaque row covering eight different guards.
+            base = reason.split("+")[0]
+            reason_counts[base] = reason_counts.get(base, 0) + n
         row = conn.execute(
             """
             SELECT count(*) AS reviewed,
@@ -1332,23 +1337,27 @@ def funnel_breakdown(day: str = ""):
     except Exception:
         pass
 
-    funnel = build_daily_funnel(
-        sources=sources,
-        junk_dropped=junk_dropped,
-        junk_reasons=junk_reasons,
-        screening_counts=reason_counts,
-        unscreened=max(0, queued - classified),
+    flow = build_flow_funnel(
+        observed=sum(max(0, int(n or 0)) for n in sources.values()),
+        intake_drops={
+            reason: count for reason, _, count in junk_reasons
+        },
+        guard_labels={
+            reason: label for reason, label, _ in junk_reasons
+        },
         awaiting=awaiting,
-        candidates=candidates,
-        sent_to_claude=reviewed,
-        claude_rejected=max(0, reviewed - kept),
-        source_rejected=source_rejected,
+        reason_counts=reason_counts,
+        claude_sent=reviewed,
         note=(
-            "This pass, every source, counted in domains at each step. "
-            "CertStream counts the current run and resets when the feed "
-            "restarts; the zone crawler counts its current queue version."
+            "Two chains, because intake and screening do not share a unit or "
+            "a window. Intake counts sightings -- one per certificate a "
+            "domain appears on -- for the current pass, and resets when the "
+            "listener restarts. Screening counts domains once each, from rows "
+            "that carry a verdict, and its phases follow route_company's own "
+            "evaluation order."
         ),
     )
+    funnel = flow["screening"]
 
     throughput: list[dict[str, object]] = []
     conn = None
@@ -1381,7 +1390,10 @@ def funnel_breakdown(day: str = ""):
         "run_id": run_id,
         "day": day or datetime.now(timezone.utc).date().isoformat(),
         "sources": sources,
+        # Two chains. `funnel` stays the screening chain so anything still
+        # reading that key keeps working; `intake` is the feed chain beside it.
         "funnel": funnel.to_dict(),
+        "intake": flow["intake"].to_dict(),
         "biggest_losses": biggest_losses(funnel),
         "domains_observed": observed,
         "hostnames_seen": int(status.get("hostnames_seen", 0) or 0),

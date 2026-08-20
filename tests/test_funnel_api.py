@@ -18,11 +18,14 @@ def _payload():
     return response.json()
 
 
-def test_returns_exactly_one_funnel():
-    # One pipeline. Three tables in two different units was the whole problem.
+def test_the_two_chains_are_the_two_units():
+    # One chain per unit, and only two. Three tables was the original
+    # problem; one table across two units was the replacement's problem --
+    # it needed an 86,088-row "verdict belongs to an earlier pass" step to
+    # absorb a mismatch that is a change of unit, not a loss.
     payload = _payload()
-    assert payload["funnel"]["name"] == "pipeline"
-    assert "screening" not in payload
+    assert payload["funnel"]["name"] == "screening"
+    assert payload["intake"]["name"] == "intake"
     assert "certstream" not in payload
 
 
@@ -36,23 +39,23 @@ def test_total_drops_never_exceed_the_top_line():
     assert dropped <= max(payload["funnel"]["entered"], 0)
 
 
-def test_the_funnel_is_the_six_steps_the_pipeline_actually_has():
-    # Find domains, drop junk, drop what never served a page, drop what did
-    # not fit, bucket, spend Claude. Rejection reasons nest inside the step
-    # they belong to; as peers they made this a 28-row table.
+def test_the_screening_phases_follow_the_code_path():
+    # route_company's own evaluation order: sitting in the queue, then the
+    # website-validity guards, then the factual disqualifiers, then the fit
+    # routes, then Claude. Collapsing those into "never served a usable page"
+    # and "read, not a fit" hid which of fourteen ordered checks was cutting.
     keys = [s["key"] for s in _payload()["funnel"]["stages"]]
-    assert keys == [
-        "junk", "source_rejected", "awaiting", "unscreened", "no_page",
-        "no_fit", "not_diligenced", "claude_reject",
-    ]
+    assert keys[:5] == ["queue", "no_page", "disqualified", "fit", "claude"]
+    # Anything beyond is the escape hatch for reasons nobody has mapped yet.
+    assert set(keys[5:]) <= {"unmapped"}
 
 
-def test_unscreened_domains_leave_the_funnel_explicitly():
-    # Measured live: 100 rows were marked complete with no verdict recorded.
-    # Letting them fall through counted them as having survived every
-    # screening step and reported 100 candidates where there were 5.
+def test_reconciliation_is_not_dressed_up_as_attrition():
+    # "Verdict belongs to an earlier pass" was the second-largest loss on an
+    # attrition page and nothing had been lost. Splitting the chains by unit
+    # removes the need for it entirely.
     keys = [s["key"] for s in _payload()["funnel"]["stages"]]
-    assert "unscreened" in keys
+    assert "unscreened" not in keys
 
 
 def test_the_live_chain_stays_arithmetically_closed():
@@ -81,12 +84,23 @@ def test_no_stage_reports_a_backlog_column():
         assert "pending" not in stage
 
 
-def test_the_top_line_is_every_source_summed():
+def test_the_intake_chain_starts_at_every_sighting():
     # "Domains discovered" used to report what survived the filter, which made
-    # layer 0 look like a trickle when the feed delivers far more. It is now
-    # every domain either source found today, before any judgement.
+    # layer 0 look like a trickle when the feed delivers far more. The intake
+    # chain now starts at everything either source presented, before any
+    # judgement -- and it is the intake chain that does, because the screening
+    # chain counts a different unit over a different window.
     payload = _payload()
-    assert payload["funnel"]["entered"] == sum(payload["sources"].values())
+    assert payload["intake"]["entered"] == sum(payload["sources"].values())
+
+
+def test_each_screening_drop_rate_is_charged_to_its_own_pool():
+    # "Rejected by the crawler that found it" showed 21.8% against a pool
+    # that was 98% CertStream, a rate that applied to none of it. Every stage
+    # now enters from the previous stage's survivors within one unit.
+    stages = _payload()["funnel"]["stages"]
+    for previous, nxt in zip(stages, stages[1:]):
+        assert nxt["entered"] == previous["survived"], nxt["key"]
 
 
 def test_liveness_flags_distinguish_no_data_from_a_real_zero():
@@ -201,8 +215,12 @@ def test_a_stale_guard_tally_is_blanked_and_declared(monkeypatch):
     )
     payload = _payload()
     assert payload["counters_resyncing"] is True
-    junk = next(s for s in payload["funnel"]["stages"] if s["key"] == "junk")
+    # The guard tally lives on the intake chain, which is the only chain that
+    # counts sightings and so the only one those counters describe.
+    intake = next(
+        s for s in payload["intake"]["stages"] if s["key"] == "intake"
+    )
     # Only the CertStream tally is stale. The zone crawler keeps its own
     # counters per shard and they are unaffected, so blanking those too would
     # hide a real filter to describe a different source's problem.
-    assert "machine_generated" not in {r["key"] for r in junk["reasons"]}
+    assert "machine_generated" not in {r["key"] for r in intake["reasons"]}

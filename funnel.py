@@ -620,3 +620,233 @@ FEED_PARTS = (
     ("filtered_out", "Screened out"),
     ("candidates", "Candidates retained"),
 )
+
+
+# The pipeline as the code actually experiences it, in the order the code
+# decides. Each entry is (phase, routing_reason, label).
+#
+# The reasons come straight from route_company's return statements, listed in
+# the order that function evaluates them, because that order is the funnel: a
+# domain dies at the first branch that claims it, so a reason further down was
+# only ever reached by rows that survived everything above. Grouping by
+# derived bucket instead -- which is what this page did -- collapses eight
+# distinct decisions into "never served a usable page" and "read, not a fit",
+# and loses the one thing an attrition view is for: which check is doing the
+# cutting.
+FLOW_PHASES = (
+    (
+        "intake",
+        "Refused on the name",
+        "certstream_filter.guard_registrable, before any request is made. "
+        "Costs nothing and is mostly your extension choice.",
+    ),
+    (
+        "queue",
+        "Waiting in the queue",
+        "Claimed or pending right now. Not a loss -- these have no verdict "
+        "yet.",
+    ),
+    (
+        "no_page",
+        "Never served a usable page",
+        "route_company's website-validity guards. Nothing was judged about "
+        "the company because there was no company page to read.",
+    ),
+    (
+        "disqualified",
+        "Disqualified on a fact",
+        "route_company's reject block, in the order it is evaluated. Each of "
+        "these is a specific, checkable fact rather than a low score.",
+    ),
+    (
+        "fit",
+        "Judged on fit",
+        "The site loaded and was read. These are judgements about the "
+        "company.",
+    ),
+    (
+        "claude",
+        "Claude diligence",
+        "Applied to whatever survived, under a daily budget.",
+    ),
+)
+
+FLOW_REASONS = (
+    # Website validity, in route_company order.
+    ("no_page", "parked_or_for_sale", "Parked or for sale"),
+    ("no_page", "generic_hosting_or_registrar_placeholder",
+     "Registrar or hosting placeholder"),
+    ("no_page", "inaccessible_site", "Site never loaded"),
+    ("no_page", "ghost_or_inaccessible_site", "Blank or inaccessible"),
+    ("no_page", "website_never_reachable_after_max_attempts",
+     "Never reachable, attempts exhausted"),
+    ("no_page", "website_unavailable_or_no_usable_company_evidence",
+     "No usable company evidence"),
+    # The factual disqualifiers, in route_company order.
+    ("disqualified", "predominantly_non_english", "Predominantly non-English"),
+    ("disqualified", "confirmed_non_us", "Confirmed non-US"),
+    ("disqualified", "consumer_b2c_product", "Consumer or B2C product"),
+    ("disqualified", "agency_or_consultancy", "Agency or consultancy"),
+    ("disqualified", "media_newsletter_or_aggregator",
+     "Media, newsletter or aggregator"),
+    ("disqualified", "hosting_or_domain_registration_business",
+     "Hosting or domain business"),
+    ("disqualified", "investor_or_venture_studio", "Investor or venture studio"),
+    ("disqualified", "commodity_ai_wrapper_or_service", "Commodity AI wrapper"),
+    # Fit, in route_company order. The score-based routes that end in a
+    # review bucket are survivors, not drops, and are marked as such below.
+    ("fit", "no_clear_enterprise_or_glasswing_fit",
+     "No clear enterprise or thesis fit"),
+    ("fit", "substantive_site_no_glasswing_fit_signals",
+     "Read, no thesis signals"),
+    ("fit", "insufficient_venture_quality_evidence",
+     "Insufficient venture-quality evidence"),
+    ("claude", "claude_reject", "Claude said REJECT"),
+)
+
+# Reasons that mean the domain is still alive. Kept explicit rather than
+# inferred from the bucket: a reason is a decision, and only the decision
+# knows whether it ended the row's journey.
+FLOW_SURVIVOR_REASONS = frozenset({
+    "verified_prelaunch_watch",
+    "trusted_high_conviction_product_fit",
+    "substantive_site_scored_for_human_review",
+    "venture_quality_investable",
+    "strong_investable_candidate",
+    "credible_venture_candidate_missing_one_dimension",
+    "credible_but_requires_human_review",
+    "enterprise_rescue_requires_human_review",
+    "thesis_fit_missing_wedge_or_moat",
+    "relevant_but_mature_or_funded",
+    "claude_keep",
+    "trusted_human_training_yes",
+    "human_ground_truth_yes",
+    "verified_portfolio_positive",
+    "manual_override_investable",
+    "manual_override_priority",
+})
+
+
+def _flow_reason_index() -> dict[str, tuple[str, str, int]]:
+    return {
+        reason: (phase, label, order)
+        for order, (phase, reason, label) in enumerate(FLOW_REASONS)
+    }
+
+
+def build_flow_funnel(
+    *,
+    observed: int,
+    intake_drops: dict[str, int],
+    guard_labels: dict[str, str],
+    awaiting: int,
+    reason_counts: dict[str, int],
+    claude_sent: int,
+    note: str = "",
+) -> dict[str, Funnel]:
+    """The pipeline as two chains, because that is what it is.
+
+    Intake and screening do not share a unit or a window and cannot honestly
+    be chained into one number. Intake counts *sightings* -- one per
+    certificate a domain appears on -- scoped to the current pass, and resets
+    when the listener restarts. Screening counts *domains*, once each, from
+    rows that carry a verdict. Running them as one chain is what forced the
+    old view to carry an 86,088-row "verdict belongs to an earlier pass" step
+    as its second-largest loss, to absorb a mismatch that is a change of unit
+    rather than an attrition.
+
+    So: one chain for the feed, one for what screening did with it, each drop
+    rate charged against the pool it actually applies to. The phases inside
+    the screening chain follow ``route_company``'s own evaluation order, since
+    a domain dies at the first branch that claims it.
+    """
+    index = _flow_reason_index()
+
+    intake_rows = [
+        (reason, guard_labels.get(reason, reason.replace("_", " ")), count)
+        for reason, count in sorted(
+            intake_drops.items(), key=lambda item: -item[1]
+        )
+        if count > 0
+    ]
+    refused = sum(count for _, _, count in intake_rows)
+    intake = Funnel(name="intake", note=note, stages=[Stage(
+        key="intake",
+        label="Refused on the name",
+        entered=max(0, int(observed or 0)),
+        dropped=max(0, min(refused, max(0, int(observed or 0)))),
+        note="certstream_filter.guard_registrable, before any request is "
+             "made. Costs nothing, and is mostly your extension choice "
+             "rather than a filter finding anything wrong.",
+        reasons=tuple(intake_rows),
+    )])
+
+    by_phase: dict[str, list[tuple[str, str, int]]] = {}
+    survivors = 0
+    unmapped: list[tuple[str, str, int]] = []
+    for reason, count in reason_counts.items():
+        if count <= 0:
+            continue
+        if reason in FLOW_SURVIVOR_REASONS:
+            survivors += count
+            continue
+        entry = index.get(reason)
+        if entry is None:
+            unmapped.append((reason, reason.replace("_", " "), count))
+            continue
+        phase, label, _ = entry
+        by_phase.setdefault(phase, []).append((reason, label, count))
+    for rows in by_phase.values():
+        rows.sort(key=lambda row: index.get(row[0], ("", "", 0))[2])
+
+    screened_total = (
+        sum(count for rows in by_phase.values() for _, _, count in rows)
+        + sum(count for _, _, count in unmapped)
+        + survivors
+    )
+
+    stages: list[Stage] = []
+    remaining = screened_total + max(0, int(awaiting or 0))
+    for key, label, phase_note in FLOW_PHASES:
+        if key == "intake":
+            continue
+        if key == "queue":
+            rows = (
+                [("awaiting", "Claimed or pending", int(awaiting))]
+                if int(awaiting or 0) > 0 else []
+            )
+        elif key == "claude":
+            never_sent = max(0, remaining - max(0, int(claude_sent or 0)))
+            rows = [
+                row for row in (
+                    ("not_sent", "Never sent \u2014 daily budget", never_sent),
+                    *by_phase.get(key, []),
+                ) if row[2] > 0
+            ]
+        else:
+            rows = by_phase.get(key, [])
+        dropped = sum(count for _, _, count in rows)
+        removed = max(0, min(dropped, remaining))
+        stages.append(Stage(
+            key=key, label=label, entered=remaining, dropped=removed,
+            note=phase_note, reasons=tuple(rows),
+        ))
+        remaining = max(0, remaining - removed)
+
+    if unmapped:
+        total = sum(count for _, _, count in unmapped)
+        stages.append(Stage(
+            key="unmapped",
+            label="Decisions with no place in the flow yet",
+            entered=remaining,
+            dropped=max(0, min(total, remaining)),
+            note="routing_reason values this view does not know about. Shown "
+                 "rather than folded away: a decision nobody has labelled is "
+                 "the one worth looking at.",
+            reasons=tuple(sorted(unmapped, key=lambda row: -row[2])),
+        ))
+
+    return {
+        "intake": intake,
+        "screening": Funnel(name="screening", note=note, stages=stages),
+    }

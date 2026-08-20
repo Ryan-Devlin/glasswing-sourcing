@@ -3298,7 +3298,7 @@ function StageBar({ stage }) {
   );
 }
 
-function FunnelTable({ funnel }) {
+function FunnelTable({ funnel, openReasons = false }) {
   return (
     <table className="funnel-table">
       <thead>
@@ -3323,8 +3323,11 @@ function FunnelTable({ funnel }) {
               <strong>{stage.label}</strong>
               {stage.note && <div className="funnel-note">{stage.note}</div>}
               {stage.reasons?.length > 0 && (
-                <details className="funnel-reasons">
-                  <summary>{stage.reasons.length} reasons</summary>
+                <details className="funnel-reasons" open={openReasons}>
+                  <summary>
+                    {stage.reasons.length}{" "}
+                    {stage.reasons.length === 1 ? "check" : "checks"}
+                  </summary>
                   <ul>
                     {stage.reasons.map((reason) => (
                       <li key={reason.key}>
@@ -3365,8 +3368,10 @@ function FunnelPage() {
     <section className="funnel-page">
       <h1>Pipeline — this pass</h1>
       <p className="funnel-lede">
-        CertStream counts the current listener run and returns to zero when
-        the feed restarts. The zone crawler counts its current queue version.
+        Two chains, because intake and screening do not share a unit or a
+        window. Each drop below is a decision the pipeline actually recorded,
+        and the checks inside a phase are listed in the order the code
+        evaluates them — a domain dies at the first one that claims it.
       </p>
 
       <div className="throughput">
@@ -3415,7 +3420,30 @@ function FunnelPage() {
         </p>
       )}
 
-      <FunnelTable funnel={funnel} />
+      {data.intake && (
+        <>
+          <h2>Intake — refused on the name</h2>
+          <p className="funnel-lede">
+            Counted in <strong>sightings</strong>: one per certificate a domain
+            appears on, so a domain renewing five times counts five times.
+            Resets when the listener restarts. Nothing here costs a request,
+            and most of it is your extension choice rather than a filter
+            finding anything wrong.
+          </p>
+          <FunnelTable funnel={data.intake} openReasons />
+        </>
+      )}
+
+      <h2>Screening — what happened to the domains we kept</h2>
+      <p className="funnel-lede">
+        Counted in <strong>domains</strong>, once each, from rows that carry a
+        verdict. Phases follow <code>route_company</code>'s own evaluation
+        order. This chain does not continue the one above: the two count
+        different things, which is why the old view needed an
+        86,088-row&nbsp;&ldquo;verdict belongs to an earlier pass&rdquo; step
+        to absorb the difference.
+      </p>
+      <FunnelTable funnel={funnel} openReasons />
       <p className="funnel-note">{funnel.note}</p>
 
       {data.biggest_losses?.length > 0 && (

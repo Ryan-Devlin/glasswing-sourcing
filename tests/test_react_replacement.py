@@ -58,7 +58,10 @@ def test_react_app_has_every_primary_page_and_no_streamlit_dependency():
     # one commit; both sources now share the six-step funnel, because below
     # intake they share every step.
     assert "zone_funnel" not in source
-    assert source.count("<FunnelTable funnel=") == 1
+    # Two tables now, one per unit: sightings at intake, domains at screening.
+    # They are not one chain, and rendering them as one is what required a
+    # reconciliation step to stand in as the second-largest "loss".
+    assert source.count("<FunnelTable funnel=") == 2
     # Reasons are detail on a step, not steps themselves.
     assert "funnel-reasons" in source
     assert "stage.reasons" in source

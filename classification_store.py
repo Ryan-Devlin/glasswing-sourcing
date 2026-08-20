@@ -1321,6 +1321,50 @@ def query_source_classifications(
 ADDED_AT_SQL = "COALESCE(NULLIF(classifications.classified_at,''),classifications.updated_at)"
 
 
+def routing_reason_counts(
+    *,
+    run_id: str = "",
+    added_since: str = "",
+    path: Path | str = CLASSIFICATION_DB,
+) -> dict[str, int]:
+    """How many rows each routing_reason accounts for.
+
+    routing_reason records which branch of ``route_company`` a domain actually
+    died on, so counting it is the only way to describe the funnel as the code
+    experiences it rather than as a set of derived buckets. The pedigree-floor
+    suffix is stripped: it records that a score was lifted, not a different
+    decision.
+    """
+    if not using_classification_postgres() and not Path(path).exists():
+        return {}
+    clauses: list[str] = []
+    params: list[object] = []
+    if clean(run_id):
+        clauses.append(
+            "EXISTS (SELECT 1 FROM classification_run_membership m "
+            "WHERE m.domain=classifications.domain AND m.run_id=?)"
+        )
+        params.append(clean(run_id))
+    if clean(added_since):
+        clauses.append(ADDED_AT_SQL + " >= ?")
+        params.append(clean(added_since))
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    with connect_store(path, read_only=True) as conn:
+        rows = conn.execute(
+            "SELECT routing_reason, count(*) AS n FROM classifications"
+            + where
+            + " GROUP BY routing_reason",
+            params,
+        ).fetchall()
+    counts: dict[str, int] = {}
+    for row in rows:
+        reason = clean(row["routing_reason"]).split("+")[0]
+        if not reason:
+            reason = "unrecorded"
+        counts[reason] = counts.get(reason, 0) + int(row["n"] or 0)
+    return counts
+
+
 def count_classifications_in_buckets(
     buckets: Iterable[str],
     *,
