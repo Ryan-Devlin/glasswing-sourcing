@@ -1343,6 +1343,74 @@ def mark_success(conn: sqlite3.Connection, domains: list[str]) -> None:
         )
     conn.commit()
 
+def schedule_batch_revisits(conn: sqlite3.Connection, output) -> int:
+    """Queue a second look at every row in a batch that read as empty."""
+    import revisit
+
+    try:
+        rows = [
+            {"domain": row.get("domain"), "routing_reason": row.get("routing_reason")}
+            for row in (
+                output.to_dict(orient="records")
+                if hasattr(output, "to_dict") else list(output or [])
+            )
+        ]
+    except Exception:
+        return 0
+    if not rows:
+        return 0
+    try:
+        revisit.ensure_schema(conn)
+        return revisit.schedule_revisits(conn, rows)
+    except Exception as exc:
+        # An extra chance is not worth failing a batch over.
+        write_status(last_revisit_error=f"{type(exc).__name__}: {exc}"[:200])
+        return 0
+
+
+def requeue_due_revisits(conn: sqlite3.Connection, limit: int = 300) -> int:
+    """Put domains whose revisit has come due back in front of the crawler.
+
+    A certificate is issued when a domain is *provisioned*, which is days or
+    weeks before anything is deployed at it -- so most of what CertStream
+    delivers is an empty address, and "parked" is a fact about the calendar
+    rather than about the company. Measured on the live corpus: 52,829 rows,
+    16.6% of everything ever screened, carry a terminal verdict recorded
+    against a page nobody ever saw. That is the single largest loss in the
+    funnel, larger than every factual disqualifier combined.
+
+    This is the only path that reopens them, and it is deliberately narrow:
+    two further looks, at 14 and 30 days from the first screening, and only
+    for reasons that mean "there was nothing to read" rather than "this is not
+    a fit". Re-deciding a settled question would spend the crawl budget the
+    reopening is for.
+    """
+    import revisit
+
+    try:
+        revisit.ensure_schema(conn)
+        due = revisit.claim_due_revisits(conn, limit=limit)
+    except Exception as exc:
+        # Never fatal. A revisit is an extra chance, so failing to schedule
+        # one must not stop the batch that is actually in front of us.
+        write_status(last_revisit_error=f"{type(exc).__name__}: {exc}"[:200])
+        return 0
+    if not due:
+        return 0
+    now = utc_now()
+    marks = ",".join("?" for _ in due)
+    # Back to pending with the attempt counter cleared: the retry backoff
+    # measures "this fetch keeps failing", and a revisit is a new question
+    # being asked a fortnight later, not a continuation of that.
+    conn.execute(
+        f"UPDATE domains SET status='pending', attempts=0, next_attempt_at=?, "
+        f"last_error='' WHERE domain IN ({marks})",
+        (now, *due),
+    )
+    conn.commit()
+    return len(due)
+
+
 def persist_unreachable_domains(
     domains_with_errors: list[tuple[str, str]],
 ) -> None:
@@ -2676,6 +2744,13 @@ async def worker_loop(
 
     started_monotonic = time.monotonic()
     previous_rate_time = started_monotonic
+    # Revisits are swept on their own clock rather than every tick: the due
+    # set changes on a scale of days, and the sweep is a write.
+    revisit_sweep_seconds = max(
+        60.0, float(os.getenv("REVISIT_SWEEP_SECONDS", "900"))
+    )
+    revisit_swept_at = 0.0
+    revisits_reopened = 0
     previous_received = 0
     previous_processed = 0
     total_batch_seconds = 0.0
@@ -2760,6 +2835,20 @@ async def worker_loop(
         )
         if 0 < pending < min(20, int(profile["batch_size"])):
             await asyncio.sleep(max(0.0, min(flush_seconds, 2.0)))
+
+        # Reopen anything whose second look is due before asking for work, so
+        # a revisit competes for the same batch as a fresh domain rather than
+        # waiting for the queue to empty -- it never does.
+        now_monotonic = time.monotonic()
+        if now_monotonic - revisit_swept_at >= revisit_sweep_seconds:
+            revisit_swept_at = now_monotonic
+            reopened = await asyncio.to_thread(requeue_due_revisits, conn)
+            if reopened:
+                revisits_reopened += reopened
+                write_status(
+                    revisits_reopened=revisits_reopened,
+                    last_revisit_sweep_at=utc_now(),
+                )
 
         domains = claim_batch(
             conn,
@@ -2879,6 +2968,12 @@ async def worker_loop(
                 screening_filter.persist_screening_output,
                 output,
             )
+            # A verdict of "nothing there" is a fact about the calendar, not
+            # about the company: the certificate that put this domain in the
+            # queue was issued when somebody provisioned it, often weeks
+            # before there is a site. Queue a second look before the row is
+            # closed out, or it never gets one.
+            await asyncio.to_thread(schedule_batch_revisits, conn, output)
             screening_stats = {
                 **persisted_stats,
                 "timed_out_domains": timed_out_before_persist,
