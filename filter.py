@@ -1264,8 +1264,17 @@ def founder_green_flags(text: str) -> list[dict[str, str]]:
     if not cleaned:
         return []
     sentences = [
+        # Bio lines are separated by middle dots and semicolons far more
+        # often than by full stops -- "MS Mariana Silva Legal · Standard
+        # Solar", or a skills list joined by "; ". Without those delimiters
+        # such a line stays one enormous "sentence", and the attendance and
+        # employment patterns -- which match within a short span containing no
+        # full stop -- reach across unrelated fragments: sparkhq.ai earned both
+        # a Chicago and a Brown flag out of one such blob. Splitting on them is
+        # strictly more conservative, since every pattern here wants its
+        # evidence inside a single clause.
         clean(item)
-        for item in re.split(r"(?<=[.!?])\s+|\s*[|•]\s*", cleaned)
+        for item in re.split(r"(?<=[.!?])\s+|\s*[|•·;]\s*", cleaned)
         if clean(item)
     ]
     founder_terms = tuple(FOUNDER_VISIBILITY_SIGNALS + [
