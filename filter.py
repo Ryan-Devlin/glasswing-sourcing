@@ -557,10 +557,25 @@ US_LOCATION_TERMS = [
     "west virginia", "wisconsin", "wyoming", "district of columbia"
 ]
 
+# The list was the eight Ivies plus a handful of US names, which leaves out
+# most of the places that actually produce technical founders. Carnegie
+# Mellon, Berkeley by name, Waterloo, Oxford, Cambridge, ETH, the Technion,
+# the IITs and Tsinghua were all absent -- while the founder table already
+# holds people from Waterloo, MIT CSAIL and IIT Delhi, so the gap was costing
+# real matches. Non-US schools are included deliberately: where a founder
+# studied is pedigree, and is a separate question from where the company is
+# incorporated, which company_location_assessment answers on its own.
 STRONG_US_SCHOOLS = ["harvard", "mit", "stanford", "yale", "princeton", "columbia",
-                     "caltech", "chicago", "upenn", "cornell", "duke", "northwestern", 
+                     "caltech", "chicago", "upenn", "cornell", "duke", "northwestern",
                      "johns hopkins", "brown", "dartmouth", "washington university",
-                       "university of california", "university of michigan"]
+                     "university of california", "university of michigan",
+                     "carnegie mellon", "berkeley", "uc berkeley",
+                     "georgia tech", "ut austin", "cornell tech",
+                     "waterloo", "toronto", "mcgill",
+                     "oxford", "cambridge", "imperial college", "eth zurich",
+                     "epfl", "technion", "weizmann",
+                     "iit", "iisc", "tsinghua", "peking university",
+                     "nus", "nanyang", "kaist", "tokyo institute of technology"]
 MID_US_SCHOOLS = ["penn state", "university of florida", "university of texas",
                   "university of wisconsin", "university of washington", "university of illinois",
                   "university of minnesota", "university of arizona", "university of colorado",
@@ -1382,8 +1397,12 @@ def founder_green_flags(text: str) -> list[dict[str, str]]:
             rf"\b{escaped_school}\b[^.]{{0,30}}?\b(?:alum\w*|graduates?|"
             rf"grad|phd|ph\.d|mba|undergraduate|degree|dropout|professor|"
             rf"faculty|researcher|lab)\b",
-            rf"\b(?:alum\w*|graduates?|phd|ph\.d|mba|degree|dropout)\b"
-            rf"[^.]{{0,30}}?\b{escaped_school}\b",
+            # "a researcher at UC Berkeley", "professor at Stanford" -- the
+            # role can come before the school as easily as after it, and the
+            # trailing form below already accepted these words.
+            rf"\b(?:alum\w*|graduates?|phd|ph\.d|mba|degree|dropout|"
+            rf"researcher|professor|faculty|postdoc|scientist|lab|"
+            rf"studying|student)\b[^.]{{0,30}}?\b{escaped_school}\b",
         )
         evidence = ""
         for sentence in contexts:
@@ -1405,7 +1424,7 @@ def founder_green_flags(text: str) -> list[dict[str, str]]:
             if school.lower() in ivy
             else "top_university_spinout"
         )
-        school_label = school.upper() if school.lower() == "mit" else school.title()
+        school_label = SCHOOL_LABELS.get(school.lower(), school.title())
         add(kind, f"{school_label} team", evidence)
 
     employer_hits = occurrences(context, STRONG_WORK_EXPERIENCE)
@@ -1505,9 +1524,26 @@ def founder_green_flags(text: str) -> list[dict[str, str]]:
 
 # The Ivy League plus MIT. Kept apart from STRONG_US_SCHOOLS because these
 # carry their own routing consequence below, not merely a pedigree weight.
+# Schools whose verified attendance floors the score on its own. This was the
+# eight Ivies plus MIT, which for a deep-tech thesis has the ordering
+# backwards: it floored a Brown or Dartmouth graduate and not a Stanford,
+# Berkeley, Caltech or Carnegie Mellon one. Those four are peer-or-above for
+# founding a technical company, and the last three are where a great deal of
+# the field's research actually comes from.
+# How each name is written, for the ones title-casing gets wrong: "Iit team"
+# and "Uc Berkeley team" both read as typos.
+SCHOOL_LABELS = {
+    "mit": "MIT", "iit": "IIT", "iisc": "IISc", "nus": "NUS",
+    "epfl": "EPFL", "eth zurich": "ETH Zurich", "kaist": "KAIST",
+    "ut austin": "UT Austin", "uc berkeley": "UC Berkeley",
+    "mcgill": "McGill", "imperial college": "Imperial College",
+}
+
+
 ELITE_FOUNDER_SCHOOLS = (
     "harvard", "yale", "princeton", "columbia", "upenn", "cornell",
     "brown", "dartmouth", "mit",
+    "stanford", "caltech", "berkeley", "carnegie mellon",
 )
 
 # A verified elite-school founder is treated as a high-conviction signal in

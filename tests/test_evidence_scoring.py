@@ -403,3 +403,68 @@ def test_a_disqualified_company_is_not_rescued_by_its_founders():
     # decision arrives too late to matter.
     elite = "Our cofounder studied computer science at Brown University."
     assert score_text(elite)[0] < 80
+
+
+def test_the_schools_that_produce_technical_founders_are_recognised():
+    """The list was the eight Ivies plus a handful of US names. Carnegie
+    Mellon, Berkeley by name, Waterloo, Oxford, Cambridge, ETH, the Technion,
+    the IITs and Tsinghua were all absent -- while the founder table already
+    holds people from Waterloo, MIT CSAIL and IIT Delhi, so the gap was
+    costing real matches.
+    """
+    for text, expected in (
+        ("Our cofounder earned a robotics PhD at Carnegie Mellon University.",
+         "Carnegie Mellon team"),
+        ("Our founder was a researcher at UC Berkeley before starting this.",
+         "UC Berkeley team"),
+        ("Our cofounder is a University of Waterloo graduate.", "Waterloo team"),
+        ("Our founder completed a doctorate at Oxford University.", "Oxford team"),
+        ("Our cofounder studied at ETH Zurich before founding this.",
+         "ETH Zurich team"),
+        ("Manish Gupta Founder and CEO, PhD from IIT Delhi.", "IIT team"),
+    ):
+        labels = {flag["label"] for flag in founder_green_flags(text)}
+        assert expected in labels, f"{text!r} -> {labels}"
+
+
+def test_a_research_role_reads_as_attendance_either_way_round():
+    """"a researcher at UC Berkeley" put the role before the school, and only
+    the trailing form was accepted, so it matched nothing."""
+    for text in (
+        "Our founder was a researcher at UC Berkeley before starting this.",
+        "Our cofounder, a professor at Stanford, leads the science.",
+        "Our founder was at MIT CSAIL as a research scientist.",
+    ):
+        assert [
+            f for f in founder_green_flags(text) if f["type"].endswith("_spinout")
+        ], text
+
+
+def test_stanford_berkeley_caltech_and_cmu_reach_the_elite_floor():
+    """The floor covered the eight Ivies plus MIT, which for a deep-tech
+    thesis has the ordering backwards: it floored a Brown or Dartmouth
+    graduate and not a Stanford, Berkeley, Caltech or Carnegie Mellon one.
+    """
+    from filter import ELITE_SCHOOL_SCORE_FLOOR, pedigree_score_floor
+
+    for text in (
+        "Our founder holds a PhD from Stanford University.",
+        "Our founder was a researcher at UC Berkeley before starting this.",
+        "Our cofounder earned a robotics PhD at Carnegie Mellon University.",
+        "Our cofounder studied physics at Caltech.",
+    ):
+        floor = pedigree_score_floor(founder_green_flags(text))
+        assert floor >= ELITE_SCHOOL_SCORE_FLOOR, text
+
+
+def test_widening_the_list_did_not_widen_the_gate():
+    """Every added name still has to appear as a place somebody attended."""
+    for text in (
+        "Trusted by teams at Stanford, Harvard and Berkeley. Our founder loves software.",
+        "Our founder released it under the MIT License on GitHub.",
+        "Chris Brown CEO & Co-Founder 3x Founder & Product Leader 3 exits",
+        "Our platform integrates with Cambridge Analytics and Oxford Instruments.",
+    ):
+        assert [
+            f for f in founder_green_flags(text) if f["type"].endswith("_spinout")
+        ] == [], text
