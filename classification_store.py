@@ -1315,6 +1315,51 @@ def query_source_classifications(
     return [dict(row) for row in rows]
 
 
+# A row's "date added" as the UI means it. classified_at is when the company
+# was first screened; updated_at is refreshed by every re-screen, so it is only
+# a fallback for rows that predate the column.
+ADDED_AT_SQL = "COALESCE(NULLIF(classifications.classified_at,''),classifications.updated_at)"
+
+
+def count_classifications(
+    buckets: Iterable[str],
+    *,
+    run_id: str = "",
+    added_since: str = "",
+    path: Path | str = CLASSIFICATION_DB,
+) -> int:
+    """How many rows a filtered page-through will actually find.
+
+    The pager's total comes from cached bucket counts, which know nothing about
+    a date filter -- so without this, filtering to one day still advertised
+    fourteen hundred pages of results.
+    """
+    bucket_values = list(dict.fromkeys(str(value) for value in buckets))
+    if not bucket_values or (
+        not using_classification_postgres() and not Path(path).exists()
+    ):
+        return 0
+    marks = ",".join("?" for _ in bucket_values)
+    clauses = [f"routing_bucket IN ({marks})"]
+    params: list[object] = list(bucket_values)
+    if clean(run_id):
+        clauses.append(
+            "EXISTS (SELECT 1 FROM classification_run_membership m "
+            "WHERE m.domain=classifications.domain AND m.run_id=?)"
+        )
+        params.append(clean(run_id))
+    if clean(added_since):
+        clauses.append(ADDED_AT_SQL + " >= ?")
+        params.append(clean(added_since))
+    with connect_store(path, read_only=True) as conn:
+        row = conn.execute(
+            "SELECT count(*) AS n FROM classifications WHERE "
+            + " AND ".join(clauses),
+            params,
+        ).fetchone()
+    return int(row["n"] or 0) if row else 0
+
+
 def query_classifications(
     buckets: Iterable[str],
     *,
@@ -1322,6 +1367,7 @@ def query_classifications(
     offset: int = 0,
     sort: str = "Priority: high to low",
     run_id: str = "",
+    added_since: str = "",
     path: Path | str = CLASSIFICATION_DB,
 ) -> list[dict[str, object]]:
     """Page through the master classification table without loading its HTML."""
@@ -1352,6 +1398,12 @@ def query_classifications(
             "WHERE m.domain=classifications.domain AND m.run_id=?)"
         )
         params.append(clean(run_id))
+    if clean(added_since):
+        # The same expression the "Date added" column reads and the "Recently
+        # detected" sort orders by, so filtering agrees with what the column
+        # shows rather than quietly using a different timestamp.
+        clauses.append(ADDED_AT_SQL + " >= ?")
+        params.append(clean(added_since))
     params.extend([bounded_limit, bounded_offset])
     with connect_store(path, read_only=True) as conn:
         rows = conn.execute(

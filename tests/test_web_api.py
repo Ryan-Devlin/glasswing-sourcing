@@ -1058,3 +1058,78 @@ def test_the_feed_tiles_add_up_to_the_feed():
     parts = sum(part["value"] for part in payload["feed_parts"])
     assert parts == split["observed"]
     assert all(part["value"] >= 0 for part in payload["feed_parts"])
+
+
+def test_date_filter_narrows_the_rows_and_the_pager(tmp_path, monkeypatch):
+    """A page holds 100 rows out of a hundred thousand, so this has to happen
+    in SQL. And the pager's total comes from cached bucket counts that know
+    nothing about the filter -- without its own count, filtering to one day
+    still advertised every page of the unfiltered bucket.
+    """
+    import pandas as pd
+
+    import classification_store
+    from classification_store import (
+        count_classifications,
+        query_classifications,
+        upsert_classifications,
+    )
+
+    database = tmp_path / "classifications.sqlite3"
+    now = datetime.now(timezone.utc)
+    rows = []
+    for days, domain in ((0, "today.ai"), (3, "recent.ai"), (100, "ancient.ai")):
+        rows.append({
+            "domain": domain,
+            "routing_bucket": "review",
+            "screened_at": (
+                now - timedelta(days=days)
+            ).isoformat().replace("+00:00", "Z"),
+        })
+    upsert_classifications(pd.DataFrame(rows), path=database)
+
+    def domains(added_since):
+        return {
+            row["domain"] for row in query_classifications(
+                ["review"], added_since=added_since, path=database
+            )
+        }
+
+    cutoff_7 = (now - timedelta(days=7)).isoformat().replace("+00:00", "Z")
+    assert domains("") == {"today.ai", "recent.ai", "ancient.ai"}
+    assert domains(cutoff_7) == {"today.ai", "recent.ai"}
+    assert count_classifications(
+        ["review"], added_since=cutoff_7, path=database
+    ) == 2
+    assert count_classifications(["review"], path=database) == 3
+
+
+def test_date_filter_reads_the_same_timestamp_the_column_shows(tmp_path):
+    """The column dates a row by classified_at, falling back to updated_at.
+    A re-screen refreshes updated_at, so filtering on it instead would make
+    an old company reappear as new the moment the crawler revisited it.
+    """
+    import pandas as pd
+
+    from classification_store import query_classifications, upsert_classifications
+
+    database = tmp_path / "classifications.sqlite3"
+    old_day = "2020-01-01T00:00:00Z"
+    upsert_classifications(pd.DataFrame([{
+        "domain": "long-known.ai",
+        "routing_bucket": "review",
+        "screened_at": old_day,
+    }]), path=database)
+    # Re-screen it: updated_at becomes now, classified_at must not move.
+    upsert_classifications(pd.DataFrame([{
+        "domain": "long-known.ai",
+        "routing_bucket": "review",
+        "screened_at": old_day,
+    }]), path=database)
+
+    recent = (
+        datetime.now(timezone.utc) - timedelta(days=7)
+    ).isoformat().replace("+00:00", "Z")
+    assert query_classifications(
+        ["review"], added_since=recent, path=database
+    ) == []

@@ -1445,3 +1445,7 @@ kbd {
 /* Relative dates read as a scan column, not as data to compare digit by
    digit. The exact timestamp stays on the title attribute. */
 .added-at { white-space: nowrap; opacity: 0.8; }
+
+.added-filter {
+  margin-bottom: 10px;
+}

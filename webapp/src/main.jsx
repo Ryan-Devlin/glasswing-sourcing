@@ -693,6 +693,16 @@ function BucketTabs({ value, onChange, tabs = BUCKET_TABS }) {
     </div>
   );
 }
+// Rolling windows rather than calendar days. The server filters on UTC
+// timestamps while the "Date added" column renders calendar days in the
+// browser's own timezone, so a "Today" option would promise an alignment
+// neither side can keep near midnight.
+const ADDED_WITHIN_OPTIONS = [
+  [0, "Any date"],
+  [1, "Last 24 hours"],
+  [7, "Last 7 days"],
+  [30, "Last 30 days"],
+];
 const ADDED_COLUMN = {
   key: "added_at",
   label: "Date added",
@@ -1532,9 +1542,13 @@ function CompaniesTable({ showRunScope = false }) {
   const [claudeBusy, setClaudeBusy] = useState("");
   const [claudeOverride, setClaudeOverride] = useState(null);
   const basket = bucket === "yes" || bucket === "no";
+  // 0 means no filter. Sent to the server rather than applied here: a page is
+  // 100 rows out of a hundred thousand, so filtering in the browser would only
+  // narrow the page already on screen.
+  const [addedWithinDays, setAddedWithinDays] = useState(0);
   const query = basket
     ? `/api/labels?label=${bucket}&page=${page}&page_size=100`
-    : `/api/classifications?bucket=${bucket}&scope=${scope}&page=${page}&page_size=100&sort=${encodeURIComponent(apiSort(sort))}`;
+    : `/api/classifications?bucket=${bucket}&scope=${scope}&page=${page}&page_size=100&sort=${encodeURIComponent(apiSort(sort))}&added_within_days=${addedWithinDays}`;
   const result = useApi(query, [
     bucket,
     scope,
@@ -1542,6 +1556,7 @@ function CompaniesTable({ showRunScope = false }) {
     refresh,
     sort.key,
     sort.direction,
+    addedWithinDays,
   ]);
   const save = (row, label) => setLabel({ domain: row.domain, label });
   const reject = (row) => setLabel({
@@ -1613,6 +1628,19 @@ function CompaniesTable({ showRunScope = false }) {
           setPage(1);
         }}
       />
+      {!basket && (
+        <div className="segmented added-filter" aria-label="Filter by date added">
+          {ADDED_WITHIN_OPTIONS.map(([days, label]) => (
+            <button
+              key={days}
+              className={addedWithinDays === days ? "active" : ""}
+              onClick={() => { setAddedWithinDays(days); setPage(1); }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
       <div className="export-row">
         <a
           className="button-link"

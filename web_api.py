@@ -64,6 +64,7 @@ from classification_store import (
     classification_source_label,
     hidden_domain_set,
     hide_domains,
+    count_classifications,
     query_classifications,
     query_classifications_by_domains,
     query_source_classifications,
@@ -721,17 +722,27 @@ def classifications(
     page_size: int = Query(100, ge=25, le=250),
     sort: str = "Recently classified",
     scope: Literal["current", "history"] = "history",
+    added_within_days: int = Query(0, ge=0, le=3650),
 ):
     if bucket not in BUCKETS:
         raise HTTPException(400, "Unknown bucket")
     run_id = _current_run_id() if scope == "current" else ""
     counts = _bucket_counts_for_run(run_id) if scope == "current" else _counts()
+    # Filtering has to happen in SQL, not in the browser: a page holds 100 rows
+    # out of a hundred thousand, so a client-side date filter would only ever
+    # narrow the page you are already looking at.
+    added_since = ""
+    if added_within_days:
+        added_since = (
+            datetime.now(timezone.utc) - timedelta(days=added_within_days)
+        ).isoformat().replace("+00:00", "Z")
     rows = query_classifications(
         BUCKETS[bucket],
         limit=page_size,
         offset=(page - 1) * page_size,
         sort=sort,
         run_id=run_id,
+        added_since=added_since,
     )
     hidden = hidden_domain_set([row["domain"] for row in rows])
     tracked = tracked_domain_set([row["domain"] for row in rows])
@@ -746,7 +757,15 @@ def classifications(
             }
             for row in rows
         ]),
-        "total": counts[bucket],
+        # The cached bucket counts know nothing about a date filter, so with
+        # one applied the pager would still advertise every page of the
+        # unfiltered bucket.
+        "total": (
+            count_classifications(
+                BUCKETS[bucket], run_id=run_id, added_since=added_since
+            )
+            if added_since else counts[bucket]
+        ),
         "page": page,
         "page_size": page_size,
     }
