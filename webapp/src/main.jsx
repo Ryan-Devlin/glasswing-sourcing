@@ -3386,15 +3386,22 @@ function FunnelTable({ funnel, openReasons = false }) {
           <tr key={stage.key}>
             <td>
               <strong>{stage.label}</strong>
-              {stage.median_seconds !== null &&
-                stage.median_seconds !== undefined && (
-                  <span
-                    className="stage-latency"
-                    title="Median time from the certificate arriving to this verdict being written"
-                  >
-                    {durationLabel(stage.median_seconds)}
-                  </span>
-                )}
+              {durationLabel(stage.median_screen_seconds) && (
+                <span
+                  className="stage-latency"
+                  title="Median time one domain spent being fetched and scored at this step, timed per domain rather than divided out of a batch"
+                >
+                  {durationLabel(stage.median_screen_seconds)} / domain
+                </span>
+              )}
+              {durationLabel(stage.median_seconds) && (
+                <span
+                  className="stage-latency muted-latency"
+                  title="Median time from the certificate arriving to this verdict being written, which includes however long the domain waited in the queue"
+                >
+                  {durationLabel(stage.median_seconds)} end to end
+                </span>
+              )}
               {stage.note && <div className="funnel-note">{stage.note}</div>}
               {stage.reasons?.length > 0 && (
                 <details className="funnel-reasons" open={openReasons}>
@@ -3408,10 +3415,18 @@ function FunnelTable({ funnel, openReasons = false }) {
                         <span>{reason.label}</span>
                         <span className="n">
                           {num(reason.dropped)} · {pct(reason.share_of_stage)}
-                          {durationLabel(reason.median_seconds) && (
+                          {durationLabel(reason.median_screen_seconds) && (
                             <span
                               className="reason-latency"
-                              title="Median time from the certificate arriving to this verdict"
+                              title="Median time one domain spent being fetched and scored before this check answered"
+                            >
+                              {durationLabel(reason.median_screen_seconds)}/domain
+                            </span>
+                          )}
+                          {durationLabel(reason.median_seconds) && (
+                            <span
+                              className="reason-latency muted-latency"
+                              title="Median from the certificate arriving to this verdict, including queue wait"
                             >
                               {durationLabel(reason.median_seconds)}
                             </span>

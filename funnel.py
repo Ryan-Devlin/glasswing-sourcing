@@ -62,6 +62,26 @@ class Stage:
     # conclusion. Absent rather than zero when it cannot be measured, because
     # "instant" and "unknown" must not render the same.
     latency_seconds: dict[str, float] = field(default_factory=dict)
+    # How long the domain itself took -- its fetch plus its scoring -- timed
+    # per domain rather than divided out of a batch. Distinct from
+    # latency_seconds, which starts when the certificate arrived and so
+    # includes however long the row waited in the queue. One says "this check
+    # is fast", the other says "we got to it quickly", and conflating them
+    # hides a backlog behind a fast filter.
+    screen_seconds: dict[str, float] = field(default_factory=dict)
+
+    @property
+    def median_screen_seconds(self) -> float | None:
+        """The stage's per-domain screening time, weighted by row count."""
+        weighted = [
+            (count, self.screen_seconds[key])
+            for key, _, count in self.reasons
+            if key in self.screen_seconds and count > 0
+        ]
+        if not weighted:
+            return None
+        total = sum(count for count, _ in weighted)
+        return sum(count * value for count, value in weighted) / total
 
     @property
     def median_seconds(self) -> float | None:
@@ -121,12 +141,20 @@ class Stage:
                         round(self.latency_seconds[key], 1)
                         if key in self.latency_seconds else None
                     ),
+                    "median_screen_seconds": (
+                        round(self.screen_seconds[key], 2)
+                        if key in self.screen_seconds else None
+                    ),
                 }
                 for key, label, count in self.reasons
             ],
             "median_seconds": (
                 round(self.median_seconds, 1)
                 if self.median_seconds is not None else None
+            ),
+            "median_screen_seconds": (
+                round(self.median_screen_seconds, 2)
+                if self.median_screen_seconds is not None else None
             ),
         }
 
@@ -812,6 +840,7 @@ def build_flow_funnel(
     reason_counts: dict[str, int],
     claude_sent: int,
     reason_latency: dict[str, float] | None = None,
+    reason_screen_seconds: dict[str, float] | None = None,
     note: str = "",
 ) -> dict[str, Funnel]:
     """The pipeline as two chains, because that is what it is.
@@ -904,6 +933,12 @@ def build_flow_funnel(
                 reason: seconds
                 for reason, _, _ in rows
                 if (seconds := (reason_latency or {}).get(reason)) is not None
+            },
+            screen_seconds={
+                reason: seconds
+                for reason, _, _ in rows
+                if (seconds := (reason_screen_seconds or {}).get(reason))
+                is not None
             },
         ))
         remaining = max(0, remaining - removed)

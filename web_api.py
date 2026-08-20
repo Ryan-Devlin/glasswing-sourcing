@@ -1265,6 +1265,7 @@ def funnel_breakdown(day: str = ""):
     queued = classified = candidates = reviewed = kept = awaiting = 0
     reason_counts: dict[str, int] = {}
     reason_latency: dict[str, float] = {}
+    reason_screen_seconds: dict[str, float] = {}
     queue_live = False
     conn = None
     try:
@@ -1354,6 +1355,31 @@ def funnel_breakdown(day: str = ""):
                     reason_latency[str(row["reason"]).split("+")[0]] = seconds
         except Exception:
             pass
+        # The per-domain screening time, straight from the row rather than
+        # divided out of a batch. Its own query and its own guard: it reads a
+        # field inside record_json that older rows predate.
+        try:
+            for row in conn.execute(
+                """
+                SELECT x.routing_reason AS reason,
+                       percentile_disc(0.5) WITHIN GROUP (
+                           ORDER BY (x.record_json::jsonb->>'screen_seconds')::float
+                       ) AS median_seconds
+                FROM pipeline.domains d
+                JOIN public.classifications x ON x.domain = d.domain
+                WHERE d.first_seen_run_id = ?
+                  AND x.record_json LIKE '%screen_seconds%'
+                GROUP BY x.routing_reason
+                """,
+                (run_id,),
+            ):
+                seconds = row["median_seconds"]
+                if seconds is not None and float(seconds) >= 0:
+                    reason_screen_seconds[
+                        str(row["reason"]).split("+")[0]
+                    ] = float(seconds)
+        except Exception:
+            pass
     except Exception:
         pass
     finally:
@@ -1400,6 +1426,7 @@ def funnel_breakdown(day: str = ""):
         reason_counts=reason_counts,
         claude_sent=reviewed,
         reason_latency=reason_latency,
+        reason_screen_seconds=reason_screen_seconds,
         note=(
             "Two chains, because intake and screening do not share a unit or "
             "a window. Intake counts sightings -- one per certificate a "

@@ -4539,6 +4539,12 @@ async def process(
 ) -> dict:
     domain = stable_domain(row.get("registrable", row.get("domain", "")))
     cached_page = cached_page or row.get("_cached_page")
+    # Timed per domain, not divided out of a batch. average_seconds_per_domain
+    # is total_batch_seconds / rows, which answers "what does throughput cost
+    # us" and not "how long did this domain take" -- with forty domains
+    # fetched concurrently the two differ by more than an order of magnitude,
+    # and only the second one describes a single company's journey.
+    started_monotonic = time.monotonic()
 
     if cached_page is not None:
         page = cached_page
@@ -5023,6 +5029,9 @@ async def process(
         return {
             **source_row,
             "domain": domain,
+            # Wall clock for this one domain: its fetch plus its scoring,
+            # excluding the time it sat in the queue beforehand.
+            "screen_seconds": round(time.monotonic() - started_monotonic, 3),
             "final_url": page.url or f"https://{domain}",
             "website_attempted": page.url or f"https://{domain}",
             "http_status": page.status or "",

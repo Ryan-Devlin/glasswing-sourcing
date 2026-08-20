@@ -588,6 +588,9 @@ COMPACT_CLASSIFICATION_FIELDS = {
     "manual_override", "manual_override_target", "manual_override_note",
     "manual_override_updated_at", "training_basket", "human_rating",
     "website_green_flags", "green_flags_checked_at", "scorecard",
+    # How long this one domain took to fetch and score, so the funnel can
+    # report a per-domain median rather than a batch average.
+    "screen_seconds",
 }
 
 

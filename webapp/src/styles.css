@@ -1465,3 +1465,12 @@ kbd {
   color: #6b7280;
   font-variant-numeric: tabular-nums;
 }
+
+.stage-latency.muted-latency {
+  background: transparent;
+  color: #6b7280;
+  font-weight: 400;
+}
+.reason-latency.muted-latency {
+  color: #9ca3af;
+}

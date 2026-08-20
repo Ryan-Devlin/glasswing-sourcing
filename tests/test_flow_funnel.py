@@ -192,3 +192,65 @@ def test_a_stage_median_ignores_reasons_it_has_no_timing_for():
     out = build(reason_latency={"predominantly_non_english": 30.0})
     stage = next(s for s in out["screening"].stages if s.key == "disqualified")
     assert stage.median_seconds == 30.0
+
+
+def test_per_domain_time_is_separate_from_end_to_end_time():
+    """Two different questions. latency_seconds starts when the certificate
+    arrived, so it includes however long the row waited in the queue -- it says
+    "we got to it quickly". screen_seconds is the domain's own fetch and
+    scoring, timed per domain -- it says "this check is fast". Conflating them
+    hides a backlog behind a fast filter, which is exactly what happened when
+    the all-time p90 was 5.6 hours on checks that answer in 8 seconds.
+    """
+    out = build(
+        reason_latency={"predominantly_non_english": 3600.0},
+        reason_screen_seconds={"predominantly_non_english": 1.4},
+    )
+    stage = next(s for s in out["screening"].stages if s.key == "disqualified")
+    payload = stage.to_dict(top_line=out["screening"].entered)
+    reason = next(
+        r for r in payload["reasons"]
+        if r["key"] == "predominantly_non_english"
+    )
+    assert reason["median_seconds"] == 3600.0
+    assert reason["median_screen_seconds"] == 1.4
+    assert payload["median_screen_seconds"] == 1.4
+
+
+def test_per_domain_time_is_not_a_batch_average():
+    """average_seconds_per_domain in the worker is total_batch_seconds / rows,
+    which answers what throughput costs and not how long a domain took. With
+    forty domains fetched concurrently the two differ by more than an order of
+    magnitude, and only the second describes one company's journey -- so this
+    number is recorded on the row by process() and never derived from a batch.
+    """
+    import asyncio
+
+    import filter as screening_filter
+
+    # Stamped on the row by process(), so it is one domain's own wall clock.
+    page = screening_filter.Fetch(
+        url="https://x.ai", status=200, title="Acme",
+        description="Enterprise AI", text="Acme builds AI infrastructure. " * 20,
+        pages_scraped=1, source="network_fetch",
+    )
+    record = asyncio.run(screening_filter.process(
+        {"registrable": "x.ai", "domain": "x.ai"}, None,
+        asyncio.Semaphore(1), timeout=5.0, homepage_only=True,
+        cached_page=page,
+    ))
+    assert "screen_seconds" in record
+    assert 0 <= float(record["screen_seconds"]) < 30
+
+    out = build(reason_screen_seconds={"confirmed_non_us": 2.5})
+    stage = next(s for s in out["screening"].stages if s.key == "disqualified")
+    assert stage.screen_seconds == {"confirmed_non_us": 2.5}
+
+
+def test_one_timing_present_and_the_other_missing_still_renders():
+    """A run part-way through a schema change has one and not the other."""
+    out = build(reason_latency={"confirmed_non_us": 12.0})
+    stage = next(s for s in out["screening"].stages if s.key == "disqualified")
+    payload = stage.to_dict(top_line=out["screening"].entered)
+    assert payload["median_seconds"] == 12.0
+    assert payload["median_screen_seconds"] is None
