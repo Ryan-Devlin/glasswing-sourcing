@@ -129,13 +129,13 @@ def _enrich_green_flags_in_connection(
             existing = normalize_green_flags(
                 record.get("website_green_flags", [])
             )
+            # Prose only -- see normalized_record. The `evidence` column and
+            # the venture_*_evidence fields are keyword lists.
             evidence_text = " ".join(clean(value) for value in (
                 record.get("page_title", ""),
                 record.get("meta_description", ""),
                 record.get("homepage_excerpt", ""),
-                record.get("venture_founder_evidence", ""),
-                record.get("rule_evidence", ""),
-                row["description"], row["excerpt"], row["evidence"],
+                row["description"], row["excerpt"],
             ) if clean(value))
             derived = deal_green_flags(evidence_text[:20000])
             source = clean(row["final_url"]) or f"https://{row['domain']}"
@@ -798,12 +798,15 @@ def normalized_record(record: dict[str, object]) -> dict[str, object]:
         # graph, matching _enrich_green_flags_in_connection.
         from filter import deal_green_flags
 
+        # Prose only. rule_evidence and venture_founder_evidence are
+        # semicolon-joined keyword lists, not sentences, and feeding them to a
+        # detector whose patterns span "up to 30 characters, no full stop"
+        # manufactured pedigree out of adjacency: "researcher; mit; stanford"
+        # read as an MIT researcher.
         flag_text = " ".join(clean(value) for value in (
             plain.get("page_title", ""),
             plain.get("meta_description", ""),
             plain.get("homepage_excerpt", ""),
-            plain.get("venture_founder_evidence", ""),
-            plain.get("rule_evidence", ""),
         ) if clean(value))
         if flag_text:
             derived = deal_green_flags(flag_text[:20000])

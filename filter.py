@@ -1342,7 +1342,15 @@ def founder_green_flags(text: str) -> list[dict[str, str]]:
     # founder pedigree.
     #
     # So the name now has to appear as an institution somebody attended.
-    non_academic = ("mit license", "licensed under the mit", "brown bag")
+    # "University of British Columbia" is not Columbia, and a page can say
+    # "Columbia, MO" or "Columbia, SC" and mean a city. Checked as a phrase
+    # rather than by trimming the school word, so the institution's own name
+    # ("Columbia University") is unaffected.
+    non_academic = (
+        "mit license", "licensed under the mit", "brown bag",
+        "british columbia", "columbia, mo", "columbia, sc",
+        "columbia river", "columbia sportswear",
+    )
     for school in school_hits[:4]:
         escaped_school = re.escape(school.lower())
         # An entry that names its own institution -- "university of

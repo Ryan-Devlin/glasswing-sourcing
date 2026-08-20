@@ -285,3 +285,32 @@ def test_a_strong_but_non_ivy_school_does_not_get_the_floor():
     assert any(flag["type"].endswith("_spinout") for flag in flags)
     assert elite_school_flags(flags) == []
     assert score_text(text)[0] < ELITE_SCHOOL_SCORE_FLOOR
+
+
+def test_a_school_name_inside_another_institution_is_not_that_school():
+    """"University of British Columbia" is not Columbia. Found in the
+    survivors of the attendance gate, on a row that had just been promoted
+    for having an Ivy founder.
+    """
+    for text in (
+        "I earned a Master's degree from the University of British Columbia.",
+        "Our founder grew up in Columbia, MO before starting the company.",
+    ):
+        schools = [
+            flag for flag in founder_green_flags(text)
+            if flag["type"].endswith("_spinout")
+        ]
+        assert schools == [], f"{text!r} -> {schools}"
+
+
+def test_a_keyword_list_is_not_a_sentence():
+    """rule_evidence is semicolon-joined keywords, and the attendance
+    patterns span "up to 30 characters, no full stop" -- so feeding it in
+    manufactured pedigree out of adjacency alone: "researcher; mit;
+    stanford" read as an MIT researcher. Only prose reaches the detector now,
+    but the detector should not be credulous about it either.
+    """
+    flags = founder_green_flags(
+        "Our founder. Close researcher; mit; stanford physical ai; robotics"
+    )
+    assert [f for f in flags if f["type"].endswith("_spinout")] == []
