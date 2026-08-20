@@ -1368,9 +1368,12 @@ def funnel_breakdown(day: str = ""):
                 FROM pipeline.domains d
                 JOIN public.classifications x ON x.domain = d.domain
                 WHERE d.first_seen_run_id = ?
-                  -- Pattern passed as a parameter: a bare % in the SQL is
-                  -- read by psycopg as a placeholder and the statement is
-                  -- rejected outright.
+                  -- The pattern is a parameter on purpose. psycopg parses the
+                  -- whole statement, comments included, so writing the
+                  -- percent character anywhere in here -- even in a comment
+                  -- explaining why not to -- makes it read as a placeholder
+                  -- and rejects the query. That is exactly how this line was
+                  -- broken once already.
                   AND x.record_json LIKE ?
                 GROUP BY x.routing_reason
                 """,

@@ -30,6 +30,39 @@ INLINE_LIKE = re.compile(
 )
 
 
+# A percent sign anywhere inside a triple-quoted SQL block, comments included.
+# psycopg parses the whole statement, so a comment is not a safe place for one:
+# the comment explaining this rule broke the query it was attached to.
+# Deliberately no WITH: the SQL keyword is spelled the same as Python's `with`
+# statement, so including it made the match start at a docstring's closing
+# quotes and run through the following code, sweeping up parameter tuples --
+# where a percent sign is exactly where it belongs.
+SQL_BLOCK = re.compile(
+    r'"""\s*\n\s*(?:SELECT|INSERT|UPDATE|DELETE)\b[^"]*?"""', re.S | re.I
+)
+
+
+def test_no_sql_block_contains_a_bare_percent():
+    offenders = []
+    for name in MODULES:
+        path = ROOT / name
+        if not path.exists():
+            continue
+        text = path.read_text()
+        for block in SQL_BLOCK.finditer(text):
+            body = block.group(0)
+            if "%" not in body:
+                continue
+            # %s / %b / %t are the placeholders psycopg itself accepts.
+            if re.search(r"%(?![sbt])", body):
+                line = text[: block.start()].count("\n") + 1
+                offenders.append(f"{name}:{line}")
+    assert not offenders, (
+        "a percent sign inside a SQL block is read as a placeholder, comments "
+        "included:\n  " + "\n  ".join(offenders)
+    )
+
+
 def test_no_module_inlines_a_like_pattern():
     offenders = []
     for name in MODULES:
