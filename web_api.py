@@ -1368,10 +1368,13 @@ def funnel_breakdown(day: str = ""):
                 FROM pipeline.domains d
                 JOIN public.classifications x ON x.domain = d.domain
                 WHERE d.first_seen_run_id = ?
-                  AND x.record_json LIKE '%screen_seconds%'
+                  -- Pattern passed as a parameter: a bare % in the SQL is
+                  -- read by psycopg as a placeholder and the statement is
+                  -- rejected outright.
+                  AND x.record_json LIKE ?
                 GROUP BY x.routing_reason
                 """,
-                (run_id,),
+                (run_id, "%screen_seconds%"),
             ):
                 seconds = row["median_seconds"]
                 if seconds is not None and float(seconds) >= 0:
