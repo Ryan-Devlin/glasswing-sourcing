@@ -1931,13 +1931,6 @@ def score_text(text: str) -> tuple[int, str, list[str], dict[str, int]]:
         )
         score = max(score, coverage_score)
 
-    # The founder team lifts the row on its own -- an Ivy or MIT education, or
-    # two and three independent kinds of strong pedigree stacking. Deliberately
-    # after the low-value and dimension ceilings: those exist to stop keyword
-    # density from inflating a thin page, and this is a claim about who is
-    # building it, which is exactly the case where a thin page is still worth a
-    # human's attention. Only gated flags can trigger it.
-    score = max(score, pedigree_score_floor(founder_flags))
 
     evidence = list(dict.fromkeys(
         pillar_hits[best]
@@ -4913,6 +4906,35 @@ async def process(
             venture_reviewable=bool(venture_quality["reviewable"]),
             substantive_no_fit_evidence=substantive_no_fit_evidence,
         )
+
+        # The founder floor belongs here rather than inside score_text,
+        # because "thin page, exceptional team" and "disqualified" are not the
+        # same row and score_text cannot tell them apart.
+        #
+        # Applied inside score_text it overrode correct rejections. Measured on
+        # the live corpus: it would have promoted edupark.ai (consumer SAT
+        # prep, correctly rejected) to 88, lanphan.co (a personal coaching
+        # site) to 88, 3point0labs.io (a sports and entertainment agency) to
+        # 88, and ryandohrn.ai (a personal brand whose "Cornell" is a
+        # leadership certificate, not a degree) to 80. Every one of those had
+        # already been refused for a specific, factual reason.
+        #
+        # So the lift only applies to a row that routing did not disqualify.
+        # An exceptional team with a paragraph of a website is exactly what it
+        # is for; an exceptional team with a consumer product is still a
+        # consumer product.
+        if bucket not in {"reject", "ghost", "screened_out"}:
+            # The flag list this row will actually store, which is already
+            # empty when an early hard disqualifier fired.
+            pedigree_floor = pedigree_score_floor(website_green_flags)
+            # Lifts the ranking score, not rule_score. rule_score is what the
+            # keyword engine actually measured in the copy and what
+            # scorer_benchmark holds it to; diligence_rank_score is the number
+            # the tables sort and display, which is what "rank this team
+            # highly" means.
+            if pedigree_floor > rank_score:
+                rank_score = pedigree_floor
+                reason = f"{reason}+founder_pedigree_floor"
 
         if not combined.strip():
             bucket = "ghost"

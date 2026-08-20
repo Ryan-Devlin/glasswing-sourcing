@@ -247,15 +247,20 @@ def test_an_ivy_or_mit_founder_scores_high_on_its_own():
     high-conviction signal by itself, not a modifier on thesis and product
     evidence. A sparse page is exactly the case it has to survive, since an
     elite team shipping nothing yet is still worth a human's attention.
+
+    Asserted on the floor rather than on score_text: the lift is applied after
+    routing, because "thin page, exceptional team" and "disqualified" are not
+    the same row and score_text cannot tell them apart.
     """
-    from filter import ELITE_SCHOOL_SCORE_FLOOR
+    from filter import ELITE_SCHOOL_SCORE_FLOOR, pedigree_score_floor
 
     for text in (
         "Founded by Jane Doe, an MIT PhD in robotics. We build perception software.",
         "Our founder holds a Harvard MBA and previously scaled two companies.",
         "Our cofounder studied computer science at Brown University.",
     ):
-        assert score_text(text)[0] >= ELITE_SCHOOL_SCORE_FLOOR, text
+        floor = pedigree_score_floor(founder_green_flags(text))
+        assert floor >= ELITE_SCHOOL_SCORE_FLOOR, text
 
 
 def test_the_high_score_needs_the_verified_flag_not_the_bare_word():
@@ -265,12 +270,14 @@ def test_the_high_score_needs_the_verified_flag_not_the_bare_word():
     """
     from filter import ELITE_SCHOOL_SCORE_FLOOR
 
+    from filter import pedigree_score_floor
+
     for text in (
         "Chris Brown CEO & Co-Founder 3x Founder & Product Leader 3 exits",
         "Our founder released it under the MIT License on GitHub.",
         "Our team. District Gradecard Gold Star Schools Culture Columbia Data",
     ):
-        assert score_text(text)[0] < ELITE_SCHOOL_SCORE_FLOOR, text
+        assert pedigree_score_floor(founder_green_flags(text)) == 0, text
 
 
 def test_a_strong_but_non_ivy_school_does_not_get_the_floor():
@@ -280,11 +287,13 @@ def test_a_strong_but_non_ivy_school_does_not_get_the_floor():
     """
     from filter import ELITE_SCHOOL_SCORE_FLOOR, elite_school_flags
 
+    from filter import pedigree_score_floor
+
     text = "Our cofounder earned a PhD at the University of Chicago."
     flags = founder_green_flags(text)
     assert any(flag["type"].endswith("_spinout") for flag in flags)
     assert elite_school_flags(flags) == []
-    assert score_text(text)[0] < ELITE_SCHOOL_SCORE_FLOOR
+    assert pedigree_score_floor(flags) < ELITE_SCHOOL_SCORE_FLOOR
 
 
 def test_a_school_name_inside_another_institution_is_not_that_school():
@@ -338,14 +347,16 @@ def test_breadth_of_pedigree_outranks_more_of_the_same():
 def test_a_well_rounded_elite_team_scores_near_the_top():
     from filter import PEDIGREE_BREADTH_FLOORS
 
+    from filter import pedigree_score_floor
+
     by_breadth = dict(PEDIGREE_BREADTH_FLOORS)
     two = "Our cofounder previously worked at Nvidia and her previous company was acquired in 2022."
     three = (
         "Our founder Jane Doe is an MIT PhD who previously worked at "
         "Google; her previous company was acquired in 2023."
     )
-    assert score_text(two)[0] >= by_breadth[2]
-    assert score_text(three)[0] >= by_breadth[3]
+    assert pedigree_score_floor(founder_green_flags(two)) >= by_breadth[2]
+    assert pedigree_score_floor(founder_green_flags(three)) >= by_breadth[3]
     # And breadth has to beat depth, not merely reach the same place.
     assert by_breadth[3] > by_breadth[2]
 
@@ -365,3 +376,30 @@ def test_one_kind_of_pedigree_alone_does_not_float_a_page():
     assert score_text(
         "Our founder previously worked at Google on infrastructure."
     )[0] < dict(PEDIGREE_BREADTH_FLOORS)[2]
+
+
+def test_a_disqualified_company_is_not_rescued_by_its_founders():
+    """The floor is applied after routing, not inside score_text, because
+    score_text cannot tell "thin page, exceptional team" from "disqualified".
+
+    Applied inside score_text it overrode correct rejections. Measured on the
+    live corpus, it would have promoted edupark.ai (consumer SAT prep,
+    correctly rejected) to 88, lanphan.co (a personal coaching site) to 88,
+    3point0labs.io (a sports and entertainment agency) to 88, and
+    ryandohrn.ai (a personal brand whose "Cornell" is a leadership
+    certificate, not a degree) to 80.
+    """
+    from filter import route_company
+
+    disqualified = dict(
+        is_parked=False, is_coming=False, is_agency=True,
+        is_consumer_junk=False, page_error="", page_status=200,
+        location_status="US", maturity_risk=0, qualified_for_llm=False,
+        score=1,
+    )
+    bucket, _ = route_company(**disqualified)
+    assert bucket in {"reject", "ghost", "screened_out"}, bucket
+    # score_text itself must no longer carry the lift, or the router's
+    # decision arrives too late to matter.
+    elite = "Our cofounder studied computer science at Brown University."
+    assert score_text(elite)[0] < 80
