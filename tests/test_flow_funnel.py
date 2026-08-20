@@ -122,3 +122,30 @@ def test_the_chain_never_drops_more_than_reached_a_stage():
     for funnel in build().values():
         for stage in funnel.stages:
             assert 0 <= stage.dropped <= stage.entered, stage.label
+
+
+def test_a_reason_whose_name_carries_a_status_code_still_finds_its_phase():
+    """route_company builds this as f"inaccessible_http_{status}", so the code
+    is part of the name and no static map can hold them all. The unmapped
+    stage surfaced eight of them charged against the pool that happened to be
+    last, rather than against the fetch that produced them.
+    """
+    out = build(reason_counts={
+        **REASONS,
+        "inaccessible_http_403": 10,
+        "inaccessible_http_525": 3,
+    })
+    no_page = next(s for s in out["screening"].stages if s.key == "no_page")
+    labels = {label for _, label, _ in no_page.reasons}
+    assert "Site returned HTTP 403" in labels
+    assert "Site returned HTTP 525" in labels
+    assert not [s for s in out["screening"].stages if s.key == "unmapped"]
+
+
+def test_a_reviewer_overruling_the_pipeline_is_counted_apart_from_it():
+    """A person is not one of route_company's checks, so charging their
+    decision to whichever stage happened to be last misattributes it."""
+    out = build(reason_counts={**REASONS, "manual_override_reject": 275})
+    manual = next(s for s in out["screening"].stages if s.key == "manual")
+    assert manual.dropped == 275
+    assert [s.key for s in out["screening"].stages][-1] == "manual"

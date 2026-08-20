@@ -669,6 +669,12 @@ FLOW_PHASES = (
         "Claude diligence",
         "Applied to whatever survived, under a daily budget.",
     ),
+    (
+        "manual",
+        "Overruled by a reviewer",
+        "A person disagreeing with the pipeline. Not one of its checks, so "
+        "it is counted apart from them.",
+    ),
 )
 
 FLOW_REASONS = (
@@ -693,6 +699,7 @@ FLOW_REASONS = (
      "Hosting or domain business"),
     ("disqualified", "investor_or_venture_studio", "Investor or venture studio"),
     ("disqualified", "commodity_ai_wrapper_or_service", "Commodity AI wrapper"),
+    ("disqualified", "explicit_gambling_or_casino", "Gambling or casino"),
     # Fit, in route_company order. The score-based routes that end in a
     # review bucket are survivors, not drops, and are marked as such below.
     ("fit", "no_clear_enterprise_or_glasswing_fit",
@@ -702,6 +709,20 @@ FLOW_REASONS = (
     ("fit", "insufficient_venture_quality_evidence",
      "Insufficient venture-quality evidence"),
     ("claude", "claude_reject", "Claude said REJECT"),
+    # A person overruling the pipeline is not one of its checks, so it gets
+    # its own phase at the end rather than being charged to whichever stage
+    # happened to be last.
+    ("manual", "manual_override_reject", "Rejected by a reviewer"),
+    ("manual", "human_ground_truth_no", "Marked no by a reviewer"),
+)
+
+# route_company builds this reason as f"inaccessible_http_{status}", so the
+# status code is part of the name and a static map can never hold them all.
+# They were the first thing the unmapped stage surfaced, charged against the
+# pool that happened to be last rather than against the fetch that produced
+# them.
+FLOW_REASON_PREFIXES = (
+    ("inaccessible_http_", "no_page", "Site returned HTTP {suffix}"),
 )
 
 # Reasons that mean the domain is still alive. Kept explicit rather than
@@ -732,6 +753,24 @@ def _flow_reason_index() -> dict[str, tuple[str, str, int]]:
         reason: (phase, label, order)
         for order, (phase, reason, label) in enumerate(FLOW_REASONS)
     }
+
+
+def _flow_phase_for(
+    reason: str, index: dict[str, tuple[str, str, int]]
+) -> tuple[str, str, int] | None:
+    """The phase, label and code-order for one recorded reason."""
+    exact = index.get(reason)
+    if exact is not None:
+        return exact
+    for prefix, phase, template in FLOW_REASON_PREFIXES:
+        if reason.startswith(prefix):
+            suffix = reason[len(prefix):] or "?"
+            # Ordered with the phase's other reasons by borrowing the
+            # position of the guard that produces it.
+            anchor = index.get("inaccessible_site")
+            order = anchor[2] if anchor else 0
+            return phase, template.format(suffix=suffix), order
+    return None
 
 
 def build_flow_funnel(
@@ -790,14 +829,14 @@ def build_flow_funnel(
         if reason in FLOW_SURVIVOR_REASONS:
             survivors += count
             continue
-        entry = index.get(reason)
+        entry = _flow_phase_for(reason, index)
         if entry is None:
             unmapped.append((reason, reason.replace("_", " "), count))
             continue
         phase, label, _ = entry
         by_phase.setdefault(phase, []).append((reason, label, count))
     for rows in by_phase.values():
-        rows.sort(key=lambda row: index.get(row[0], ("", "", 0))[2])
+        rows.sort(key=lambda row: (_flow_phase_for(row[0], index) or ("", "", 0))[2])
 
     screened_total = (
         sum(count for rows in by_phase.values() for _, _, count in rows)

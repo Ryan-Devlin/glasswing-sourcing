@@ -45,9 +45,11 @@ def test_the_screening_phases_follow_the_code_path():
     # routes, then Claude. Collapsing those into "never served a usable page"
     # and "read, not a fit" hid which of fourteen ordered checks was cutting.
     keys = [s["key"] for s in _payload()["funnel"]["stages"]]
-    assert keys[:5] == ["queue", "no_page", "disqualified", "fit", "claude"]
+    assert keys[:6] == [
+        "queue", "no_page", "disqualified", "fit", "claude", "manual",
+    ]
     # Anything beyond is the escape hatch for reasons nobody has mapped yet.
-    assert set(keys[5:]) <= {"unmapped"}
+    assert set(keys[6:]) <= {"unmapped"}
 
 
 def test_reconciliation_is_not_dressed_up_as_attrition():
