@@ -417,3 +417,66 @@ def test_both_detectors_reach_the_score(monkeypatch, tmp_path):
     assert "focus_left_the_day_job" in kinds
     scored = fs.recalculate_scores(who)
     assert scored["founder_transition_score"] > 0
+
+
+def test_collection_covers_everyone_with_a_resolved_identity(monkeypatch, tmp_path):
+    """The bug that made the whole module a daily no-op.
+
+    Collection required monitoring_status='active', which only the manual
+    verify_identity path ever sets. discover_talent writes
+    identity_confidence=100 and monitoring_status='inactive' in the same
+    statement, so every automatically found person arrived fully identified
+    and permanently ineligible. Measured live: 174 candidates, 174 with a
+    verified identity, 0 active, 0 events ever collected.
+    """
+    database = setup_store(monkeypatch, tmp_path)
+    found = fs.create_candidate(
+        person("Discovered Dee", monitoring_status="inactive")
+    )["candidate_id"]
+    with classification_store.connect_store(database) as conn:
+        conn.execute(
+            "INSERT INTO verified_github_identities(candidate_id,username,"
+            "confidence_score,verification_method,verified_at) VALUES (?,?,?,?,?)",
+            (found, "dee", 100, "github_user_search", fs.utc_now()),
+        )
+        conn.commit()
+
+    collected = []
+    monkeypatch.setattr(fs, "collect_candidate", lambda cid, **kw: collected.append(cid))
+    job = fs.create_monitoring_job("github_collection")
+    result = fs.run_monitoring_job(job)
+
+    assert collected == [found], "an identified person must be collected"
+    assert result["attempted"] == 1
+    assert result["status"] == "completed"
+
+
+def test_a_stopped_or_paused_person_is_still_left_alone(monkeypatch, tmp_path):
+    """The flag became an opt-out, not a precondition -- so it still has to
+    work as an opt-out. Archiving writes 'stopped'."""
+    database = setup_store(monkeypatch, tmp_path)
+    for name, status in (("Paused Pat", "paused"), ("Stopped Sid", "stopped")):
+        cid = fs.create_candidate(person(name, monitoring_status=status))["candidate_id"]
+        with classification_store.connect_store(database) as conn:
+            conn.execute(
+                "INSERT INTO verified_github_identities(candidate_id,username,"
+                "confidence_score,verification_method,verified_at) VALUES (?,?,?,?,?)",
+                (cid, name.split()[0].lower(), 100, "manual", fs.utc_now()),
+            )
+            conn.commit()
+
+    collected = []
+    monkeypatch.setattr(fs, "collect_candidate", lambda cid, **kw: collected.append(cid))
+    fs.run_monitoring_job(fs.create_monitoring_job("github_collection"))
+    assert collected == []
+
+
+def test_a_job_that_found_nobody_does_not_report_success(monkeypatch, tmp_path):
+    """What hid the above for five consecutive days: a run that touched zero
+    people reported "completed", indistinguishable from one that did the work.
+    """
+    setup_store(monkeypatch, tmp_path)
+    result = fs.run_monitoring_job(fs.create_monitoring_job("github_collection"))
+    assert result["attempted"] == 0
+    assert result["status"] == "no_candidates"
+    assert result["status"] != "completed"

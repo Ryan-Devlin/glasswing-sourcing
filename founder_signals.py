@@ -1266,7 +1266,28 @@ def run_monitoring_job(job_id: str, *, client: GitHubClient | None = None) -> di
     else:
         with _store(True) as conn:
             limit = int(founder_settings().get("maximum_people_per_run", 200))
-            ids = [str(row["candidate_id"]) for row in conn.execute("SELECT candidate_id FROM founder_candidates WHERE monitoring_status='active' AND archived_at='' ORDER BY last_refreshed_at LIMIT ?", (limit,)).fetchall()]
+            # Collect whoever has a resolved GitHub identity, unless somebody
+            # has deliberately stopped them.
+            #
+            # This used to require monitoring_status='active', which only
+            # verify_identity ever sets -- the manual resolution path.
+            # discover_talent and reconcile_direct_github_discoveries both
+            # write identity_confidence=100 and monitoring_status='inactive'
+            # in the same statement, so every person found automatically
+            # arrived fully identified and permanently ineligible. Measured
+            # live: 174 candidates, 174 with a verified identity, 0 active, 0
+            # events ever collected, against five consecutive daily jobs that
+            # all reported "completed".
+            #
+            # So the flag is an opt-out now rather than a precondition nobody
+            # sets. Archiving (which writes 'stopped') and an analyst pause
+            # both still take effect.
+            ids = [str(row["candidate_id"]) for row in conn.execute(
+                "SELECT DISTINCT c.candidate_id, c.last_refreshed_at FROM founder_candidates c "
+                "JOIN verified_github_identities v ON v.candidate_id = c.candidate_id "
+                "WHERE c.archived_at='' AND c.monitoring_status NOT IN ('stopped','paused') "
+                "ORDER BY c.last_refreshed_at LIMIT ?", (limit,)
+            ).fetchall()]
     for item in ids:
         attempted += 1
         try:
@@ -1280,7 +1301,14 @@ def run_monitoring_job(job_id: str, *, client: GitHubClient | None = None) -> di
             failed += 1; errors.append({"candidate_id": item, "error": str(exc)})
             with _store() as conn:
                 conn.execute("INSERT INTO founder_collection_errors(job_id,candidate_id,source,error_type,message,retryable,occurred_at) VALUES (?,?,?,?,?,?,?)", (job_id, item, "github" if "github" in job_type else "local", type(exc).__name__, str(exc)[:1000], getattr(exc, "retryable", True), utc_now())); conn.commit()
-    status = "completed" if not failed else "partial" if succeeded else "failed"
+    # A job that found nobody to work on is not a success. Reporting it as
+    # "completed" is what let a collection job run every day for five days,
+    # touch zero people and raise nothing -- the status was indistinguishable
+    # from a run that did the work.
+    if not attempted:
+        status = "no_candidates"
+    else:
+        status = "completed" if not failed else "partial" if succeeded else "failed"
     with _store() as conn:
         conn.execute("UPDATE founder_monitoring_jobs SET status=?,completed_at=?,attempted=?,succeeded=?,failed=?,detail_json=?,error=? WHERE job_id=?", (status, utc_now(), attempted, succeeded, failed, _json({"errors": errors[:50]}), errors[0]["error"] if errors and not succeeded else "", job_id)); conn.commit()
     return {"job_id": job_id, "status": status, "attempted": attempted, "succeeded": succeeded, "failed": failed, "errors": errors}
