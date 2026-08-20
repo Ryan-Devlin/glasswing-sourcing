@@ -255,3 +255,165 @@ def test_founder_api_reads_are_public_and_mutations_require_admin(monkeypatch, t
     )
     assert response.status_code == 200
     assert response.json()["status"] == "created"
+
+
+def seed_events(database, candidate_id, per_month, *, owner="openai", now=None):
+    """Place `per_month[i]` events in the i-th 30-day window back from now.
+
+    per_month may hold either an int (all events under `owner`) or a dict of
+    owner -> count, so a test can move work between organisations.
+    """
+    now = now or datetime.now(timezone.utc)
+    with classification_store.connect_store(database) as conn:
+        for index, spec in enumerate(per_month):
+            counts = {owner: spec} if isinstance(spec, int) else spec
+            when = now - timedelta(days=30 * index + 5)
+            for repo_owner, total in counts.items():
+                for n in range(total):
+                    conn.execute(
+                        "INSERT INTO founder_github_events(event_id,candidate_id,username,"
+                        "event_type,repo_name,organization,event_created_at,collected_at) "
+                        "VALUES (?,?,?,?,?,?,?,?)",
+                        (f"{candidate_id}-{index}-{repo_owner}-{n}", candidate_id,
+                         "someone", "PushEvent", f"{repo_owner}/service", repo_owner,
+                         (when - timedelta(minutes=n)).isoformat(), fs.utc_now()),
+                    )
+        conn.commit()
+
+
+def test_a_prolific_but_steady_committer_can_trip_the_spike():
+    """The case the ratio gate cannot see. Somebody averaging 400 events a
+    month needs 1,200 to reach 3x, which never happens -- and every person in
+    this table is in that group. A step outside their own variation does.
+    """
+    counts = [600, 400, 405, 395, 402, 398, 401]
+    assert max(counts[1:]) / min(counts[1:]) < 1.1  # a flat history
+    ratio = counts[0] / (sum(counts[1:]) / 6)
+    assert ratio < 3.0, "the old gate would not fire here"
+
+
+def test_the_spike_is_measured_against_the_persons_own_variation(monkeypatch, tmp_path):
+    database = setup_store(monkeypatch, tmp_path)
+    steady = fs.create_candidate(person("Steady Sam"))["candidate_id"]
+    seed_events(database, steady, [600, 400, 405, 395, 402, 398, 401])
+    spike = fs.commit_spike(steady)
+    assert spike["is_spike"] is True
+    assert spike["ratio"] < 3.0, "and the ratio gate would have missed it"
+    assert spike["z_score"] >= 3.0
+
+
+def test_a_dormant_account_does_not_spike_on_a_handful_of_events(monkeypatch, tmp_path):
+    database = setup_store(monkeypatch, tmp_path)
+    quiet = fs.create_candidate(person("Quiet Quinn"))["candidate_id"]
+    # 6 events against a baseline of ~1 clears the old 3x gate at 6 events.
+    seed_events(database, quiet, [6, 1, 1, 0, 1, 1, 0])
+    spike = fs.commit_spike(quiet)
+    assert spike["is_spike"] is False
+
+
+def test_one_earlier_burst_does_not_hide_a_later_transition(monkeypatch, tmp_path):
+    """A mean is dragged by a single busy month, which raises the bar for the
+    rest of the year and hides exactly the transition being looked for. A
+    median is not."""
+    database = setup_store(monkeypatch, tmp_path)
+    who = fs.create_candidate(person("Bursty Bea"))["candidate_id"]
+    seed_events(database, who, [90, 10, 12, 300, 11, 9, 10])
+    spike = fs.commit_spike(who)
+    assert spike["baseline_median"] <= 12, "the 300 must not set the baseline"
+    assert spike["is_spike"] is True
+
+
+def test_an_erratic_history_is_not_a_step_change(monkeypatch, tmp_path):
+    """Same lift, but this person always swings that much -- so it is their
+    normal, and calling it a transition would be noise."""
+    database = setup_store(monkeypatch, tmp_path)
+    who = fs.create_candidate(person("Erratic Eli"))["candidate_id"]
+    seed_events(database, who, [120, 10, 200, 15, 180, 20, 150])
+    assert fs.commit_spike(who)["is_spike"] is False
+
+
+def test_busy_inside_the_day_job_is_not_a_departure(monkeypatch, tmp_path):
+    """Volume doubling inside the employer's own org is a heavy quarter."""
+    database = setup_store(monkeypatch, tmp_path)
+    who = fs.create_candidate(person("Busy Bao"))["candidate_id"]
+    seed_events(database, who, [200, 100, 100, 100, 100, 100, 100], owner="openai")
+    shift = fs.focus_shift(who)
+    assert shift["anchor"] == "openai"
+    assert shift["is_shift"] is False
+
+
+def test_work_moving_to_a_new_org_is_a_departure(monkeypatch, tmp_path):
+    """The actual spin-out shape: the org that held most of the work no longer
+    does, and the work has moved somewhere absent from their history."""
+    database = setup_store(monkeypatch, tmp_path)
+    who = fs.create_candidate(person("Leaving Lee"))["candidate_id"]
+    seed_events(database, who, [
+        {"openai": 8, "vectorforge": 70},
+        {"openai": 100}, {"openai": 95}, {"openai": 105},
+        {"openai": 98}, {"openai": 102}, {"openai": 99},
+    ])
+    shift = fs.focus_shift(who)
+    assert shift["anchor"] == "openai"
+    assert shift["baseline_share"] >= 0.9
+    assert shift["current_share"] <= 0.2
+    assert shift["new_owners"] == ["vectorforge"]
+    assert shift["is_shift"] is True
+
+
+def test_the_anchor_is_whatever_dominated_rather_than_a_matched_name(monkeypatch, tmp_path):
+    """It never matches the stored employer against a GitHub org, because that
+    fails on every abbreviation and rename -- "anthropics" against
+    "Anthropic", "openai" against "OpenAI"."""
+    database = setup_store(monkeypatch, tmp_path)
+    who = fs.create_candidate(
+        person("Renamed Ren", current_employer="Anthropic")
+    )["candidate_id"]
+    seed_events(database, who, [
+        {"anthropics": 5, "newthing": 60},
+        {"anthropics": 100}, {"anthropics": 100}, {"anthropics": 100},
+        {"anthropics": 100}, {"anthropics": 100}, {"anthropics": 100},
+    ])
+    shift = fs.focus_shift(who)
+    assert shift["anchor"] == "anthropics"
+    assert shift["is_shift"] is True
+
+
+def test_relocating_effort_is_a_departure_without_being_a_spike(monkeypatch, tmp_path):
+    """The two detectors answer different questions and must stay independent.
+    Here the work moves out of the day job but the total does not rise -- the
+    same hours, spent elsewhere. That is a departure signal and not a step
+    change, and conflating them would either lose it or invent a spike.
+    """
+    database = setup_store(monkeypatch, tmp_path)
+    who = fs.create_candidate(person("Moving Mo"))["candidate_id"]
+    seed_events(database, who, [
+        {"openai": 8, "solstack": 90},
+        {"openai": 100}, {"openai": 98}, {"openai": 102},
+        {"openai": 99}, {"openai": 101}, {"openai": 100},
+    ])
+    assert fs.commit_spike(who)["is_spike"] is False
+    assert fs.focus_shift(who)["is_shift"] is True
+
+
+def test_both_detectors_reach_the_score(monkeypatch, tmp_path):
+    """The full spin-out shape: working considerably more, and elsewhere."""
+    database = setup_store(monkeypatch, tmp_path)
+    who = fs.create_candidate(person("Spinning Sol"))["candidate_id"]
+    seed_events(database, who, [
+        {"openai": 8, "solstack": 190},
+        {"openai": 100}, {"openai": 98}, {"openai": 102},
+        {"openai": 99}, {"openai": 101}, {"openai": 100},
+    ])
+    result = fs.calculate_signals(who)
+    assert result["added"] >= 2
+    with classification_store.connect_store(database, read_only=True) as conn:
+        kinds = {
+            row["signal_type"] for row in conn.execute(
+                "SELECT signal_type FROM founder_signals WHERE candidate_id=?",
+                (who,),
+            )
+        }
+    assert "commit_step_change" in kinds
+    assert "focus_left_the_day_job" in kinds
+    scored = fs.recalculate_scores(who)
+    assert scored["founder_transition_score"] > 0

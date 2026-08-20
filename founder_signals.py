@@ -47,6 +47,8 @@ DEFAULT_CATEGORIES = [
 DEFAULT_SIGNAL_WEIGHTS = {
     "new_personal_repository": 5,
     "activity_acceleration": 8,
+    "commit_step_change": 18,
+    "focus_left_the_day_job": 25,
     "new_organization": 15,
     "former_colleague_contributes": 15,
     "repository_cluster": 10,
@@ -966,6 +968,150 @@ def aggregate_activity(candidate_id: str, *, now: datetime | None = None) -> dic
     return windows
 
 
+def _monthly_buckets(events: list[dict[str, Any]], now: datetime, windows: int = 7) -> list[int]:
+    """Event totals in consecutive 30-day windows, most recent first."""
+    counts = []
+    for index in range(windows):
+        high = now - timedelta(days=30 * index)
+        low = high - timedelta(days=30)
+        counts.append(sum(
+            1 for row in events
+            if low <= _parse_time(str(row["event_created_at"])) < high
+        ))
+    return counts
+
+
+def _median(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values); middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return float(ordered[middle])
+    return (ordered[middle - 1] + ordered[middle]) / 2
+
+
+def commit_spike(candidate_id: str, *, now: datetime | None = None) -> dict[str, Any]:
+    """A step change measured against this person's own history.
+
+    ``activity_windows`` already reports an ``acceleration`` -- the current 30
+    days over the *mean* of the previous six months -- and gates a signal on
+    it exceeding 3x with at least 6 events. Two things go wrong with that, in
+    opposite directions:
+
+    * A mean is dragged by a single earlier burst, so one busy month last
+      spring raises the bar for the rest of the year and hides the very
+      transition this is looking for.
+    * A pure ratio does not scale. Somebody averaging 400 events a month
+      needs 1,200 to trip a 3x gate, which will never happen; somebody
+      averaging one needs six, which happens by accident. The people this
+      module exists to watch -- engineers inside OpenAI, Anthropic, MIT CSAIL
+      -- are all in the first group.
+
+    So the test here is a median-based z-score: how far the current month sits
+    outside the person's *normal variation*, using the median absolute
+    deviation of their own prior months. A prolific but steady committer has a
+    small deviation, so a 50% lift is enormous for them; an erratic one has a
+    large deviation, and the same lift correctly reads as noise. Absolute
+    floors stop a dormant account registering a spike on a handful of events.
+    """
+    now = now or datetime.now(timezone.utc)
+    with _store(True) as conn:
+        rows = conn.execute(
+            "SELECT event_type,repo_name,event_created_at FROM founder_github_events "
+            "WHERE candidate_id=? AND event_created_at>=?",
+            (candidate_id, (now - timedelta(days=240)).isoformat()),
+        ).fetchall()
+    events = [dict(row) for row in rows]
+    buckets = _monthly_buckets(events, now)
+    current, prior = buckets[0], buckets[1:]
+    baseline = _median([float(value) for value in prior])
+    deviation = _median([abs(value - baseline) for value in prior]) * 1.4826
+    # A person with a perfectly flat history has zero deviation, which would
+    # divide by nothing and call any change infinite. One event of slack is
+    # the smallest honest floor.
+    spread = max(deviation, 1.0)
+    z = (current - baseline) / spread
+    return {
+        "current_30d": current,
+        "baseline_median": round(baseline, 2),
+        "baseline_deviation": round(deviation, 2),
+        "months_of_history": sum(1 for value in prior if value > 0),
+        "ratio": round(current / baseline, 2) if baseline else None,
+        "lift": round(current - baseline, 2),
+        "z_score": round(z, 2),
+        # Enough history to have a baseline at all, a real step outside its
+        # variation, and enough absolute volume that it is not a rounding
+        # error on a dormant account.
+        "is_spike": bool(
+            sum(1 for value in prior if value > 0) >= 3
+            and z >= 3.0
+            and current >= baseline + 10
+            and current >= 10
+        ),
+    }
+
+
+def focus_shift(candidate_id: str, *, now: datetime | None = None) -> dict[str, Any]:
+    """Whether the work has moved away from wherever it used to live.
+
+    This is the part that distinguishes leaving from being busy. An engineer
+    at OpenAI whose commit volume doubles inside ``openai/*`` is having a
+    heavy quarter. One whose volume moves *out* of the org that used to hold
+    most of it, into repositories that did not exist in their history, is
+    doing something else.
+
+    Deliberately self-calibrating: it does not try to match the stored
+    employer name against a GitHub org, which fails on every abbreviation and
+    rename ("anthropics" against "Anthropic", "openai" against "OpenAI").
+    Whatever owner dominated the baseline *is* the day job for this purpose,
+    whatever it is called.
+    """
+    now = now or datetime.now(timezone.utc)
+    with _store(True) as conn:
+        rows = conn.execute(
+            "SELECT repo_name,event_created_at FROM founder_github_events "
+            "WHERE candidate_id=? AND event_created_at>=?",
+            (candidate_id, (now - timedelta(days=240)).isoformat()),
+        ).fetchall()
+
+    def owners(low: datetime, high: datetime) -> Counter:
+        found: Counter = Counter()
+        for row in rows:
+            when = _parse_time(str(row["event_created_at"]))
+            if not (low <= when < high):
+                continue
+            name = clean(str(row["repo_name"] or ""))
+            if "/" in name:
+                found[name.split("/", 1)[0].lower()] += 1
+        return found
+
+    current = owners(now - timedelta(days=30), now)
+    baseline = owners(now - timedelta(days=210), now - timedelta(days=30))
+    if not baseline or not current:
+        return {"anchor": "", "baseline_share": None, "current_share": None,
+                "new_owners": [], "is_shift": False, "current_events": sum(current.values())}
+    anchor, anchor_count = baseline.most_common(1)[0]
+    baseline_share = anchor_count / sum(baseline.values())
+    current_share = current.get(anchor, 0) / sum(current.values())
+    new_owners = [owner for owner in current if owner not in baseline]
+    return {
+        "anchor": anchor,
+        "baseline_share": round(baseline_share, 3),
+        "current_share": round(current_share, 3),
+        "new_owners": sorted(new_owners),
+        "current_events": sum(current.values()),
+        # The day job has to have been the day job -- half their work or more
+        # -- and its share has to have at least halved, with the work landing
+        # somewhere that was not in their history at all.
+        "is_shift": bool(
+            baseline_share >= 0.5
+            and current_share <= baseline_share / 2
+            and new_owners
+            and sum(current.values()) >= 10
+        ),
+    }
+
+
 COMMERCIAL_TERMS = ("design partner", "waitlist", "request access", "book a demo", "enterprise", "pricing")
 HIRING_TERMS = ("founding engineer", "first engineer", "early team", "join our founding team")
 
@@ -982,6 +1128,34 @@ def calculate_signals(candidate_id: str, *, now: datetime | None = None) -> dict
     with _store() as conn:
         if windows["acceleration"] is not None and windows["acceleration"] >= 3 and windows["days_30"]["total"] >= 6:
             added += _insert_signal(conn, candidate_id, "activity_acceleration", now.isoformat(), f'{windows["days_30"]["total"]} public events versus a {windows["six_month_baseline"]} monthly baseline', "", weights["activity_acceleration"], 75, "Public GitHub activity is more than three times the observed baseline.")
+        # The two signals the module was missing. Kept beside the ratio rather
+        # than replacing it: a 3x jump on a modest baseline is still worth
+        # noting, it just should not be the only thing that can fire, because
+        # it is unreachable for exactly the people here who matter most.
+        spike = commit_spike(candidate_id, now=now)
+        if spike["is_spike"]:
+            added += _insert_signal(
+                conn, candidate_id, "commit_step_change", now.isoformat(),
+                f'{spike["current_30d"]} events this month against a median of '
+                f'{spike["baseline_median"]} over the previous six, {spike["z_score"]} '
+                f'deviations outside their own normal range',
+                "", weights["commit_step_change"], 80,
+                "Public activity stepped outside this person's own established "
+                "variation, rather than exceeding a fixed threshold.",
+            )
+        shift = focus_shift(candidate_id, now=now)
+        if shift["is_shift"]:
+            added += _insert_signal(
+                conn, candidate_id, "focus_left_the_day_job", now.isoformat(),
+                f'Work in {shift["anchor"]} fell from {int(shift["baseline_share"] * 100)}% '
+                f'to {int(shift["current_share"] * 100)}% of their activity, moving to '
+                f'{", ".join(shift["new_owners"][:4])}',
+                f'https://github.com/{shift["new_owners"][0]}' if shift["new_owners"] else "",
+                weights["focus_left_the_day_job"], 85,
+                "The repositories that held most of this person's work no longer "
+                "do, and the work has moved somewhere absent from their history.",
+                shift["anchor"],
+            )
         recent_repos = conn.execute("SELECT * FROM founder_github_repositories WHERE candidate_id=? AND created_at>=?", (candidate_id, (now - timedelta(days=30)).isoformat())).fetchall()
         for repo in recent_repos:
             added += _insert_signal(conn, candidate_id, "new_personal_repository", str(repo["created_at"]), f'Created {repo["full_name"]}: {repo["description"]}', f'https://github.com/{repo["full_name"]}', weights["new_personal_repository"], 85, "A new public repository may indicate a new independent project.", str(repo["full_name"]))
