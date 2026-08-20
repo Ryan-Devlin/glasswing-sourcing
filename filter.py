@@ -1327,14 +1327,66 @@ def founder_green_flags(text: str) -> list[dict[str, str]]:
         "harvard", "yale", "princeton", "columbia",
         "upenn", "cornell", "brown", "dartmouth",
     }
-    for school in school_hits[:2]:
+    # A school name on its own says nothing, and this branch used to accept
+    # one. The employer branch below has always required an employment
+    # pattern; this required only that the word appear near team copy.
+    #
+    # Sampled live across 289 rows carrying an Ivy flag, the matches were
+    # overwhelmingly surnames -- "Chris Brown CEO & Co-Founder", "Jessica
+    # Brown Founder & CEO" -- plus a colour ("Made By Take Point Marketing
+    # brown"), academic institution lists, and the nav menu of a Missouri
+    # public school district, which is how nixapublicschools.ai came to be an
+    # "Ivy League spinout". "brown" is the commonest surname in this corpus,
+    # "mit" is the licence on every open-source page, and columbia, chicago
+    # and princeton are all cities. Each of those was worth 28 points of
+    # founder pedigree.
+    #
+    # So the name now has to appear as an institution somebody attended.
+    non_academic = ("mit license", "licensed under the mit", "brown bag")
+    for school in school_hits[:4]:
+        escaped_school = re.escape(school.lower())
+        # An entry that names its own institution -- "university of
+        # california", "washington university" -- is unambiguous on sight and
+        # needs no further qualifier beyond the founder context it sits in.
+        self_identifying = any(
+            word in school.lower()
+            for word in ("university", "college", "institute")
+        )
+        attendance_patterns = (
+            # "Brown University", "MIT Sloan", "Harvard Business School"
+            rf"\b{escaped_school}\b\s+(?:university|college|institute|"
+            rf"law school|business school|medical school|sloan|csail)",
+            # "University of Chicago"
+            rf"\b(?:university|college|institute)\s+of\s+{escaped_school}\b",
+            # "studied at Brown", "graduated from MIT"
+            rf"\b(?:studied|graduated|attended|earned|received|trained|"
+            rf"educated|holds|hold)\b[^.]{{0,60}}?\b{escaped_school}\b",
+            # "MIT PhD", "Harvard MBA", "Brown alumni", "Stanford professor"
+            rf"\b{escaped_school}\b[^.]{{0,30}}?\b(?:alum\w*|graduates?|"
+            rf"grad|phd|ph\.d|mba|undergraduate|degree|dropout|professor|"
+            rf"faculty|researcher|lab)\b",
+            rf"\b(?:alum\w*|graduates?|phd|ph\.d|mba|degree|dropout)\b"
+            rf"[^.]{{0,30}}?\b{escaped_school}\b",
+        )
+        evidence = ""
+        for sentence in contexts:
+            lowered = sentence.lower()
+            if school.lower() not in lowered:
+                continue
+            if any(term in lowered for term in non_academic):
+                continue
+            if self_identifying or any(
+                re.search(pattern, lowered)
+                for pattern in attendance_patterns
+            ):
+                evidence = sentence
+                break
+        if not evidence:
+            continue
         kind = (
             "ivy_league_spinout"
             if school.lower() in ivy
             else "top_university_spinout"
-        )
-        evidence = next(
-            (s for s in contexts if school.lower() in s.lower()), context
         )
         school_label = school.upper() if school.lower() == "mit" else school.title()
         add(kind, f"{school_label} team", evidence)
@@ -1432,6 +1484,44 @@ def founder_green_flags(text: str) -> list[dict[str, str]]:
         )
         add("deep_tech_ip", "Founder technical IP", evidence)
     return flags
+
+
+# The Ivy League plus MIT. Kept apart from STRONG_US_SCHOOLS because these
+# carry their own routing consequence below, not merely a pedigree weight.
+ELITE_FOUNDER_SCHOOLS = (
+    "harvard", "yale", "princeton", "columbia", "upenn", "cornell",
+    "brown", "dartmouth", "mit",
+)
+
+# A verified elite-school founder is treated as a high-conviction signal in
+# its own right rather than a modifier on top of thesis and product evidence.
+# Applied as a floor, so a sparse early page cannot dilute it below the line
+# where a human would ever see it, and left under the Investable ceilings so
+# the last stretch still has to be earned on the company itself.
+#
+# This depends entirely on the attendance gate in founder_green_flags. On the
+# ungated detector the same floor would have lifted a Missouri public school
+# district and every page naming a founder whose surname is Brown.
+ELITE_SCHOOL_SCORE_FLOOR = max(
+    0, min(100, int(os.getenv("ELITE_SCHOOL_SCORE_FLOOR", "80")))
+)
+
+
+def elite_school_flags(
+    flags: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    """Verified Ivy League or MIT attendance among the founders."""
+    elite: list[dict[str, str]] = []
+    for flag in flags:
+        if flag.get("type") not in {
+            "ivy_league_spinout",
+            "top_university_spinout",
+        }:
+            continue
+        label = str(flag.get("label", "")).lower()
+        if any(school in label for school in ELITE_FOUNDER_SCHOOLS):
+            elite.append(flag)
+    return elite
 
 
 def founder_pedigree_score(flags: list[dict[str, str]]) -> int:
@@ -1761,6 +1851,14 @@ def score_text(text: str) -> tuple[int, str, list[str], dict[str, int]]:
             + min(observed_evidence, COVERAGE_EVIDENCE_CAP)
         )
         score = max(score, coverage_score)
+
+    # An Ivy League or MIT founder lifts the row on its own. Deliberately
+    # after the low-value and dimension ceilings: those exist to stop keyword
+    # density from inflating a thin page, and this is a claim about who is
+    # building it, which is exactly the case where a thin page is still worth
+    # a human's attention. Only the gated flag can trigger it.
+    if elite_school_flags(founder_flags):
+        score = max(score, ELITE_SCHOOL_SCORE_FLOOR)
 
     evidence = list(dict.fromkeys(
         pillar_hits[best]

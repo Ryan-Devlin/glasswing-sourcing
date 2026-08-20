@@ -198,3 +198,90 @@ def test_words_that_merely_start_with_an_employer_name_are_not_pedigree():
         "Our founding team runs meta-learning experiments at scale.",
     ):
         assert founder_green_flags(text) == [], text
+
+
+def test_a_school_name_on_its_own_is_not_a_spinout():
+    """The branch accepted any school word sitting near team copy, while the
+    employer branch beside it had always demanded an employment pattern.
+    Measured on the live corpus: of 880 rows carrying a school flag, 869
+    (98.8%) do not survive requiring the name to appear as an institution.
+    Every case below is drawn from that sample.
+    """
+    for text in (
+        # "brown" is the commonest surname in the corpus, and a colour.
+        "Chris Brown CEO & Co-Founder 3x Founder & Product Leader 3 exits",
+        "Jessica Brown Founder & CEO I was impressed by the services",
+        "Proudly Made By Take Point Marketing brown; our founder built this",
+        # nixapublicschools.ai -- a Missouri public school district, which
+        # reached Needs Review flagged as an Ivy League spinout.
+        "Our team. District Gradecard Gold Star Schools Culture Columbia "
+        "Data District Notices District Building Information",
+        # "mit" is the licence on every open-source page.
+        "Our founder released it under the MIT License on GitHub.",
+        # An academic institution list is not a founder's education.
+        "Our founding team reads Centro Studi (35) CESifo (57) Chapman "
+        "University Columbia (31)",
+    ):
+        schools = [
+            flag for flag in founder_green_flags(text)
+            if flag["type"].endswith("_spinout")
+        ]
+        assert schools == [], f"{text[:48]!r} -> {schools}"
+
+
+def test_attendance_stated_as_attendance_still_counts():
+    for text, expected in (
+        ("Our cofounder studied computer science at Brown University.", "Brown team"),
+        ("Founded by Jane Doe, an MIT PhD in robotics.", "MIT team"),
+        ("Our founder holds a Harvard MBA and scaled two companies.", "Harvard team"),
+        ("Our founder graduated from MIT and led perception at Waymo.", "MIT team"),
+        ("Our founding team are Stanford alumni building compilers.", "Stanford team"),
+        ("Our cofounder earned a PhD at the University of Chicago.", "Chicago team"),
+    ):
+        labels = {flag["label"] for flag in founder_green_flags(text)}
+        assert expected in labels, f"{text!r} -> {labels}"
+
+
+def test_an_ivy_or_mit_founder_scores_high_on_its_own():
+    """Explicit instruction: a founder from MIT, Harvard or any Ivy is a
+    high-conviction signal by itself, not a modifier on thesis and product
+    evidence. A sparse page is exactly the case it has to survive, since an
+    elite team shipping nothing yet is still worth a human's attention.
+    """
+    from filter import ELITE_SCHOOL_SCORE_FLOOR
+
+    for text in (
+        "Founded by Jane Doe, an MIT PhD in robotics. We build perception software.",
+        "Our founder holds a Harvard MBA and previously scaled two companies.",
+        "Our cofounder studied computer science at Brown University.",
+    ):
+        assert score_text(text)[0] >= ELITE_SCHOOL_SCORE_FLOOR, text
+
+
+def test_the_high_score_needs_the_verified_flag_not_the_bare_word():
+    """The floor and the gate are one change. On the ungated detector this
+    would have lifted a school district and every page naming a founder
+    whose surname happens to be Brown straight into the top of the funnel.
+    """
+    from filter import ELITE_SCHOOL_SCORE_FLOOR
+
+    for text in (
+        "Chris Brown CEO & Co-Founder 3x Founder & Product Leader 3 exits",
+        "Our founder released it under the MIT License on GitHub.",
+        "Our team. District Gradecard Gold Star Schools Culture Columbia Data",
+    ):
+        assert score_text(text)[0] < ELITE_SCHOOL_SCORE_FLOOR, text
+
+
+def test_a_strong_but_non_ivy_school_does_not_get_the_floor():
+    """The instruction named MIT, Harvard and the Ivy League. A University of
+    Chicago PhD is still a real spinout flag and still scores on pedigree; it
+    just does not get the floor.
+    """
+    from filter import ELITE_SCHOOL_SCORE_FLOOR, elite_school_flags
+
+    text = "Our cofounder earned a PhD at the University of Chicago."
+    flags = founder_green_flags(text)
+    assert any(flag["type"].endswith("_spinout") for flag in flags)
+    assert elite_school_flags(flags) == []
+    assert score_text(text)[0] < ELITE_SCHOOL_SCORE_FLOOR
