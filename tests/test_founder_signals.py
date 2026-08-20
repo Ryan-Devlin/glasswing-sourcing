@@ -480,3 +480,88 @@ def test_a_job_that_found_nobody_does_not_report_success(monkeypatch, tmp_path):
     assert result["attempted"] == 0
     assert result["status"] == "no_candidates"
     assert result["status"] != "completed"
+
+
+def test_a_truncated_history_is_not_a_spike(monkeypatch, tmp_path):
+    """What the first real collection produced: "286 events this month against
+    a median of 0.5 over the previous six, 285.5 deviations outside their
+    normal range" -- for two people whose accounts had simply never been seen
+    before. GitHub's public events API returns ~300 events and about 90 days,
+    so a first collection has no six-month history and every prior window
+    reads zero. That is missing data, not a step change.
+    """
+    database = setup_store(monkeypatch, tmp_path)
+    fresh = fs.create_candidate(person("Fresh Fran"))["candidate_id"]
+    # Everything the API could give us: a burst inside the last 90 days and
+    # nothing before it, because there is nothing before it to fetch.
+    seed_events(database, fresh, [286, 0, 1])
+    spike = fs.commit_spike(fresh)
+    assert spike["history_status"] == "too_short"
+    assert spike["is_spike"] is False
+
+
+def test_a_near_empty_baseline_is_not_a_baseline(monkeypatch, tmp_path):
+    """Counting months that merely contain *an* event let a median of 0.5
+    clear the gate. Volume in the baseline has to be real."""
+    database = setup_store(monkeypatch, tmp_path)
+    who = fs.create_candidate(person("Sparse Sam"))["candidate_id"]
+    now = datetime.now(timezone.utc)
+    seed_events(database, who, [200, 1, 1, 1, 0, 0, 0])
+    # Reach back far enough that history length is not what fails it.
+    with classification_store.connect_store(database) as conn:
+        conn.execute(
+            "INSERT INTO founder_github_events(event_id,candidate_id,username,"
+            "event_type,repo_name,organization,event_created_at,collected_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("ancient", who, "u", "PushEvent", "openai/x", "openai",
+             (now - timedelta(days=200)).isoformat(), fs.utc_now()),
+        )
+        conn.commit()
+    spike = fs.commit_spike(who)
+    assert spike["history_status"] == "sufficient"
+    assert spike["baseline_median"] < 5
+    assert spike["is_spike"] is False
+
+
+def test_two_people_in_the_same_org_both_collect(monkeypatch, tmp_path):
+    """organization_id is the table's primary key while the row is per
+    candidate and per org, so colleagues collided on it and the second one
+    failed collection outright. Ten of 174 people failed this way on the
+    first real run -- and sharing an employer is the normal case here.
+    """
+    setup_store(monkeypatch, tmp_path)
+    first = fs.create_candidate(person("Colleague One"))["candidate_id"]
+    second = fs.create_candidate(person("Colleague Two"))["candidate_id"]
+
+    class OneOrg:
+        """The whole client surface collect_candidate uses is `paginated`."""
+
+        def paginated(self, path, maximum_pages=1):
+            if path.endswith("/orgs"):
+                # The same GitHub org id for both people, which is the point.
+                return [{"login": "anthropics", "id": 4567,
+                         "url": "https://github.com/anthropics"}]
+            return []
+
+    with classification_store.connect_store(
+        classification_store.CLASSIFICATION_DB
+    ) as conn:
+        for candidate, name in ((first, "one"), (second, "two")):
+            conn.execute(
+                "INSERT INTO verified_github_identities(candidate_id,username,"
+                "confidence_score,verification_method,verified_at) VALUES (?,?,?,?,?)",
+                (candidate, name, 100, "manual", fs.utc_now()),
+            )
+        conn.commit()
+
+    fs.collect_candidate(first, client=OneOrg())
+    fs.collect_candidate(second, client=OneOrg())
+
+    with classification_store.connect_store(
+        classification_store.CLASSIFICATION_DB, read_only=True
+    ) as conn:
+        rows = conn.execute(
+            "SELECT candidate_id FROM founder_github_organizations WHERE login=?",
+            ("anthropics",),
+        ).fetchall()
+    assert {str(row["candidate_id"]) for row in rows} == {first, second}

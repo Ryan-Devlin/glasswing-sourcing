@@ -912,7 +912,16 @@ def collect_candidate(candidate_id: str, *, client: GitHubClient | None = None) 
                 (repo_id, candidate_id, full_name, clean((repo.get("owner") or {}).get("login", "")), clean(repo.get("description", "")), _json(repo.get("topics", [])), clean(repo.get("language", "")), clean(repo.get("homepage", "")), clean(repo.get("created_at", "")), clean(repo.get("updated_at", "")), now, now, bool(repo.get("archived", False))),
             )
         for org in orgs:
-            login = clean(org.get("login", "")); org_id = str(org.get("id") or login)
+            # organization_id is the table's primary key while the row itself
+            # is per candidate *and* per org -- so two people in the same
+            # GitHub org produced the same id and the second one violated the
+            # key. ON CONFLICT(candidate_id,login) never caught it, because
+            # the collision is on the primary key rather than that unique
+            # constraint. Ten of 174 people failed collection this way on the
+            # first real run, all of them colleagues of somebody already
+            # collected, which is the normal case for this dataset.
+            login = clean(org.get("login", ""))
+            org_id = f'{candidate_id}:{org.get("id") or login}'
             conn.execute(
                 "INSERT INTO founder_github_organizations(organization_id,candidate_id,login,profile_url,first_seen_at,last_seen_at) VALUES (?,?,?,?,?,?) ON CONFLICT(candidate_id,login) DO UPDATE SET last_seen_at=excluded.last_seen_at,profile_url=excluded.profile_url",
                 (org_id, candidate_id, login, clean(org.get("url", "")), now, now),
@@ -1022,6 +1031,23 @@ def commit_spike(candidate_id: str, *, now: datetime | None = None) -> dict[str,
             (candidate_id, (now - timedelta(days=240)).isoformat()),
         ).fetchall()
     events = [dict(row) for row in rows]
+    # GitHub's public events API returns at most ~300 events and about 90
+    # days, whichever comes first. So on a first collection there is no
+    # six-month history at all: everything lands in the current window, the
+    # prior ones read zero, and a z-score against that is arithmetic on
+    # missing data rather than a measurement. It produced exactly that on the
+    # first real run -- "286 events this month against a median of 0.5, 285.5
+    # deviations outside their normal range" -- for two people whose accounts
+    # we had simply never seen before.
+    #
+    # The baseline has to be built up by the daily collection over months.
+    # Until the data we hold actually reaches back into the baseline window,
+    # there is nothing to compare against and this says so.
+    oldest = min(
+        (_parse_time(str(row["event_created_at"])) for row in events),
+        default=None,
+    )
+    covers_baseline = bool(oldest and oldest <= now - timedelta(days=90))
     buckets = _monthly_buckets(events, now)
     current, prior = buckets[0], buckets[1:]
     baseline = _median([float(value) for value in prior])
@@ -1033,6 +1059,8 @@ def commit_spike(candidate_id: str, *, now: datetime | None = None) -> dict[str,
     z = (current - baseline) / spread
     return {
         "current_30d": current,
+        "history_status": "sufficient" if covers_baseline else "too_short",
+        "oldest_event": oldest.isoformat() if oldest else "",
         "baseline_median": round(baseline, 2),
         "baseline_deviation": round(deviation, 2),
         "months_of_history": sum(1 for value in prior if value > 0),
@@ -1043,7 +1071,11 @@ def commit_spike(candidate_id: str, *, now: datetime | None = None) -> dict[str,
         # variation, and enough absolute volume that it is not a rounding
         # error on a dormant account.
         "is_spike": bool(
-            sum(1 for value in prior if value > 0) >= 3
+            covers_baseline
+            and sum(1 for value in prior if value > 0) >= 3
+            # A median of 0.5 is not a baseline. Counting months that merely
+            # contain *an* event let a near-empty history clear the gate.
+            and baseline >= 5
             and z >= 3.0
             and current >= baseline + 10
             and current >= 10
