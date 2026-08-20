@@ -654,3 +654,61 @@ def test_the_correlation_reaches_the_score(monkeypatch, tmp_path):
     assert "sky/inferloop" in row["evidence"]
     assert int(row["strength"]) >= 25, "this is the strongest available corroboration"
     assert fs.recalculate_scores(who)["founder_transition_score"] > 0
+
+
+def add_repo_fork(database, candidate_id, full_name, homepage):
+    with classification_store.connect_store(database) as conn:
+        conn.execute(
+            "INSERT INTO founder_github_repositories(repository_id,candidate_id,"
+            "full_name,owner_login,homepage,created_at,updated_at,first_seen_at,"
+            "last_seen_at,is_fork) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (f"{candidate_id}:{full_name}", candidate_id, full_name,
+             full_name.split("/")[0], homepage, fs.utc_now(), fs.utc_now(),
+             fs.utc_now(), fs.utc_now(), True),
+        )
+        conn.commit()
+
+
+def test_a_fork_does_not_borrow_the_upstream_projects_domain(monkeypatch, tmp_path):
+    """The difference between this signal and noise. A fork inherits the
+    upstream homepage, so every fork of a popular AI repository manufactures a
+    correlation with that project's domain. On the first live run nearly all
+    40 matches were forks: MukundaKatta/dspy against dspy.ai,
+    sarahcstringer/twilio-csharp against twilio.com,
+    romainhuet/react-stripe-elements against stripe.com. None of those people
+    registered anything.
+    """
+    database = setup_store(monkeypatch, tmp_path)
+    who = fs.create_candidate(person("Forking Fay"))["candidate_id"]
+    add_repo_fork(database, who, "fay/dspy", "https://dspy.ai")
+    add_screened_domain(database, "dspy.ai", days_ago=3)
+
+    assert fs.certificate_feed_matches(who) == []
+
+
+def test_their_own_repository_still_counts(monkeypatch, tmp_path):
+    """The exclusion has to be the fork flag and not the domain, or a real
+    project sharing a name with something upstream disappears too."""
+    database = setup_store(monkeypatch, tmp_path)
+    who = fs.create_candidate(person("Original Ola"))["candidate_id"]
+    add_repo(database, who, "ola/inferloop", "https://inferloop.ai")
+    add_screened_domain(database, "inferloop.ai", days_ago=3)
+
+    matches = fs.certificate_feed_matches(who)
+    assert [m["domain"] for m in matches] == ["inferloop.ai"]
+
+
+def test_the_recency_source_is_reported_so_it_cannot_be_mistaken(monkeypatch, tmp_path):
+    """classified_at is when we got round to screening a domain -- a fact
+    about our backlog, not about the domain. Reading it as recency marked
+    twilio.com and microsoft.com as fresh registrations and passed every one
+    of the first live run's 40 matches. When the queue is unreachable the
+    fallback is still used, but it says so.
+    """
+    database = setup_store(monkeypatch, tmp_path)
+    who = fs.create_candidate(person("Sourced Sky"))["candidate_id"]
+    add_repo(database, who, "sky/thing", "https://thing.ai")
+    add_screened_domain(database, "thing.ai", days_ago=2)
+
+    match = fs.certificate_feed_matches(who)[0]
+    assert match["first_seen_source"] in {"certificate_feed", "screened_at"}

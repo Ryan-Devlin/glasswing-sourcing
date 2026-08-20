@@ -196,6 +196,7 @@ def migrate_founder_signals(conn, *, postgres: bool = False) -> None:
         primary_language TEXT NOT NULL DEFAULT '', readme_excerpt TEXT NOT NULL DEFAULT '', homepage TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '', first_seen_at TEXT NOT NULL,
         last_seen_at TEXT NOT NULL, archived BOOLEAN NOT NULL DEFAULT FALSE,
+        is_fork BOOLEAN NOT NULL DEFAULT FALSE,
         UNIQUE(candidate_id,full_name), FOREIGN KEY(candidate_id) REFERENCES founder_candidates(candidate_id)
     );
     CREATE TABLE IF NOT EXISTS founder_github_organizations (
@@ -911,9 +912,9 @@ def collect_candidate(candidate_id: str, *, client: GitHubClient | None = None) 
             full_name = clean(repo.get("full_name", ""))
             repo_id = f'{candidate_id}:{repo.get("id") or full_name}'
             conn.execute(
-                "INSERT INTO founder_github_repositories(repository_id,candidate_id,full_name,owner_login,description,topics_json,primary_language,homepage,created_at,updated_at,first_seen_at,last_seen_at,archived) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) "
-                "ON CONFLICT(candidate_id,full_name) DO UPDATE SET description=excluded.description,topics_json=excluded.topics_json,primary_language=excluded.primary_language,homepage=excluded.homepage,updated_at=excluded.updated_at,last_seen_at=excluded.last_seen_at,archived=excluded.archived",
-                (repo_id, candidate_id, full_name, clean((repo.get("owner") or {}).get("login", "")), clean(repo.get("description", "")), _json(repo.get("topics", [])), clean(repo.get("language", "")), clean(repo.get("homepage", "")), clean(repo.get("created_at", "")), clean(repo.get("updated_at", "")), now, now, bool(repo.get("archived", False))),
+                "INSERT INTO founder_github_repositories(repository_id,candidate_id,full_name,owner_login,description,topics_json,primary_language,homepage,created_at,updated_at,first_seen_at,last_seen_at,archived,is_fork) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(candidate_id,full_name) DO UPDATE SET description=excluded.description,topics_json=excluded.topics_json,primary_language=excluded.primary_language,homepage=excluded.homepage,updated_at=excluded.updated_at,last_seen_at=excluded.last_seen_at,archived=excluded.archived,is_fork=excluded.is_fork",
+                (repo_id, candidate_id, full_name, clean((repo.get("owner") or {}).get("login", "")), clean(repo.get("description", "")), _json(repo.get("topics", [])), clean(repo.get("language", "")), clean(repo.get("homepage", "")), clean(repo.get("created_at", "")), clean(repo.get("updated_at", "")), now, now, bool(repo.get("archived", False)), bool(repo.get("fork", False))),
             )
         for org in orgs:
             # organization_id is the table's primary key while the row itself
@@ -1168,10 +1169,18 @@ def certificate_feed_matches(candidate_id: str, *, now: datetime | None = None, 
     reported alongside, not folded in.
     """
     now = now or datetime.now(timezone.utc)
+    # Forks are excluded, and that exclusion is the difference between a
+    # signal and noise. A fork inherits the upstream project's homepage, so
+    # every fork of a popular AI repository manufactures a correlation with
+    # that project's domain. Measured on the first live run: of 40 matches,
+    # nearly all were forks -- MukundaKatta/dspy against dspy.ai,
+    # sarahcstringer/twilio-csharp against twilio.com,
+    # romainhuet/react-stripe-elements against stripe.com. None of those
+    # people registered anything.
     with _store(True) as conn:
         repos = conn.execute(
             "SELECT full_name,homepage,created_at FROM founder_github_repositories "
-            "WHERE candidate_id=? AND homepage<>''",
+            "WHERE candidate_id=? AND homepage<>'' AND is_fork=FALSE",
             (candidate_id,),
         ).fetchall()
     wanted: dict[str, dict[str, Any]] = {}
@@ -1182,7 +1191,35 @@ def certificate_feed_matches(candidate_id: str, *, now: datetime | None = None, 
     if not wanted:
         return []
 
+    # first_seen on the queue is when CertStream first handed us a certificate
+    # for the domain. classified_at is when *we* got round to screening it,
+    # which is a fact about our backlog and not about the domain -- reading it
+    # as recency marked twilio.com and microsoft.com as fresh registrations,
+    # and passed all 40 matches on the first live run.
     cutoff = (now - timedelta(days=window_days)).isoformat().replace("+00:00", "Z")
+    queue_first_seen: dict[str, str] = {}
+    try:
+        # Local import: continuous_pipeline pulls in the scoring module, and
+        # this file is imported by it in turn.
+        from continuous_pipeline import connect_db as connect_queue
+
+        queue = connect_queue()
+        try:
+            names = sorted(wanted)
+            for start in range(0, len(names), 400):
+                batch = names[start:start + 400]
+                marks = ",".join("?" for _ in batch)
+                for row in queue.execute(
+                    f"SELECT domain,first_seen FROM domains WHERE domain IN ({marks})",
+                    batch,
+                ).fetchall():
+                    queue_first_seen[str(row["domain"])] = str(row["first_seen"] or "")
+        finally:
+            queue.close()
+    except Exception:
+        # No queue reachable: fall back to the classification timestamp and
+        # let the caller see it, rather than silently claiming recency.
+        queue_first_seen = {}
     matches: list[dict[str, Any]] = []
     names = sorted(wanted)
     with _store(True) as conn:
@@ -1196,11 +1233,15 @@ def certificate_feed_matches(candidate_id: str, *, now: datetime | None = None, 
                 batch,
             ).fetchall():
                 domain = str(row["domain"])
-                seen = str(row["first_seen"] or "")
+                seen = queue_first_seen.get(domain) or str(row["first_seen"] or "")
                 matches.append({
                     "domain": domain,
                     "repository": wanted[domain]["repository"],
                     "first_seen": seen,
+                    "first_seen_source": (
+                        "certificate_feed" if queue_first_seen.get(domain)
+                        else "screened_at"
+                    ),
                     "company_name": str(row["company_name"] or ""),
                     "routing_bucket": str(row["routing_bucket"] or ""),
                     "fit_score": int(row["fit_score"] or 0),
