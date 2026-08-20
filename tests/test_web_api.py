@@ -136,7 +136,7 @@ def test_classifications_are_server_paginated(monkeypatch):
     # count rather than the cached bucket counts -- otherwise the pager would
     # advertise pages of unreadable rows the query will not return.
     monkeypatch.setattr(
-        web_api, "count_classifications",
+        web_api, "count_classifications_in_buckets",
         lambda buckets, **kwargs: captured.update(count=kwargs) or 501,
     )
     response = client.get("/api/classifications?bucket=review&page=3&page_size=100&sort=Fit%3A%20low%20to%20high")
@@ -165,7 +165,7 @@ def test_needs_review_hides_rows_with_nothing_to_read(monkeypatch):
         lambda buckets, **kwargs: captured.update(kwargs) or [],
     )
     monkeypatch.setattr(
-        web_api, "count_classifications", lambda buckets, **kwargs: 7,
+        web_api, "count_classifications_in_buckets", lambda buckets, **kwargs: 7,
     )
     monkeypatch.setattr(web_api, "hidden_domain_set", lambda domains: set())
 
@@ -1110,7 +1110,7 @@ def test_date_filter_narrows_the_rows_and_the_pager(tmp_path, monkeypatch):
 
     import classification_store
     from classification_store import (
-        count_classifications,
+        count_classifications_in_buckets,
         query_classifications,
         upsert_classifications,
     )
@@ -1138,10 +1138,10 @@ def test_date_filter_narrows_the_rows_and_the_pager(tmp_path, monkeypatch):
     cutoff_7 = (now - timedelta(days=7)).isoformat().replace("+00:00", "Z")
     assert domains("") == {"today.ai", "recent.ai", "ancient.ai"}
     assert domains(cutoff_7) == {"today.ai", "recent.ai"}
-    assert count_classifications(
+    assert count_classifications_in_buckets(
         ["review"], added_since=cutoff_7, path=database
     ) == 2
-    assert count_classifications(["review"], path=database) == 3
+    assert count_classifications_in_buckets(["review"], path=database) == 3
 
 
 def test_date_filter_reads_the_same_timestamp_the_column_shows(tmp_path):

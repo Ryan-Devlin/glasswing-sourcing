@@ -1321,7 +1321,7 @@ def query_source_classifications(
 ADDED_AT_SQL = "COALESCE(NULLIF(classifications.classified_at,''),classifications.updated_at)"
 
 
-def count_classifications(
+def count_classifications_in_buckets(
     buckets: Iterable[str],
     *,
     run_id: str = "",
@@ -1330,6 +1330,11 @@ def count_classifications(
     path: Path | str = CLASSIFICATION_DB,
 ) -> int:
     """How many rows a filtered page-through will actually find.
+
+    Named apart from ``count_classifications``, which counts the whole table
+    and takes a path positionally. Defining a second function under that name
+    shadowed it, and the screening path calls it with no arguments -- so every
+    batch raised TypeError and the funnel reported zero candidates retained.
 
     The pager's total comes from cached bucket counts, which know nothing about
     a date filter -- so without this, filtering to one day still advertised

@@ -64,7 +64,7 @@ from classification_store import (
     classification_source_label,
     hidden_domain_set,
     hide_domains,
-    count_classifications,
+    count_classifications_in_buckets,
     query_classifications,
     query_classifications_by_domains,
     query_source_classifications,
@@ -776,7 +776,7 @@ def classifications(
         # one applied the pager would still advertise every page of the
         # unfiltered bucket.
         "total": (
-            count_classifications(
+            count_classifications_in_buckets(
                 BUCKETS[bucket],
                 run_id=run_id,
                 added_since=added_since,

@@ -1418,3 +1418,31 @@ def test_a_rescore_does_not_erase_the_flags_it_reloaded(tmp_path):
 
     after = query_classifications_by_domains(["rescored.ai"], path=database)[0]
     assert after["website_green_flags"] == before["website_green_flags"]
+
+
+def test_the_whole_table_counter_still_takes_no_arguments(tmp_path):
+    """A second function defined under the name ``count_classifications``
+    shadowed this one. The screening path calls it with no arguments
+    (filter.py: ``if count_classifications() == 0``), so every batch raised
+    TypeError, screening stopped persisting, and the funnel reported zero
+    candidates retained on a feed that was arriving normally -- with the only
+    trace being ``last_error`` on the status endpoint.
+
+    The suite passed throughout, because nothing here ever called it the way
+    the worker does.
+    """
+    import inspect
+
+    from classification_store import (
+        count_classifications,
+        count_classifications_in_buckets,
+    )
+
+    # Callable with nothing, and with a path positionally.
+    assert count_classifications(tmp_path / "missing.sqlite3") == 0
+    assert count_classifications() >= 0
+
+    # And the bucket-scoped counter is a different function, not this one.
+    assert count_classifications is not count_classifications_in_buckets
+    first = list(inspect.signature(count_classifications).parameters)
+    assert first and first[0] == "path"
