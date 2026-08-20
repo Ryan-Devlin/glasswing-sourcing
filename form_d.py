@@ -343,15 +343,21 @@ def ingest_once() -> dict[str, int]:
         return result
 
 
-def dashboard(bucket: str = "all", limit: int = 100) -> dict[str, Any]:
+def dashboard(bucket: str = "all", limit: int = 100, *, added_since: str = "") -> dict[str, Any]:
     with connect_store() as conn:
         _schema(conn)
         counts = {str(row["bucket"]): int(row["total"]) for row in conn.execute("SELECT bucket,count(*) AS total FROM form_d_filings GROUP BY bucket")}
         params: list[Any] = []
-        where = ""
+        clauses: list[str] = []
         if bucket in {"investable", "review", "denied"}:
-            where = "WHERE bucket=?"
+            clauses.append("bucket=?")
             params.append(bucket)
+        if str(added_since or "").strip():
+            # filing_date is a date, so compare on its first ten characters --
+            # the cutoff carries a full timestamp.
+            clauses.append("filing_date >= ?")
+            params.append(str(added_since)[:10])
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         params.append(limit)
         rows = [dict(row) for row in conn.execute(f"SELECT accession,company_name,filing_date,filing_url,industry,entity_type,offering_amount,amount_sold,investors,score,bucket,reason,domain,domain_status FROM form_d_filings {where} ORDER BY filing_date DESC,score DESC LIMIT ?", params).fetchall()]
         domain_count = int(conn.execute("SELECT count(*) AS total FROM form_d_filings WHERE domain<>''").fetchone()["total"])

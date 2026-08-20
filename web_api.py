@@ -66,6 +66,7 @@ from classification_store import (
     hidden_domain_set,
     hide_domains,
     count_classifications_in_buckets,
+    count_source_classifications,
     query_classifications,
     query_classifications_by_domains,
     query_source_classifications,
@@ -252,6 +253,21 @@ BUCKETS = {
 # Needs Review shows rows a human could actually act on. score 0 means no
 # usable text was extracted at all.
 REVIEW_MINIMUM_SCORE = 1
+
+
+def added_since_cutoff(days: int) -> str:
+    """The ISO instant `days` ago, or "" for no filter.
+
+    Shared so every table's date filter means the same thing. Rolling windows
+    rather than calendar days, because the server compares UTC timestamps
+    while the columns render calendar days in the browser's own zone -- a
+    "Today" option would promise an alignment neither side can keep.
+    """
+    if not days:
+        return ""
+    return (
+        datetime.now(timezone.utc) - timedelta(days=int(days))
+    ).isoformat().replace("+00:00", "Z")
 CORPUS_SOURCES = {
     "ai": ("crawler_cache",),
     "zone": ("zone_universe",),
@@ -735,11 +751,7 @@ def classifications(
     # Filtering has to happen in SQL, not in the browser: a page holds 100 rows
     # out of a hundred thousand, so a client-side date filter would only ever
     # narrow the page you are already looking at.
-    added_since = ""
-    if added_within_days:
-        added_since = (
-            datetime.now(timezone.utc) - timedelta(days=added_within_days)
-        ).isoformat().replace("+00:00", "Z")
+    added_since = added_since_cutoff(added_within_days)
     # A score of 0 is reserved for pages where no usable text was extracted,
     # so a 0 in Needs Review is a row with nothing on it for a human to read.
     # 44,313 of them were sitting in this tab -- sequential bulk registrations
@@ -803,9 +815,11 @@ def labels(
     label: Literal["yes", "no"], q: str = "",
     scope: Literal["current", "history"] = "history",
     page: int = Query(1, ge=1), page_size: int = Query(100, ge=25, le=500),
+    added_within_days: int = Query(0, ge=0, le=3650),
 ):
     rows, total = query_training_labels(
         label, search=q,
+        added_since=added_since_cutoff(added_within_days),
         # YES/NO are durable human training baskets, not pipeline-run output.
         # Keep accepting the legacy scope parameter for old clients, but it
         # must never change which basket entries are returned.
@@ -1497,8 +1511,13 @@ def manual_claude_review_status(domain: str):
 
 
 @app.get("/api/claude/queue")
-def claude_queue(limit: int = Query(200, ge=1, le=500)):
-    rows = claude_review_queue_rows(limit)
+def claude_queue(
+    limit: int = Query(200, ge=1, le=500),
+    added_within_days: int = Query(0, ge=0, le=3650),
+):
+    rows = claude_review_queue_rows(
+        limit, added_since=added_since_cutoff(added_within_days)
+    )
     counts: dict[str, int] = {}
     for row in rows:
         status = str(row.get("status", "unknown"))
@@ -1677,10 +1696,17 @@ async def _form_d_worker() -> None:
 
 
 @app.get("/api/form-d")
-def form_d_filings(bucket: str = "all", limit: int = Query(100, ge=1, le=250)):
+def form_d_filings(
+    bucket: str = "all",
+    limit: int = Query(100, ge=1, le=250),
+    added_within_days: int = Query(0, ge=0, le=3650),
+):
     from form_d import dashboard, desired
 
-    result = dashboard(bucket=bucket, limit=limit)
+    result = dashboard(
+        bucket=bucket, limit=limit,
+        added_since=added_since_cutoff(added_within_days),
+    )
     result["desired"] = desired()
     return result
 
@@ -1843,8 +1869,18 @@ def worker_control(service: str, update: WorkerUpdate):
 
 
 @app.get("/api/admin/audit", dependencies=[Depends(_require_admin)])
-def admin_activity(limit: int = Query(100, ge=1, le=500)):
-    return {"rows": admin_audit_rows(limit)}
+def admin_activity(
+    limit: int = Query(100, ge=1, le=500),
+    added_within_days: int = Query(0, ge=0, le=3650),
+):
+    cutoff = added_since_cutoff(added_within_days)
+    rows = admin_audit_rows(limit)
+    if cutoff:
+        rows = [
+            row for row in rows
+            if str(row.get("created_at") or "") >= cutoff
+        ]
+    return {"rows": rows}
 
 
 @app.get("/api/health")
@@ -2088,17 +2124,26 @@ def corpus_companies(
     page: int = Query(1, ge=1),
     page_size: int = Query(100, ge=25, le=250),
     sort: str = "Recently classified",
+    added_within_days: int = Query(0, ge=0, le=3650),
 ):
     if bucket not in BUCKETS:
         raise HTTPException(400, "Unknown bucket")
-    raw = source_bucket_counts(CORPUS_SOURCES[kind])
-    total = sum(int(raw.get(name, 0)) for name in BUCKETS[bucket])
+    added_since = added_since_cutoff(added_within_days)
+    if added_since:
+        # source_bucket_counts knows nothing about a date filter.
+        total = count_source_classifications(
+            CORPUS_SOURCES[kind], BUCKETS[bucket], added_since=added_since
+        )
+    else:
+        raw = source_bucket_counts(CORPUS_SOURCES[kind])
+        total = sum(int(raw.get(name, 0)) for name in BUCKETS[bucket])
     rows = query_source_classifications(
         CORPUS_SOURCES[kind],
         BUCKETS[bucket],
         limit=page_size,
         offset=(page - 1) * page_size,
         sort=sort,
+        added_since=added_since,
     )
     return {"rows": _with_claude(rows), "total": total, "page": page, "page_size": page_size}
 

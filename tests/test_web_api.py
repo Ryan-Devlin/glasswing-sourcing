@@ -1173,3 +1173,58 @@ def test_date_filter_reads_the_same_timestamp_the_column_shows(tmp_path):
     assert query_classifications(
         ["review"], added_since=recent, path=database
     ) == []
+
+
+def test_every_list_endpoint_accepts_the_same_date_filter():
+    """One filter, one meaning, across the board. The parameter name and the
+    cutoff are shared (added_since_cutoff) so a window means the same thing on
+    every table rather than each one inventing its own.
+    """
+    for url in (
+        "/api/classifications?bucket=review",
+        "/api/labels?label=yes",
+        "/api/corpus/ai?bucket=review",
+        "/api/form-d?bucket=all",
+        "/api/claude/queue",
+    ):
+        joiner = "&" if "?" in url else "?"
+        plain = client.get(url)
+        filtered = client.get(f"{url}{joiner}added_within_days=7")
+        assert plain.status_code == 200, url
+        assert filtered.status_code == 200, f"{url} rejected the filter"
+        # A window can only ever narrow, never widen.
+        assert len(filtered.json().get("rows") or []) <= len(
+            plain.json().get("rows") or []
+        ), url
+
+
+def test_the_cutoff_is_a_rolling_window_from_now():
+    """Rolling rather than calendar days, and labelled that way in the UI: the
+    server compares UTC while the columns render calendar days in the browser's
+    own zone, so a "Today" option would promise an alignment neither keeps.
+    """
+    assert web_api.added_since_cutoff(0) == ""
+    seven = web_api.added_since_cutoff(7)
+    assert seven.endswith("Z")
+    parsed = datetime.fromisoformat(seven.replace("Z", "+00:00"))
+    elapsed = datetime.now(timezone.utc) - parsed
+    assert timedelta(days=6, hours=23) < elapsed < timedelta(days=7, hours=1)
+
+
+def test_a_filtered_page_and_its_pager_agree(monkeypatch):
+    """The failure this class of change keeps producing: rows filtered while
+    the total comes from an unfiltered cached count, so the pager advertises
+    pages the query will not return. Caught live on the corpus endpoint
+    reporting total=0 beside 100 rows.
+    """
+    for url in (
+        "/api/corpus/ai?bucket=review&page_size=25",
+        "/api/classifications?bucket=review&page_size=25",
+    ):
+        body = client.get(f"{url}&added_within_days=7").json()
+        rows = len(body.get("rows") or [])
+        total = int(body.get("total") or 0)
+        if rows:
+            assert total >= rows, f"{url}: {total} total beside {rows} rows"
+        else:
+            assert total == 0, f"{url}: {total} total beside no rows"

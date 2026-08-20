@@ -706,6 +706,48 @@ const ADDED_WITHIN_OPTIONS = [
   [7, "Added \u2264 7d"],
   [30, "Added \u2264 30d"],
 ];
+function addedFilterHeader(label) {
+  // The same cycling control ADDED_COLUMN uses, for tables that date their
+  // rows by some other column. Falls back to a plain label wherever no filter
+  // state is wired in.
+  return ({ addedWithinDays, onCycleAdded }) => {
+    if (!onCycleAdded) return label;
+    const active = ADDED_WITHIN_OPTIONS.find(
+      ([days]) => days === addedWithinDays,
+    );
+    return (
+      <button
+        className={`sort-button${addedWithinDays ? " filtered" : ""}`}
+        onClick={onCycleAdded}
+        title="Filter by date: any date, 24 hours, 7 days, 30 days"
+      >
+        {addedWithinDays ? active[1] : label}
+        <span>▾</span>
+      </button>
+    );
+  };
+}
+
+function useAddedWithin(setPage) {
+  // Server-side, always: a page is a hundred rows out of a hundred thousand,
+  // so filtering here would only narrow the page already on screen.
+  const [addedWithinDays, setAddedWithinDays] = useState(0);
+  return {
+    days: addedWithinDays,
+    param: `&added_within_days=${addedWithinDays}`,
+    headerContext: {
+      addedWithinDays,
+      onCycleAdded: () => {
+        const order = ADDED_WITHIN_OPTIONS.map(([days]) => days);
+        setAddedWithinDays(
+          order[(order.indexOf(addedWithinDays) + 1) % order.length],
+        );
+        if (setPage) setPage(1);
+      },
+    },
+  };
+}
+
 const ADDED_COLUMN = {
   key: "added_at",
   label: "Date added",
@@ -1564,13 +1606,10 @@ function CompaniesTable({ showRunScope = false }) {
   const [claudeBusy, setClaudeBusy] = useState("");
   const [claudeOverride, setClaudeOverride] = useState(null);
   const basket = bucket === "yes" || bucket === "no";
-  // 0 means no filter. Sent to the server rather than applied here: a page is
-  // 100 rows out of a hundred thousand, so filtering in the browser would only
-  // narrow the page already on screen.
-  const [addedWithinDays, setAddedWithinDays] = useState(0);
+  const added = useAddedWithin(setPage);
   const query = basket
-    ? `/api/labels?label=${bucket}&page=${page}&page_size=100`
-    : `/api/classifications?bucket=${bucket}&scope=${scope}&page=${page}&page_size=100&sort=${encodeURIComponent(apiSort(sort))}&added_within_days=${addedWithinDays}`;
+    ? `/api/labels?label=${bucket}&page=${page}&page_size=100${added.param}`
+    : `/api/classifications?bucket=${bucket}&scope=${scope}&page=${page}&page_size=100&sort=${encodeURIComponent(apiSort(sort))}${added.param}`;
   const result = useApi(query, [
     bucket,
     scope,
@@ -1578,7 +1617,7 @@ function CompaniesTable({ showRunScope = false }) {
     refresh,
     sort.key,
     sort.direction,
-    addedWithinDays,
+    added.days,
   ]);
   const save = (row, label) => setLabel({ domain: row.domain, label });
   const reject = (row) => setLabel({
@@ -1681,6 +1720,7 @@ function CompaniesTable({ showRunScope = false }) {
               { key: "rating", label: "Glasswing score" },
               ADDED_COLUMN,
             ]}
+            headerContext={added.headerContext}
             onReject={admin ? reject : requestLogin}
           />
           <Pager page={page} setPage={setPage} total={result.data.total} />
@@ -1690,17 +1730,7 @@ function CompaniesTable({ showRunScope = false }) {
           <Table
             rows={result.data.rows.filter((r) => !r.hidden)}
             columns={companyCols}
-            headerContext={{
-              addedWithinDays,
-              onCycleAdded: () => {
-                const order = ADDED_WITHIN_OPTIONS.map(([days]) => days);
-                const next = order[
-                  (order.indexOf(addedWithinDays) + 1) % order.length
-                ];
-                setAddedWithinDays(next);
-                setPage(1);
-              },
-            }}
+            headerContext={added.headerContext}
             onLabel={admin ? save : (_, label) => requestLogin(label)}
             onReject={admin ? reject : requestLogin}
             onClaude={admin ? sendClaude : requestLogin}
@@ -2049,11 +2079,12 @@ function CorpusCompanies({ kind }) {
     : requestLogin();
   const basket = bucket === "yes" || bucket === "no";
   const pageSize = 25;
+  const added = useAddedWithin(setPage);
   const result = useApi(
     basket
-      ? `/api/labels?label=${bucket}&page=${page}&page_size=${pageSize}`
-      : `/api/corpus/${kind}?bucket=${bucket}&page=${page}&page_size=${pageSize}&sort=${encodeURIComponent(apiSort(sort))}`,
-    [bucket, page, refresh, sort.key, sort.direction],
+      ? `/api/labels?label=${bucket}&page=${page}&page_size=${pageSize}${added.param}`
+      : `/api/corpus/${kind}?bucket=${bucket}&page=${page}&page_size=${pageSize}&sort=${encodeURIComponent(apiSort(sort))}${added.param}`,
+    [bucket, page, refresh, sort.key, sort.direction, added.days],
   );
   return (
     <section>
@@ -2097,6 +2128,7 @@ function CorpusCompanies({ kind }) {
             { key: "rating", label: "Glasswing score" },
               ADDED_COLUMN,
           ]}
+          headerContext={added.headerContext}
           onReject={reject}
         />
       ) : (
@@ -2104,6 +2136,7 @@ function CorpusCompanies({ kind }) {
           <Table
             rows={result.data.rows}
             columns={companyCols}
+            headerContext={added.headerContext}
             onLabel={(row, label) =>
               admin ? setLabel({ domain: row.domain, label }) : requestLogin()
             }
@@ -2283,7 +2316,11 @@ function FormDPage() {
   const [bucket, setBucket] = useState("investable");
   const [tick, setTick] = useState(0);
   const [busy, setBusy] = useState(false);
-  const result = useApi(`/api/form-d?bucket=${bucket}&limit=100`, [bucket, tick]);
+  const added = useAddedWithin(null);
+  const result = useApi(
+    `/api/form-d?bucket=${bucket}&limit=100${added.param}`,
+    [bucket, tick, added.days],
+  );
   const data = result.data;
   const control = async (desired) => {
     if (!admin) return requestLogin();
@@ -2333,7 +2370,7 @@ function FormDPage() {
           <Metric label="Automatically filtered" value={fmt(data.counts?.denied || 0)} />
         </div>
         <BucketTabs value={bucket} onChange={setBucket} tabs={[["investable", "New leads"], ["review", "Quick review"], ["denied", "Filtered out"]]} />
-        <Table rows={data.rows || []} columns={[
+        <Table rows={data.rows || []} headerContext={added.headerContext} columns={[
           { key: "company_name", label: "Issuer", sortable: false },
           { key: "domain", label: "Website", sortable: false, render: (row) => row.domain ? <a href={`https://${row.domain}`} target="_blank" rel="noreferrer">{row.domain}</a> : <span className="muted">{row.domain_status === "unresolved" ? "Not verified" : "Resolving…"}</span> },
           { key: "filing_date", label: "Filed" },
@@ -2788,7 +2825,11 @@ function HealthPage() {
 }
 
 function AdminActivity() {
-  const activity = useApi("/api/admin/audit?limit=100", []);
+  const activityAdded = useAddedWithin(null);
+  const activity = useApi(
+    `/api/admin/audit?limit=100${activityAdded.param}`,
+    [activityAdded.days],
+  );
   return (
     <section>
       <div className="table-toolbar">
@@ -2804,8 +2845,13 @@ function AdminActivity() {
       ) : (
         <Table
           rows={activity.data.rows}
+          headerContext={activityAdded.headerContext}
           columns={[
-            { key: "created_at", label: "Time" },
+            {
+              key: "created_at",
+              label: "Time",
+              renderHeader: addedFilterHeader("Time"),
+            },
             { key: "action", label: "Action" },
             { key: "target", label: "Target" },
             { key: "detail", label: "Detail" },
@@ -2821,7 +2867,11 @@ function ClaudeQueuePage() {
   const [tick, setTick] = useState(0);
   const [overrideDomain, setOverrideDomain] = useState("");
   const [message, setMessage] = useState("");
-  const queue = useApi("/api/claude/queue", [tick]);
+  const added = useAddedWithin(null);
+  const queue = useApi(
+    `/api/claude/queue${added.param.replace("&", "?")}`,
+    [tick, added.days],
+  );
   useEffect(() => {
     const timer = setInterval(() => {
       if (document.visibilityState === "visible") setTick((v) => v + 1);
@@ -2877,6 +2927,7 @@ function ClaudeQueuePage() {
       ) : (
         <Table
           rows={d.rows}
+          headerContext={added.headerContext}
           columns={[
             {
               key: "domain",
@@ -2914,6 +2965,7 @@ function ClaudeQueuePage() {
             {
               key: "requested_at",
               label: "Requested",
+              renderHeader: addedFilterHeader("Requested"),
               render: (row) => (
                 <span title={row.requested_at || "unknown"}>
                   {daysAgoLabel(row.requested_at)}

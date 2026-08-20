@@ -1270,6 +1270,42 @@ def source_bucket_counts(
     return {str(row["routing_bucket"]): int(row["total"]) for row in rows}
 
 
+def count_source_classifications(
+    source_prefixes: Iterable[str],
+    buckets: Iterable[str],
+    *,
+    added_since: str = "",
+    path: Path | str = CLASSIFICATION_DB,
+) -> int:
+    """Rows a filtered source page-through will find.
+
+    source_bucket_counts is unfiltered, so with a date filter applied the
+    corpus pager would still advertise every page of the whole bucket.
+    """
+    prefixes = [clean(value) for value in source_prefixes if clean(value)]
+    bucket_values = list(dict.fromkeys(str(value) for value in buckets))
+    if not prefixes or not bucket_values or (
+        not using_classification_postgres() and not Path(path).exists()
+    ):
+        return 0
+    source_clauses = " OR ".join("content_source LIKE ?" for _ in prefixes)
+    bucket_marks = ",".join("?" for _ in bucket_values)
+    params: list[object] = [f"{prefix}%" for prefix in prefixes]
+    params.extend(bucket_values)
+    added_clause = ""
+    if clean(added_since):
+        added_clause = f" AND {ADDED_AT_SQL} >= ?"
+        params.append(clean(added_since))
+    with connect_store(path, read_only=True) as conn:
+        row = conn.execute(
+            "SELECT count(*) AS n FROM classifications WHERE "
+            f"({source_clauses}) AND routing_bucket IN ({bucket_marks})"
+            f"{added_clause}",
+            params,
+        ).fetchone()
+    return int(row["n"] or 0) if row else 0
+
+
 def query_source_classifications(
     source_prefixes: Iterable[str],
     buckets: Iterable[str],
@@ -1277,6 +1313,7 @@ def query_source_classifications(
     limit: int = 100,
     offset: int = 0,
     sort: str = "Recently classified",
+    added_since: str = "",
     path: Path | str = CLASSIFICATION_DB,
 ) -> list[dict[str, object]]:
     """Page classifications for a crawler using indexed lightweight columns."""
@@ -1298,6 +1335,10 @@ def query_source_classifications(
     bucket_marks = ",".join("?" for _ in bucket_values)
     params: list[object] = [f"{prefix}%" for prefix in prefixes]
     params.extend(bucket_values)
+    added_clause = ""
+    if clean(added_since):
+        added_clause = f" AND {ADDED_AT_SQL} >= ?"
+        params.append(clean(added_since))
     params.extend([max(1, min(int(limit), 250)), max(0, int(offset))])
     with connect_store(path, read_only=True) as conn:
         rows = conn.execute(
@@ -1308,7 +1349,8 @@ def query_source_classifications(
             # means. updated_at is refreshed by every re-screen, so a
             # column built on it dates every record as today.
             "classified_at FROM classifications "
-            f"WHERE ({source_clauses}) AND routing_bucket IN ({bucket_marks}) "
+            f"WHERE ({source_clauses}) AND routing_bucket IN ({bucket_marks})"
+            f"{added_clause} "
             f"ORDER BY {order} LIMIT ? OFFSET ?",
             params,
         ).fetchall()
@@ -1679,7 +1721,7 @@ def admin_audit_rows(limit: int = 100, *, path: Path | str = CLASSIFICATION_DB) 
 
 def query_training_labels(
     label: str, *, search: str = "", run_id: str = "",
-    limit: int = 100, offset: int = 0,
+    limit: int = 100, offset: int = 0, added_since: str = "",
     path: Path | str = CLASSIFICATION_DB,
 ) -> tuple[list[dict[str, object]], int]:
     target = clean(label).lower()
@@ -1687,6 +1729,12 @@ def query_training_labels(
         return [], 0
     clauses = ["label=?"]
     params: list[object] = [target]
+    if clean(added_since):
+        # labeled_at is when a human put it in the basket, which is what this
+        # table's "Date added" column shows. The total below is read from the
+        # same WHERE, so the pager stays honest for free.
+        clauses.append("labeled_at >= ?")
+        params.append(clean(added_since))
     if clean(search):
         clauses.append("lower(domain) LIKE ?")
         params.append(f"%{clean(search).lower()}%")
@@ -1708,15 +1756,21 @@ def query_training_labels(
     return [dict(row) for row in rows], total
 
 
-def claude_review_queue_rows(limit: int = 200, *, path: Path | str = CLASSIFICATION_DB) -> list[dict[str, object]]:
+def claude_review_queue_rows(limit: int = 200, *, added_since: str = "", path: Path | str = CLASSIFICATION_DB) -> list[dict[str, object]]:
+    # Filtered before the limit, not after: applied afterwards a narrow window
+    # would just return fewer of the newest rows rather than the rows in it.
+    where = "WHERE q.requested_at >= ? " if clean(added_since) else ""
+    params: list[object] = [clean(added_since)] if clean(added_since) else []
+    params.append(max(1, min(int(limit), 500)))
     with connect_store(path, read_only=True) as conn:
         rows = conn.execute(
             "SELECT q.domain,q.status,q.requested_at,q.started_at,q.completed_at,q.error,"
             "d.decision,d.fit_score,d.reasoning,d.concerns,d.diligence_version,d.result_json "
             "FROM claude_review_queue q "
             "LEFT JOIN claude_diligence d ON d.domain=q.domain "
+            f"{where}"
             "ORDER BY q.requested_at DESC LIMIT ?",
-            (max(1, min(int(limit), 500)),),
+            params,
         ).fetchall()
     result = []
     for row in rows:
@@ -2082,7 +2136,7 @@ def admin_audit_rows(limit: int = 100, *, path: Path | str = CLASSIFICATION_DB) 
 
 def query_training_labels(
     label: str, *, search: str = "", run_id: str = "",
-    limit: int = 100, offset: int = 0,
+    limit: int = 100, offset: int = 0, added_since: str = "",
     path: Path | str = CLASSIFICATION_DB,
 ) -> tuple[list[dict[str, object]], int]:
     target = clean(label).lower()
@@ -2090,6 +2144,12 @@ def query_training_labels(
         return [], 0
     clauses = ["label=?"]
     params: list[object] = [target]
+    if clean(added_since):
+        # labeled_at is when a human put it in the basket, which is what this
+        # table's "Date added" column shows. The total below is read from the
+        # same WHERE, so the pager stays honest for free.
+        clauses.append("labeled_at >= ?")
+        params.append(clean(added_since))
     if clean(search):
         clauses.append("lower(domain) LIKE ?")
         params.append(f"%{clean(search).lower()}%")
@@ -2111,15 +2171,21 @@ def query_training_labels(
     return [dict(row) for row in rows], total
 
 
-def claude_review_queue_rows(limit: int = 200, *, path: Path | str = CLASSIFICATION_DB) -> list[dict[str, object]]:
+def claude_review_queue_rows(limit: int = 200, *, added_since: str = "", path: Path | str = CLASSIFICATION_DB) -> list[dict[str, object]]:
+    # Filtered before the limit, not after: applied afterwards a narrow window
+    # would just return fewer of the newest rows rather than the rows in it.
+    where = "WHERE q.requested_at >= ? " if clean(added_since) else ""
+    params: list[object] = [clean(added_since)] if clean(added_since) else []
+    params.append(max(1, min(int(limit), 500)))
     with connect_store(path, read_only=True) as conn:
         rows = conn.execute(
             "SELECT q.domain,q.status,q.requested_at,q.started_at,q.completed_at,q.error,"
             "d.decision,d.fit_score,d.reasoning,d.concerns,d.diligence_version,d.result_json "
             "FROM claude_review_queue q "
             "LEFT JOIN claude_diligence d ON d.domain=q.domain "
+            f"{where}"
             "ORDER BY q.requested_at DESC LIMIT ?",
-            (max(1, min(int(limit), 500)),),
+            params,
         ).fetchall()
     result = []
     for row in rows:
