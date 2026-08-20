@@ -52,12 +52,27 @@ class GlasswingFitScoringTests(unittest.TestCase):
         strong_scores = {name: self.score(text) for name, text in strong.items()}
         noise_scores = {name: self.score(text) for name, text in noise.items()}
 
-        self.assertGreaterEqual(min(strong_scores.values()), 60, strong_scores)
-        self.assertLessEqual(max(noise_scores.values()), 42, noise_scores)
+        # The separation is the property; the absolute numbers are a
+        # consequence of whatever the component weights currently are, and
+        # those are tuned against the labelled set. Asserting a bare floor of
+        # 60 made this test fail on a change that widened the gap from 18 to
+        # 50 -- the whole scale shifted down when thesis and business-value
+        # points were zeroed, and noise fell much further than signal did.
         self.assertGreater(
             min(strong_scores.values()),
             max(noise_scores.values()),
+            (strong_scores, noise_scores),
         )
+        self.assertGreaterEqual(
+            min(strong_scores.values()) - max(noise_scores.values()),
+            30,
+            (strong_scores, noise_scores),
+        )
+        # Still enough headroom over the gates these have to clear:
+        # SUBSTANTIVE_REVIEW_FLOOR is 10 and the configured minimum_score is
+        # 25, so a real candidate must sit well clear of both.
+        self.assertGreaterEqual(min(strong_scores.values()), 50, strong_scores)
+        self.assertLessEqual(max(noise_scores.values()), 20, noise_scores)
 
     def test_specific_security_gets_correct_pillar(self):
         score, pillar, _, _ = score_text(

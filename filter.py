@@ -1773,6 +1773,46 @@ COVERAGE_EVIDENCE_CAP = 12
 COVERAGE_FLOOR_MAX = COVERAGE_BASE_POINT + COVERAGE_WORD_CAP + COVERAGE_EVIDENCE_CAP
 
 
+# (cap, weight) per evidence dimension: how many distinct hits count, and what
+# each is worth. Measured univariately against 2,593 Claude-labelled rows --
+# how well each separates KEEP from REJECT on its own, where 0.50 is a coin
+# flip:
+#
+#     defensibility  0.629    the best positive signal in the set
+#     product        0.583
+#     problem        0.562
+#     technical      0.544
+#     buyer          0.526
+#     thesis         0.513    near-worthless, and was the largest weight
+#     value          0.464    points the wrong way: predicts REJECT
+#
+# Boilerplate density, at 0.353, is stronger than any of them -- inverted, it
+# is 0.647 -- and is applied as a penalty further down rather than here.
+SCORE_COMPONENTS = {
+    # Zero, and not removed. Thesis keywords are saturated in this population:
+    # essentially every page that reaches screening mentions AI, enterprise or
+    # infrastructure, so counting them separates nothing (0.513) while being
+    # the single largest weight in the sum. Thesis fit still gates -- pillar
+    # still drives category_valid, potential_glasswing_fit and every routing
+    # path in route_company -- it simply stops contributing noise to the
+    # ranking. Kept as a weight rather than deleted so the decision is visible
+    # and reversible.
+    "thesis": (3, 0),
+    "product": (2, 5),
+    "buyer": (2, 5),
+    "technical": (3, 6),
+    "workflow": (2, 5),
+    # Also zero: measured at 0.464 it predicts REJECT, so awarding points for
+    # it was actively pushing the wrong rows up.
+    "value": (2, 0),
+    # The best positive signal in the set, and raising the cap helped where
+    # raising the weight did not -- a fourth distinct defensibility phrase
+    # carries information, a heavier first one does not.
+    "defensibility": (4, 7),
+    "problem": (2, 4),
+}
+
+
 def score_text(text: str) -> tuple[int, str, list[str], dict[str, int]]:
     """Conservative website-only Glasswing score.
 
@@ -1826,14 +1866,22 @@ def score_text(text: str) -> tuple[int, str, list[str], dict[str, int]]:
     }
 
     # Dimension caps prevent keyword repetition from saturating the score.
-    thesis_points = min(unique_pillar, 3) * 6          # max 18
-    product_points = min(unique_product, 2) * 5        # max 10
-    buyer_points = min(unique_enterprise, 2) * 5       # max 10
-    technical_points = min(unique_technical, 3) * 6    # max 18
-    workflow_points = min(unique_workflow, 2) * 5      # max 10
-    value_points = min(unique_value, 2) * 4            # max 8
-    defensibility_points = min(unique_defensibility, 2) * 7  # max 14
-    problem_points = min(unique_problem, 2) * 4         # max 8
+    # Weights and caps live in SCORE_COMPONENTS so they can be swept against
+    # the labelled set rather than edited by hand. Every one of these was a
+    # magic number inline, which made "is this weight right" an unanswerable
+    # question -- and measured univariately, two of them point the wrong way.
+    def component(name: str, unique: int) -> int:
+        cap, weight = SCORE_COMPONENTS[name]
+        return min(unique, cap) * weight
+
+    thesis_points = component("thesis", unique_pillar)
+    product_points = component("product", unique_product)
+    buyer_points = component("buyer", unique_enterprise)
+    technical_points = component("technical", unique_technical)
+    workflow_points = component("workflow", unique_workflow)
+    value_points = component("value", unique_value)
+    defensibility_points = component("defensibility", unique_defensibility)
+    problem_points = component("problem", unique_problem)
 
     raw = (
         thesis_points
