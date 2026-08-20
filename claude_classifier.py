@@ -70,6 +70,7 @@ collision. If overlap cannot be verified, return unclear and do not reject for
 this reason. Glasswing portfolio domains: {PORTFOLIO_DOMAINS_TEXT}
 
 Score each dimension independently from 0-5:
+- founder_pedigree: who is building this, and what they have done before
 - thesis_fit: direct fit to a Glasswing category and market thesis
 - enterprise_value: clear enterprise/government buyer, painful workflow, ROI
 - product_depth: specific product, deployment, workflow, and user evidence
@@ -81,8 +82,34 @@ A 5 requires unusually strong concrete evidence; 3 is credible; 0 means evidence
 of no fit, not merely missing information. Recommend KEEP only for substantive
 high-conviction fit. There is no MAYBE. Return concise evidence, not marketing copy.
 
+founder_pedigree carries the heaviest single weight in the score, so
+investigate it directly rather than scoring whatever the homepage happens to
+mention. Read the team, about, leadership and blog pages. Identify the named
+founders, then establish their prior employers and titles, degrees and
+institutions, previous companies and how those ended, publications, patents
+and open-source work. Weigh the team as a whole: several founders who are
+individually strong across different areas -- research, engineering,
+go-to-market -- outrank one strong founder beside unknowns.
+
+- 5: an exceptional, verifiable record. Research or engineering leadership at
+  a leading lab or company, a prior exit, a doctorate from a top programme, or
+  named technical IP -- ideally more than one of these across the team.
+- 4: a clearly strong technical founding team with directly relevant depth.
+- 3: a credible technical founder with relevant experience.
+- 2: founders not identified, or identified with no background stated. This is
+  the correct score for a sparse pre-seed page, which must never be punished
+  for being sparse.
+- 0-1: reserved for founders who are named and whose background is verifiably
+  weak or irrelevant to what they are building.
+
+Never infer pedigree from a customer logo, an integration list, an accelerator
+membership, or a surname that happens to match an institution. State the
+concrete evidence in founder_evidence or score 2.
+
 Return ONLY these tags, with no prose before or after:
 <decision>KEEP|REJECT</decision>
+<founder_pedigree>integer 0-5</founder_pedigree>
+<founder_evidence>forty words maximum; named founders and their concrete background, or "not identified"</founder_evidence>
 <thesis_fit>integer 0-5</thesis_fit>
 <enterprise_value>integer 0-5</enterprise_value>
 <product_depth>integer 0-5</product_depth>
@@ -113,6 +140,8 @@ Return ONLY these tags, with no prose before or after:
 
 FIELDS = [
     "decision",
+    "founder_pedigree",
+    "founder_evidence",
     "thesis_fit",
     "enterprise_value",
     "product_depth",
@@ -244,6 +273,9 @@ def dry_assessment(row: dict) -> dict:
     return apply_hard_guards({
         "decision": "REJECT",
         "model_recommendation": "REJECT",
+        # 2 is "not identified", not "weak" -- see the rubric.
+        "founder_pedigree": 2,
+        "founder_evidence": "not identified",
         "thesis_fit": 2,
         "enterprise_value": 2,
         "product_depth": 2,
@@ -284,7 +316,8 @@ class DiligenceResponseError(ValueError):
 def validate_response_text(text: str) -> None:
     """Reject empty/malformed responses as retryable call failures."""
     required = (
-        "decision", "thesis_fit", "enterprise_value", "product_depth",
+        "decision", "founder_pedigree", "thesis_fit",
+        "enterprise_value", "product_depth",
         "technical_moat", "stage_fit", "evidence_confidence", "summary",
         "portfolio_overlap", "portfolio_company", "portfolio_overlap_evidence",
         "reason", "positive_evidence", "negative_evidence", "unknowns",

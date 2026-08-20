@@ -7,6 +7,7 @@ import pandas as pd
 
 import claude_classifier
 from diligence_logic import (
+    KEEP_THRESHOLD,
     apply_hard_guards,
     dimension_score,
     parse_assessment,
@@ -53,7 +54,7 @@ class ClaudeThresholdTests(unittest.TestCase):
     def test_unverified_facts_do_not_turn_a_keep_into_reject(self):
         assessment = {
             "decision": "KEEP",
-            "thesis_fit": 5, "enterprise_value": 4, "product_depth": 4,
+            "founder_pedigree": 4, "thesis_fit": 5, "enterprise_value": 4, "product_depth": 4,
             "technical_moat": 4, "stage_fit": 3,
             "us_based": "unclear",
             "funding_millions_usd": -1,
@@ -73,7 +74,7 @@ class ClaudeThresholdTests(unittest.TestCase):
     def test_confirmed_non_us_still_forces_reject(self):
         assessment = {
             "decision": "KEEP", "fit_score": 90, "us_based": "no",
-            "thesis_fit": 5, "enterprise_value": 5, "product_depth": 5,
+            "founder_pedigree": 4, "thesis_fit": 5, "enterprise_value": 5, "product_depth": 5,
             "technical_moat": 5, "stage_fit": 5,
             "funding_millions_usd": -1, "latest_round": "unknown",
             "institutional_rounds": -1, "ownership_status": "unclear",
@@ -97,6 +98,8 @@ class ClaudeThresholdTests(unittest.TestCase):
     def test_complete_binary_response_is_valid(self):
         response = """
         <decision>REJECT</decision>
+        <founder_pedigree>4</founder_pedigree>
+        <founder_evidence>Two ex-Nvidia engineers, one MIT PhD</founder_evidence>
         <thesis_fit>1</thesis_fit><enterprise_value>1</enterprise_value>
         <product_depth>1</product_depth><technical_moat>0</technical_moat>
         <stage_fit>2</stage_fit><evidence_confidence>4</evidence_confidence>
@@ -111,7 +114,7 @@ class ClaudeThresholdTests(unittest.TestCase):
     def test_confirmed_portfolio_technology_overlap_forces_reject(self):
         assessment = {
             "decision": "KEEP", "us_based": "yes",
-            "thesis_fit": 5, "enterprise_value": 5, "product_depth": 5,
+            "founder_pedigree": 4, "thesis_fit": 5, "enterprise_value": 5, "product_depth": 5,
             "technical_moat": 5, "stage_fit": 5,
             "funding_millions_usd": 1, "latest_round": "seed",
             "institutional_rounds": 1, "ownership_status": "independent",
@@ -129,7 +132,7 @@ class ClaudeThresholdTests(unittest.TestCase):
     def test_unverified_portfolio_overlap_does_not_force_reject(self):
         assessment = {
             "decision": "KEEP", "us_based": "yes",
-            "thesis_fit": 5, "enterprise_value": 5, "product_depth": 5,
+            "founder_pedigree": 4, "thesis_fit": 5, "enterprise_value": 5, "product_depth": 5,
             "technical_moat": 5, "stage_fit": 5,
             "funding_millions_usd": 1, "latest_round": "seed",
             "institutional_rounds": 1, "ownership_status": "independent",
@@ -165,16 +168,21 @@ class ClaudeThresholdTests(unittest.TestCase):
 
     def test_weighted_score_is_deterministic_and_confidence_is_separate(self):
         assessment = {
-            "thesis_fit": 5, "enterprise_value": 4, "product_depth": 4,
+            "founder_pedigree": 4, "thesis_fit": 5, "enterprise_value": 4, "product_depth": 4,
             "technical_moat": 3, "stage_fit": 4, "evidence_confidence": 1,
         }
-        self.assertEqual(dimension_score(assessment), 81)
+        # 82 under the v8 weights, which put founder_pedigree at 30 and
+        # scaled the rest down to keep the total at 100.
+        self.assertEqual(dimension_score(assessment), 82)
         assessment["evidence_confidence"] = 5
-        self.assertEqual(dimension_score(assessment), 81)
+        self.assertEqual(dimension_score(assessment), 82)
 
     def test_parser_preserves_evidence_and_computes_decision(self):
         response = """
-        <decision>REJECT</decision><thesis_fit>5</thesis_fit>
+        <decision>REJECT</decision>
+        <founder_pedigree>4</founder_pedigree>
+        <founder_evidence>Two ex-Nvidia engineers, one MIT PhD</founder_evidence>
+        <thesis_fit>5</thesis_fit>
         <enterprise_value>4</enterprise_value><product_depth>4</product_depth>
         <technical_moat>4</technical_moat><stage_fit>3</stage_fit>
         <evidence_confidence>2</evidence_confidence><category>vertical_ai</category>
@@ -547,3 +555,59 @@ class DailyCapTests(unittest.TestCase):
         # A field the worker would clamp is a field that lies to the operator.
         api = Path("web_api.py").read_text(encoding="utf-8")
         self.assertIn("claude_daily_limit: int = Field(100, ge=1, le=100)", api)
+
+
+class FounderWeightTests(unittest.TestCase):
+    """Founder background carries the heaviest single weight, by instruction."""
+
+    def test_founder_pedigree_is_the_heaviest_dimension(self):
+        from diligence_logic import SCORE_WEIGHTS
+
+        self.assertEqual(sum(SCORE_WEIGHTS.values()), 100)
+        heaviest = max(SCORE_WEIGHTS, key=SCORE_WEIGHTS.get)
+        self.assertEqual(heaviest, "founder_pedigree")
+
+    def test_an_exceptional_team_turns_a_near_miss_into_a_keep(self):
+        company = {
+            "thesis_fit": 4, "enterprise_value": 4, "product_depth": 4,
+            "technical_moat": 3, "stage_fit": 4,
+        }
+        unknown = dimension_score({**company, "founder_pedigree": 2})
+        elite = dimension_score({**company, "founder_pedigree": 5})
+        self.assertLess(unknown, KEEP_THRESHOLD)
+        self.assertGreaterEqual(elite, KEEP_THRESHOLD)
+
+    def test_a_great_team_cannot_carry_a_company_with_no_fit(self):
+        """Heaviest weight, not a veto. 30 points is deliberately under the
+        70 threshold so pedigree cannot alone rescue a page with no thesis,
+        no buyer and no product.
+        """
+        self.assertLess(
+            dimension_score({
+                "founder_pedigree": 5, "thesis_fit": 1, "enterprise_value": 1,
+                "product_depth": 1, "technical_moat": 1, "stage_fit": 3,
+            }),
+            KEEP_THRESHOLD,
+        )
+
+    def test_unidentified_founders_score_two_not_zero(self):
+        """A sparse pre-seed page must not be punished for being sparse --
+        the same rule the rest of this rubric follows for missing evidence.
+        """
+        import claude_classifier
+
+        dry = claude_classifier.dry_assessment({})
+        self.assertEqual(dry["founder_pedigree"], 2)
+
+    def test_the_prompt_tells_the_model_to_go_and_look(self):
+        """Scoring whatever the homepage happens to mention is the failure
+        this replaced: pedigree lives on the team and about pages.
+        """
+        prompt = claude_classifier.SYSTEM_PROMPT.lower()
+        self.assertIn("founder_pedigree", prompt)
+        self.assertIn("heaviest single weight", prompt)
+        for page in ("team", "about", "leadership"):
+            self.assertIn(page, prompt)
+        # And the same trap the rule detector fell into.
+        self.assertIn("customer logo", prompt)
+        self.assertIn("surname", prompt)

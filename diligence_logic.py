@@ -7,15 +7,24 @@ from typing import Any
 
 from common import clean
 
-DILIGENCE_VERSION = "2026-08-glasswing-rubric-v7"
+# v8 adds founder_pedigree and rebalances the weights around it. Bumped
+# rather than reused so a stored verdict says which rubric produced it: a v7
+# row has no founder dimension at all, and recomputing its score under these
+# weights would read a missing field as a zero and quietly demote it.
+DILIGENCE_VERSION = "2026-08-glasswing-rubric-v8"
 KEEP_THRESHOLD = 70
 CORE_MINIMUM = 3
+# Founder background carries the heaviest single weight, by instruction. The
+# others are scaled down to keep the total at 100, so KEEP_THRESHOLD keeps
+# meaning what it meant: a 5/5 founding team is worth 30 points on its own,
+# and cannot alone clear 70.
 SCORE_WEIGHTS = {
-    "thesis_fit": 25,
-    "enterprise_value": 20,
-    "product_depth": 20,
-    "technical_moat": 20,
-    "stage_fit": 15,
+    "founder_pedigree": 30,
+    "thesis_fit": 20,
+    "enterprise_value": 15,
+    "product_depth": 15,
+    "technical_moat": 12,
+    "stage_fit": 8,
 }
 OFFICIAL_CATEGORIES = {
     "vertical_ai",
@@ -29,6 +38,8 @@ OFFICIAL_CATEGORIES = {
 }
 FIELDS = [
     "decision",
+    "founder_pedigree",
+    "founder_evidence",
     "thesis_fit",
     "enterprise_value",
     "product_depth",
