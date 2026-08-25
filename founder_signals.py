@@ -97,6 +97,18 @@ def _loads(value: Any, default: Any) -> Any:
         return default
 
 
+# (table, column, DDL) for every column added after the initial schema. New
+# columns go here as well as in the CREATE above, or they reach fresh installs
+# only.
+ADDITIVE_COLUMNS = (
+    (
+        "founder_github_repositories",
+        "is_fork",
+        "is_fork BOOLEAN NOT NULL DEFAULT FALSE",
+    ),
+)
+
+
 def migrate_founder_signals(conn, *, postgres: bool = False) -> None:
     """Add the module schema without changing existing sourcing tables."""
     id_column = "id SERIAL PRIMARY KEY" if postgres else "id INTEGER PRIMARY KEY AUTOINCREMENT"
@@ -276,6 +288,33 @@ def migrate_founder_signals(conn, *, postgres: bool = False) -> None:
         setting_key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at TEXT NOT NULL, updated_by TEXT NOT NULL DEFAULT 'system'
     );
     """)
+
+    # Columns added after a database already exists. CREATE TABLE IF NOT
+    # EXISTS is a no-op on an existing table, so every column added to one of
+    # the definitions above lands only on fresh installs and silently never on
+    # production. That is not theoretical: is_fork was added to
+    # founder_github_repositories and then read by certificate_feed_matches,
+    # which raised UndefinedColumn 693 times over four days and took every
+    # founder signal down with it while events and repositories kept being
+    # written, so the tables looked healthy the whole time.
+    for table, column, definition in ADDITIVE_COLUMNS:
+        try:
+            if postgres:
+                from db_backend import table_columns_postgres
+
+                existing = table_columns_postgres(conn, table)
+            else:
+                existing = {
+                    str(row["name"])
+                    for row in conn.execute(f"PRAGMA table_info({table})")
+                }
+            if column not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
+        except Exception:
+            # A missing table here means the CREATE above has not run yet on
+            # this connection, which the next call will handle.
+            continue
+
     defaults = {
         "target_companies": DEFAULT_COMPANIES,
         "target_universities": DEFAULT_UNIVERSITIES,

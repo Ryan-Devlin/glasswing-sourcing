@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 import classification_store
@@ -712,3 +713,54 @@ def test_the_recency_source_is_reported_so_it_cannot_be_mistaken(monkeypatch, tm
 
     match = fs.certificate_feed_matches(who)[0]
     assert match["first_seen_source"] in {"certificate_feed", "screened_at"}
+
+
+def test_a_column_added_later_reaches_an_existing_database(monkeypatch, tmp_path):
+    """CREATE TABLE IF NOT EXISTS is a no-op on a table that already exists, so
+    a column added to one of those definitions lands on fresh installs and
+    silently never on production.
+
+    That is not theoretical. is_fork was added to founder_github_repositories
+    and then read by certificate_feed_matches, which raised UndefinedColumn 693
+    times over four days -- taking every founder signal down with it while
+    events and repositories carried on being written, so the tables looked
+    healthy the whole time and the signal counts simply stopped moving.
+    """
+    database = setup_store(monkeypatch, tmp_path)
+
+    def columns():
+        with classification_store.connect_store(database, read_only=True) as conn:
+            return {
+                str(row["name"])
+                for row in conn.execute(
+                    "PRAGMA table_info(founder_github_repositories)"
+                )
+            }
+
+    assert "is_fork" in columns(), "a fresh install gets it from the CREATE"
+
+    # Now the production shape: the table exists without the column.
+    with classification_store.connect_store(database) as conn:
+        conn.execute(
+            "ALTER TABLE founder_github_repositories DROP COLUMN is_fork"
+        )
+        conn.commit()
+    assert "is_fork" not in columns()
+
+    with classification_store.connect_store(database) as conn:
+        fs.migrate_founder_signals(conn)
+        conn.commit()
+    assert "is_fork" in columns(), "migration must repair an existing database"
+
+
+def test_every_additive_column_is_in_the_create_too():
+    """Both places, or a fresh install and an upgraded one diverge."""
+    source = (
+        Path(fs.__file__).read_text()
+        if hasattr(fs, "__file__") else ""
+    )
+    for table, column, _ in fs.ADDITIVE_COLUMNS:
+        assert table in source
+        # The column has to appear in the CREATE block as well, not only in
+        # the ALTER list, or a fresh database never gets it.
+        assert source.count(column) >= 2, column
