@@ -1331,6 +1331,10 @@ def query_source_classifications(
         "Fit: low to high": "fit_score ASC,priority_score ASC,domain",
         "Company: A to Z": "lower(company_name),domain",
         "Company: Z to A": "lower(company_name) DESC,domain DESC",
+        # Same expression the "Date added" column shows, so the corpus views
+        # sort by it identically to the main table.
+        "Date added: newest first": ADDED_AT_SQL + " DESC,domain",
+        "Date added: oldest first": ADDED_AT_SQL + " ASC,domain",
         "Domain: A to Z": "domain",
         "Domain: Z to A": "domain DESC",
     }.get(sort, "updated_at DESC,domain")
@@ -1480,6 +1484,13 @@ def query_classifications(
         "Fit: low to high": "fit_score ASC, priority_score ASC, domain",
         "Recently classified": "updated_at DESC, domain",
         "Recently detected": "COALESCE(NULLIF(classified_at,''),updated_at) DESC, domain",
+        # Newest and oldest by the same expression the "Date added" column
+        # shows. "Oldest classified" below orders on updated_at instead, which
+        # every re-screen refreshes -- so it answers "least recently touched",
+        # not "added longest ago", and the two diverge for any domain the
+        # crawler has revisited.
+        "Date added: newest first": ADDED_AT_SQL + " DESC, domain",
+        "Date added: oldest first": ADDED_AT_SQL + " ASC, domain",
         "Oldest classified": "updated_at ASC, domain",
         "Company: A to Z": "lower(company_name), domain",
         "Company: Z to A": "lower(company_name) DESC, domain DESC",

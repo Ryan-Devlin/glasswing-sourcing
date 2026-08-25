@@ -1175,6 +1175,32 @@ def test_date_filter_reads_the_same_timestamp_the_column_shows(tmp_path):
     ) == []
 
 
+def test_date_added_sorts_in_both_directions():
+    """The column the table shows, ordered by the expression it displays --
+    classified_at falling back to updated_at. "Oldest classified" orders on
+    updated_at alone, which every re-screen refreshes, so it answers "least
+    recently touched" rather than "added longest ago"; the two diverge for any
+    domain the crawler has revisited.
+    """
+    import urllib.parse
+
+    for url in (
+        "/api/classifications?bucket=review&page_size=25",
+        "/api/corpus/ai?bucket=review&page_size=25",
+    ):
+        pages = {}
+        for name in ("Date added: newest first", "Date added: oldest first"):
+            body = client.get(
+                f"{url}&sort={urllib.parse.quote(name)}"
+            ).json()
+            assert body.get("rows") is not None, (url, name)
+            pages[name] = [r.get("domain") for r in body["rows"]]
+        newest = pages["Date added: newest first"]
+        oldest = pages["Date added: oldest first"]
+        if newest and oldest:
+            assert newest != oldest, f"{url}: both directions returned the same page"
+
+
 def test_every_list_endpoint_accepts_the_same_date_filter():
     """One filter, one meaning, across the board. The parameter name and the
     cutoff are shared (added_since_cutoff) so a window means the same thing on

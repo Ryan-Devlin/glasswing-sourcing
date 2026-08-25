@@ -195,11 +195,16 @@ def test_an_empty_table_still_shows_its_header():
     assert "const empty = !rows?.length" in source
 
 
-def test_an_emptied_filter_offers_a_way_back():
-    """And the way back is a reset, not another step through the cycle: the
-    next window along can be just as empty as the one that emptied it.
+def test_date_added_sorts_rather_than_filtering():
+    """Fixed windows -- any date, 24 hours, 7 days, 30 days -- answered a
+    narrower question than anyone wanted, and could empty the table outright.
+    Ordering by the date makes "what came in recently" legible without hiding
+    anything, and cannot get stuck.
     """
     source = Path("webapp/src/main.jsx").read_text(encoding="utf-8")
-    assert "onClearAdded" in source
-    assert "Show any date" in source
-    assert "setAddedWithinDays(0)" in source
+    assert '"Date added: newest first"' in source
+    assert '"Date added: oldest first"' in source
+    # And the window control is gone rather than sitting beside it.
+    assert "ADDED_WITHIN_OPTIONS" not in source
+    assert "useAddedWithin" not in source
+    assert "added_within_days" not in source
