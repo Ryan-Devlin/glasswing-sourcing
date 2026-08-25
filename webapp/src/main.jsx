@@ -551,7 +551,11 @@ function Table({
   headerContext,
   onTrack,
 }) {
-  if (!rows?.length) return <div className="empty">No records found.</div>;
+  // The header is never dropped, even with nothing to show. It carries the
+  // sort and date-filter controls, so returning early on an empty result took
+  // away the only way to undo the filter that emptied it -- narrow the date to
+  // 24 hours on a quiet table and it was stuck there for good.
+  const empty = !rows?.length;
   return (
     <div className="table-wrap">
       <table>
@@ -581,7 +585,30 @@ function Table({
           </tr>
         </thead>
         <tbody>
-          {rows.map((row, i) => {
+          {empty && (
+            <tr className="empty-row">
+              <td colSpan={columns.length + (
+                (onLabel || onReject || onClaude || onTrack) ? 1 : 0
+              )}>
+                <span className="empty">
+                  {headerContext?.addedWithinDays
+                    ? "Nothing added in that window."
+                    : "No records found."}
+                </span>
+                {headerContext?.onCycleAdded &&
+                  Boolean(headerContext.addedWithinDays) && (
+                    <button
+                      className="link-button"
+                      onClick={headerContext.onClearAdded
+                        || headerContext.onCycleAdded}
+                    >
+                      Show any date
+                    </button>
+                  )}
+              </td>
+            </tr>
+          )}
+          {(rows || []).map((row, i) => {
             const bucketed = Number(row.manual_override || 0) === 1 || Boolean(row.manual_override_target || row.label);
             const bucketLabel = String(row.manual_override_target || row.label || "").toUpperCase();
             return (
@@ -758,6 +785,13 @@ function useAddedWithin(setPage) {
         setAddedWithinDays(
           order[(order.indexOf(addedWithinDays) + 1) % order.length],
         );
+        if (setPage) setPage(1);
+      },
+      // A direct reset rather than another step through the cycle: the escape
+      // hatch on an empty table has to be guaranteed to show something, and
+      // the next window along can be just as empty.
+      onClearAdded: () => {
+        setAddedWithinDays(0);
         if (setPage) setPage(1);
       },
     },

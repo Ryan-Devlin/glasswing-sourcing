@@ -179,3 +179,27 @@ def test_the_company_table_can_track_a_company():
     # its cell and the column renders empty.
     assert 'className="track-inline"' in source
     assert 'className="track"' not in source
+
+
+def test_an_empty_table_still_shows_its_header():
+    """The controls live in the header, so dropping it on an empty result took
+    away the only way to undo the filter that emptied it. Narrow the date to 24
+    hours on a quiet table and it was stuck there permanently -- no sort, no
+    filter, no way back without a reload.
+    """
+    source = Path("webapp/src/main.jsx").read_text(encoding="utf-8")
+    # No early return that skips the table entirely.
+    assert "if (!rows?.length) return" not in source
+    # The empty state is a row inside the body instead.
+    assert 'className="empty-row"' in source
+    assert "const empty = !rows?.length" in source
+
+
+def test_an_emptied_filter_offers_a_way_back():
+    """And the way back is a reset, not another step through the cycle: the
+    next window along can be just as empty as the one that emptied it.
+    """
+    source = Path("webapp/src/main.jsx").read_text(encoding="utf-8")
+    assert "onClearAdded" in source
+    assert "Show any date" in source
+    assert "setAddedWithinDays(0)" in source

@@ -1474,3 +1474,18 @@ kbd {
 .reason-latency.muted-latency {
   color: #9ca3af;
 }
+
+.empty-row td {
+  padding: 22px 12px;
+  text-align: center;
+  color: #6b7280;
+}
+.empty-row .link-button {
+  margin-left: 10px;
+  border: 0;
+  background: none;
+  color: #116447;
+  font-weight: 600;
+  text-decoration: underline;
+  cursor: pointer;
+}
