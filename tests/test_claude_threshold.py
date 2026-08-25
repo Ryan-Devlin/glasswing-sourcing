@@ -50,6 +50,49 @@ def test_green_flags_normalize_legacy_types_labels_and_evidence():
     }]
 
 
+def test_two_employers_are_two_facts():
+    """Keying the dedup on the type alone lost the second one, which is the
+    thing the pedigree column exists to show."""
+    flags = normalize_green_flags([
+        {
+            "type": "ex_big_tech", "label": "Ex-Google team",
+            "evidence": "Founder spent six years at Google Brain on TPU compilers",
+        },
+        {
+            "type": "ex_big_tech", "label": "Ex-Stripe",
+            "evidence": "Cofounder led payments infrastructure at Stripe for four years",
+        },
+    ])
+    assert [flag["label"] for flag in flags] == ["Ex-Google", "Ex-Stripe"]
+
+
+def test_two_schools_are_two_facts():
+    flags = normalize_green_flags([
+        {
+            "type": "top_university_spinout", "label": "MIT founders",
+            "evidence": "Both founders completed doctorates at MIT CSAIL in 2023",
+        },
+        {
+            "type": "top_university_spinout", "label": "Stanford graduates",
+            "evidence": "Third cofounder came out of the Stanford AI Lab last year",
+        },
+    ])
+    assert [flag["label"] for flag in flags] == ["MIT team", "Stanford team"]
+
+
+def test_one_category_cannot_spend_every_slot():
+    """Six schools would otherwise crowd out traction, backing and IP."""
+    flags = normalize_green_flags([
+        {
+            "type": "top_university_spinout", "label": f"{school} founders",
+            "evidence": f"Founding team met while doing research at {school} in 2023",
+        }
+        for school in ("MIT", "Stanford", "Berkeley", "CMU", "Caltech", "Oxford")
+    ])
+    assert len(flags) == 2
+    assert [flag["label"] for flag in flags] == ["MIT team", "Stanford team"]
+
+
 class ClaudeThresholdTests(unittest.TestCase):
     def test_unverified_facts_do_not_turn_a_keep_into_reject(self):
         assessment = {
