@@ -232,6 +232,48 @@ async def download_scheduled_snapshots(conn, settings: Settings) -> bool:
                 timeout=7200,
             )
             imported[tld] = result
+            # CZDS sometimes serves yesterday's file again. When it does, the
+            # diff is against content we already hold, so added and removed
+            # both come back zero and the crawler has nothing queued -- which
+            # on the dashboard is indistinguishable from a working day with no
+            # new domains, and .app did it silently on 2026-08-23 before both
+            # zones did on 2026-08-25.
+            #
+            # A real day always moves both counters: .com runs 100-165k added
+            # against 95-128k removed, .app a few thousand each. Zero of both
+            # against an existing prior snapshot means the same file.
+            #
+            # So the day is not recorded as done, and the existing
+            # SNAPSHOT_RETRY_SECONDS backoff tries again later. Retrying is
+            # safe here for the same reason the delta was empty: the snapshot
+            # just written is byte-identical to the one before it, so a later
+            # import diffs tomorrow's real file against yesterday's content and
+            # produces the correct delta. That is *not* true after a successful
+            # import, which is why the guard above still exists.
+            # unchanged_domains only counts when there was a prior snapshot
+            # to compare against, which is what separates a repeat from a
+            # first import. The first import of a zone is deliberately a
+            # baseline -- it records the universe without queueing 163 million
+            # existing domains -- so it also reports zero added and zero
+            # removed, and without this it would be mistaken for a repeat and
+            # retried forever.
+            repeated = (
+                int(result.get("added_domains") or 0) == 0
+                and int(result.get("removed_domains") or 0) == 0
+                and int(result.get("unchanged_domains") or 0) > 0
+            )
+            result["repeated_snapshot"] = repeated
+            if repeated:
+                log_event(
+                    conn,
+                    "czds_repeat_snapshot",
+                    f"{tld}: CZDS served a snapshot identical to the previous "
+                    f"one ({int(result.get('delegated_domains') or 0):,} "
+                    "domains, no additions or removals). Not counting the day "
+                    "as done; will retry.",
+                    tld=tld,
+                )
+                continue
             set_state(conn, snapshot_day_key(tld), schedule_day)
             set_state(
                 conn,
@@ -249,7 +291,15 @@ async def download_scheduled_snapshots(conn, settings: Settings) -> bool:
         log_event(conn, "czds_stream_import_error", error)
         return False
 
-    set_state(conn, "last_czds_snapshot_day", schedule_day)
+    repeated_tlds = sorted(
+        tld for tld, result in imported.items()
+        if result.get("repeated_snapshot")
+    )
+    set_state(conn, "last_czds_repeat_snapshot_tlds", repeated_tlds)
+    # Only close the day out once every zone actually produced a fresh delta.
+    # Leaving it open is what lets the retry happen at all.
+    if not repeated_tlds:
+        set_state(conn, "last_czds_snapshot_day", schedule_day)
     set_state(conn, "last_czds_download_error", "")
     set_state(
         conn,
@@ -263,10 +313,17 @@ async def download_scheduled_snapshots(conn, settings: Settings) -> bool:
             for tld, result in imported.items()
         },
     )
+    fresh = [tld for tld in settings.tlds if tld not in repeated_tlds]
     log_event(
         conn,
         "czds_daily_snapshots_downloaded",
-        f"Stream-imported {','.join(settings.tlds)} snapshots for {schedule_day}.",
+        f"Stream-imported {','.join(fresh) or 'no'} fresh snapshots for "
+        f"{schedule_day}."
+        + (
+            f" {','.join(repeated_tlds)} repeated the previous snapshot and "
+            "will be retried."
+            if repeated_tlds else ""
+        ),
     )
     return True
 

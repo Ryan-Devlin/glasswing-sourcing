@@ -107,6 +107,7 @@ from diligence_logic import DILIGENCE_VERSION, normalize_green_flags
 from health_monitor import health_report
 from runtime_control import (
     SERVICES,
+    apply_pipeline_window,
     read_control,
     read_pipeline_status,
     read_pipeline_config,
@@ -183,6 +184,35 @@ async def _founder_signals_scheduler():
         except Exception as exc:
             print(f"Founder Signals scheduled collection deferred: {exc}", file=sys.stderr)
 
+async def _pipeline_window_scheduler():
+    """Start the CertStream pipeline at 8am ET and stop it at 8pm ET, daily.
+
+    Only ever acts when a boundary has passed, never continuously: a scheduler
+    that enforced "it is 2pm, so it should be running" would undo a deliberate
+    mid-afternoon pause within the minute. One start each morning, one stop
+    each evening, and the System Health controls are left alone in between.
+
+    The boundary already applied is recorded in the shared control store, so
+    restarts and redeploys do not re-issue one, and two web containers cannot
+    fight over it.
+    """
+    while True:
+        await asyncio.sleep(60)
+        try:
+            result = await asyncio.to_thread(apply_pipeline_window)
+            if result.get("applied"):
+                print(
+                    "Pipeline daily window "
+                    f"{'opened' if result['desired'] else 'closed'} "
+                    f"at boundary {result['boundary']}",
+                    file=sys.stderr,
+                )
+        except Exception as exc:
+            # Never fatal: the pipeline keeps whatever state it has, which is
+            # the safe direction for a scheduler that only nudges a flag.
+            print(f"Pipeline window schedule deferred: {exc}", file=sys.stderr)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     await asyncio.to_thread(reconcile_claude_routing)
@@ -197,6 +227,7 @@ async def lifespan(_app: FastAPI):
         asyncio.create_task(_landscape_worker()),
         asyncio.create_task(_form_d_worker()),
         asyncio.create_task(_founder_signals_scheduler()),
+        asyncio.create_task(_pipeline_window_scheduler()),
     ]
     try:
         yield
@@ -1937,6 +1968,26 @@ def worker_control(service: str, update: WorkerUpdate):
     request_services({name: update.desired for name in targets}, requested_by="react_web")
     record_admin_audit("workers_resumed" if update.desired else "workers_paused", service)
     return {"ok": True, "services": list(targets), "desired": update.desired}
+
+
+@app.get("/api/pipeline/window")
+def pipeline_window():
+    """The daily start/stop window, and which boundary is currently in force."""
+    from runtime_control import (
+        PIPELINE_WINDOW_CLOSE_HOUR,
+        PIPELINE_WINDOW_OPEN_HOUR,
+        read_schedule_state,
+        scheduled_pipeline_window,
+    )
+
+    boundary, desired = scheduled_pipeline_window()
+    return {
+        "open_hour_et": PIPELINE_WINDOW_OPEN_HOUR,
+        "close_hour_et": PIPELINE_WINDOW_CLOSE_HOUR,
+        "boundary": boundary,
+        "should_be_running": desired,
+        "applied_boundary": read_schedule_state("pipeline_window"),
+    }
 
 
 @app.get("/api/admin/audit", dependencies=[Depends(_require_admin)])

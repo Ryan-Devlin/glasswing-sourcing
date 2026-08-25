@@ -1228,3 +1228,58 @@ def test_a_filtered_page_and_its_pager_agree(monkeypatch):
             assert total >= rows, f"{url}: {total} total beside {rows} rows"
         else:
             assert total == 0, f"{url}: {total} total beside no rows"
+
+
+def test_the_daily_window_only_acts_on_boundaries():
+    """A scheduler that enforced "it is 2pm, so it should be running" would
+    undo a deliberate mid-afternoon pause within the minute. One start each
+    morning, one stop each evening, and the controls left alone in between --
+    so the boundary key has to be stable across the whole span it governs.
+    """
+    from zoneinfo import ZoneInfo
+
+    from runtime_control import scheduled_pipeline_window
+
+    eastern = ZoneInfo("America/New_York")
+
+    def at(hour, minute=30, day=25):
+        return scheduled_pipeline_window(
+            datetime(2026, 8, day, hour, minute, tzinfo=eastern)
+            .astimezone(timezone.utc)
+        )
+
+    # Every hour inside the working day reports the same boundary, so the
+    # scheduler applies it once and then does nothing.
+    open_boundaries = {at(hour)[0] for hour in range(8, 20)}
+    assert open_boundaries == {"2026-08-25:open"}
+    assert all(at(hour)[1] is True for hour in range(8, 20))
+
+    # And every hour of the evening reports one close.
+    assert {at(hour)[0] for hour in (20, 21, 23)} == {"2026-08-25:close"}
+    assert all(at(hour)[1] is False for hour in (20, 21, 23))
+
+
+def test_before_the_morning_the_previous_evening_still_governs():
+    """A container starting at 3am must pause, not inherit the coming day's
+    open. Its boundary is last night's close, which it may already have
+    applied -- so it does nothing rather than restarting the feed overnight.
+    """
+    from zoneinfo import ZoneInfo
+
+    from runtime_control import scheduled_pipeline_window
+
+    eastern = ZoneInfo("America/New_York")
+    for hour in (0, 3, 7):
+        boundary, desired = scheduled_pipeline_window(
+            datetime(2026, 8, 25, hour, 15, tzinfo=eastern).astimezone(timezone.utc)
+        )
+        assert boundary == "2026-08-24:close", hour
+        assert desired is False
+
+
+def test_the_window_is_reported_so_the_page_can_explain_itself():
+    body = client.get("/api/pipeline/window").json()
+    assert body["open_hour_et"] == 8
+    assert body["close_hour_et"] == 20
+    assert isinstance(body["should_be_running"], bool)
+    assert ":" in body["boundary"]

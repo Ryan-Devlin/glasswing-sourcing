@@ -9,8 +9,9 @@ import sqlite3
 import subprocess
 import sys
 import threading
+from zoneinfo import ZoneInfo
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from common import (
@@ -145,6 +146,12 @@ def _connect_runtime_control():
                     CREATE TABLE IF NOT EXISTS pipeline_status (
                         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                         payload TEXT NOT NULL DEFAULT '{}',
+                        updated_at TEXT NOT NULL DEFAULT ''
+                    );
+
+                    CREATE TABLE IF NOT EXISTS schedule_state (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL DEFAULT '',
                         updated_at TEXT NOT NULL DEFAULT ''
                     );
 
@@ -344,6 +351,79 @@ def service_requested_by(service: str) -> str:
     except (OSError, json.JSONDecodeError):
         payload = {}
     return str(payload.get("requested_by", ""))
+
+
+DAILY_WINDOW_TIMEZONE = ZoneInfo("America/New_York")
+# Eastern, by instruction: run through the working day and stop overnight.
+PIPELINE_WINDOW_OPEN_HOUR = int(os.getenv("PIPELINE_WINDOW_OPEN_HOUR_ET", "8"))
+PIPELINE_WINDOW_CLOSE_HOUR = int(os.getenv("PIPELINE_WINDOW_CLOSE_HOUR_ET", "20"))
+
+
+def scheduled_pipeline_window(
+    now: datetime | None = None,
+) -> tuple[str, bool]:
+    """The window boundary in force right now, and what it wants.
+
+    Returns a stable key naming the boundary -- "2026-08-25:open" -- and the
+    desired state. Acting on *boundaries* rather than on the current hour is
+    the whole design: a scheduler that continuously enforced "it is 2pm so the
+    pipeline should be running" would undo a deliberate mid-afternoon pause
+    within the minute. One start each morning, one stop each evening, and the
+    controls are left alone in between.
+
+    Before the morning boundary the previous evening's close is still what is
+    in force, so a container starting at 3am pauses rather than running until
+    8pm carries it.
+    """
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    eastern = current.astimezone(DAILY_WINDOW_TIMEZONE)
+    if eastern.hour >= PIPELINE_WINDOW_CLOSE_HOUR:
+        return f"{eastern.date().isoformat()}:close", False
+    if eastern.hour >= PIPELINE_WINDOW_OPEN_HOUR:
+        return f"{eastern.date().isoformat()}:open", True
+    yesterday = (eastern - timedelta(days=1)).date().isoformat()
+    return f"{yesterday}:close", False
+
+
+def read_schedule_state(key: str) -> str:
+    if not using_postgres(RUNTIME_CONTROL_DATABASE_ENV_VAR):
+        return ""
+    conn = _connect_runtime_control()
+    try:
+        row = conn.execute(
+            "SELECT value FROM schedule_state WHERE key=?", (key,)
+        ).fetchone()
+        return str(row["value"]) if row else ""
+    finally:
+        conn.close()
+
+
+def write_schedule_state(key: str, value: str) -> None:
+    if not using_postgres(RUNTIME_CONTROL_DATABASE_ENV_VAR):
+        return
+    conn = _connect_runtime_control()
+    try:
+        conn.execute(
+            "INSERT INTO schedule_state (key, value, updated_at) "
+            "VALUES (?, ?, ?) ON CONFLICT (key) DO UPDATE SET "
+            "value = EXCLUDED.value, updated_at = EXCLUDED.updated_at",
+            (key, value, datetime.now(timezone.utc).isoformat()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def apply_pipeline_window(now: datetime | None = None) -> dict[str, object]:
+    """Start or stop the pipeline if a window boundary has just passed."""
+    boundary, desired = scheduled_pipeline_window(now)
+    if read_schedule_state("pipeline_window") == boundary:
+        return {"applied": False, "boundary": boundary, "desired": desired}
+    request_services({"pipeline": desired}, requested_by=f"daily_window:{boundary}")
+    write_schedule_state("pipeline_window", boundary)
+    return {"applied": True, "boundary": boundary, "desired": desired}
 
 
 def request_services(
