@@ -2236,7 +2236,63 @@ def corpus_stats(kind: Literal["ai", "zone"]):
         "last_snapshot_day": worker.get("last_czds_snapshot_day", ""),
         "last_snapshot_attempt_at": worker.get("last_czds_attempt_at", ""),
         "snapshot_error": worker.get("last_czds_download_error", ""),
+        # Per-zone import state. Without it a .com import in progress is
+        # indistinguishable on the page from a day that found no .com domains
+        # at all -- and it is a 163-million-domain file, so it is "in progress"
+        # for the better part of an hour every morning while .app finishes in
+        # a minute. The repeat case needs naming for the same reason: CZDS
+        # serving yesterday's file again produces a real zero, and only this
+        # says why.
+        "zones": zone_import_states(),
     }
+
+
+def zone_import_states() -> list[dict[str, object]]:
+    """What each zone's last import did, per TLD."""
+    try:
+        with zone_connect(ZONE_UNIVERSE_DB, read_only=True) as conn:
+            rows = conn.execute(
+                "SELECT tld, import_status, imported_at, added_domains, "
+                "removed_domains, discovered_domains, import_error "
+                "FROM zones ORDER BY tld"
+            ).fetchall()
+    except Exception:
+        return []
+    states = []
+    for raw in rows:
+        # Tolerant of both row shapes and of columns an older database has not
+        # got: this is a status panel, and a missing field must degrade to
+        # "unknown" rather than take the whole crawler page down with a
+        # KeyError.
+        row = dict(raw)
+        added = int(row.get("added_domains") or 0)
+        removed = int(row.get("removed_domains") or 0)
+        status = str(row.get("import_status") or "")
+        # A zero delta against an existing universe is CZDS handing back the
+        # previous file, not a quiet day. It is the one zero worth explaining.
+        repeated = (
+            status == "ready"
+            and added == 0
+            and removed == 0
+            and int(row.get("discovered_domains") or 0) > 0
+        )
+        states.append({
+            "tld": str(row.get("tld") or ""),
+            "import_status": status,
+            "imported_at": str(row.get("imported_at") or ""),
+            "added_domains": added,
+            "removed_domains": removed,
+            "discovered_domains": int(row.get("discovered_domains") or 0),
+            "import_error": str(row.get("import_error") or ""),
+            "repeated_snapshot": repeated,
+            "state": (
+                "importing" if status == "importing"
+                else "repeat" if repeated
+                else "error" if str(row.get("import_error") or "")
+                else "ready"
+            ),
+        })
+    return states
 
 
 @app.get("/api/corpus/{kind}")

@@ -1309,3 +1309,100 @@ def test_the_window_is_reported_so_the_page_can_explain_itself():
     assert body["close_hour_et"] == 20
     assert isinstance(body["should_be_running"], bool)
     assert ":" in body["boundary"]
+
+
+def test_a_zone_mid_import_is_not_reported_as_zero(monkeypatch):
+    """A .com import diffs 163 million domains and runs for the better part of
+    an hour, while .app finishes in a minute. Until it lands the delta is zero,
+    which on the page is indistinguishable from a day that found no .com
+    domains -- and that is exactly how it read.
+    """
+    rows = [
+        {
+            "tld": "app", "import_status": "ready",
+            "imported_at": "2026-08-25T17:55:24Z", "added_domains": 3654,
+            "removed_domains": 1003, "discovered_domains": 1487135,
+            "import_error": "",
+        },
+        {
+            "tld": "com", "import_status": "importing",
+            "imported_at": "2026-08-25T10:59:50Z", "added_domains": 0,
+            "removed_domains": 0, "discovered_domains": 162882674,
+            "import_error": "",
+        },
+    ]
+
+    class FakeConn:
+        def execute(self, *_args, **_kwargs):
+            return self
+
+        def fetchall(self):
+            return rows
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    monkeypatch.setattr(web_api, "zone_connect", lambda *a, **k: FakeConn())
+    states = {z["tld"]: z for z in web_api.zone_import_states()}
+    assert states["com"]["state"] == "importing"
+    assert states["app"]["state"] == "ready"
+
+
+def test_a_repeated_zone_snapshot_is_named_as_such(monkeypatch):
+    """Zero added and zero removed against an existing universe is CZDS
+    handing back the previous file. It is a real zero, and the only one worth
+    explaining rather than just showing."""
+    rows = [{
+        "tld": "com", "import_status": "ready",
+        "imported_at": "2026-08-25T10:59:50Z", "added_domains": 0,
+        "removed_domains": 0, "discovered_domains": 162882674,
+        "import_error": "",
+    }]
+
+    class FakeConn:
+        def execute(self, *_a, **_k):
+            return self
+
+        def fetchall(self):
+            return rows
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_e):
+            return False
+
+    monkeypatch.setattr(web_api, "zone_connect", lambda *a, **k: FakeConn())
+    state = web_api.zone_import_states()[0]
+    assert state["repeated_snapshot"] is True
+    assert state["state"] == "repeat"
+
+
+def test_a_first_zone_import_is_not_called_a_repeat(monkeypatch):
+    """The baseline import queues nothing by design, so it also reports zero
+    added and zero removed -- discovered_domains against no prior universe is
+    what separates them."""
+    rows = [{
+        "tld": "new", "import_status": "ready", "imported_at": "2026-08-25Z",
+        "added_domains": 0, "removed_domains": 0, "discovered_domains": 0,
+        "import_error": "",
+    }]
+
+    class FakeConn:
+        def execute(self, *_a, **_k):
+            return self
+
+        def fetchall(self):
+            return rows
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_e):
+            return False
+
+    monkeypatch.setattr(web_api, "zone_connect", lambda *a, **k: FakeConn())
+    assert web_api.zone_import_states()[0]["repeated_snapshot"] is False

@@ -2508,6 +2508,39 @@ function SearchCorpusPage({ kind }) {
               </span>
             ))}
           </div>
+          {(metrics.data.zones || []).map((zone) => {
+            // A .com import runs for the better part of an hour against
+            // .app's minute, and a repeat snapshot produces a real zero. Both
+            // read as "no domains today" unless the page says otherwise.
+            if (zone.state === "importing") {
+              return (
+                <p className="funnel-note" key={zone.tld}>
+                  <strong>.{zone.tld}</strong> is still importing
+                  {zone.discovered_domains
+                    ? ` — ${num(zone.discovered_domains)} domains to diff, which takes about an hour for .com`
+                    : ""}
+                  . Today&rsquo;s additions appear when it finishes.
+                </p>
+              );
+            }
+            if (zone.state === "repeat") {
+              return (
+                <p className="funnel-note" key={zone.tld}>
+                  <strong>.{zone.tld}</strong>: CZDS served the same zone file
+                  as last time, so there is genuinely nothing new to queue.
+                  It will be retried automatically.
+                </p>
+              );
+            }
+            if (zone.state === "error") {
+              return (
+                <ErrorBox key={zone.tld}>
+                  .{zone.tld} import failed: {zone.import_error}
+                </ErrorBox>
+              );
+            }
+            return null;
+          })}
           {metrics.data.snapshot_error && (
             <ErrorBox>
               Daily snapshot failed: {metrics.data.snapshot_error}
