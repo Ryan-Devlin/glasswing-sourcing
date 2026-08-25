@@ -108,6 +108,12 @@ def eligible_domains(
     if cursor < 0 or (eligible_total and cursor >= eligible_total):
         cursor = 0
     for row in iter_eligible_scoring_rows(limit=rescue_limit, offset=cursor):
+        # Subscript rather than .get: sqlite3.Row supports mapping access but
+        # has no .get, so this crashed outright on a local store while working
+        # in production, where the Postgres shim hands back dict rows. The
+        # tests only ever called eligible_domains against Postgres, so nothing
+        # exercised it until the CLI was run end to end.
+        row = dict(row)
         domain = str(row.get("domain") or "").strip()
         if not domain or domain in seen:
             continue
@@ -164,6 +170,13 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--exclude",
+        type=Path,
+        default=None,
+        help="file of domains to leave out, one per line -- used to skip "
+             "companies already attempted recently that returned no verdict",
+    )
+    parser.add_argument(
         "--minimum-score",
         type=int,
         default=int(os.getenv("CLAUDE_MINIMUM_SCORE", "60")),
@@ -180,6 +193,20 @@ def main() -> int:
     domains = eligible_domains(
         args.minimum_score, args.rescue_limit, args.pool_limit
     )
+    if args.exclude:
+        # Domains already paid for recently that produced no verdict. Without
+        # this they stay eligible at the very top of the queue -- a high score
+        # is what got them selected in the first place -- and every attempt
+        # buys them again. Measured on the live store: 2,705 paid calls for
+        # 1,764 distinct domains, so 35% of the budget was re-attempts, and on
+        # one day 116 calls reached 66 companies.
+        skip = {
+            line.strip().lower()
+            for line in args.exclude.read_text().splitlines()
+            if line.strip()
+        }
+        if skip:
+            domains = [d for d in domains if d.lower() not in skip]
     if not domains:
         args.output.unlink(missing_ok=True)
         return 2

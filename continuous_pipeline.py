@@ -1514,6 +1514,63 @@ def load_run_config() -> dict:
     except Exception:
         return {}
 
+# How long a domain that was paid for and returned no verdict is left alone.
+# Long enough that a transient failure is not retried at full price on the next
+# attempt, short enough that a genuine fix reaches it within the week.
+CLAUDE_RETRY_COOLDOWN_DAYS = max(
+    1, int(os.getenv("CLAUDE_RETRY_COOLDOWN_DAYS", "7"))
+)
+
+
+def claude_attempted_without_verdict(
+    conn: sqlite3.Connection, *, days: int = CLAUDE_RETRY_COOLDOWN_DAYS
+) -> list[str]:
+    """Domains bought recently that produced nothing, so stop buying them.
+
+    prepare_input excludes anything with a *stored verdict*, which is the right
+    rule for a company already judged. It says nothing about a company whose
+    call failed, was refused, or came back unparseable: that row keeps its high
+    score, stays eligible, sits at the top of the queue and is bought again on
+    the very next attempt, indefinitely.
+
+    Measured on the live store: 2,705 paid calls against 1,764 distinct
+    domains, so 35% of everything spent was a re-attempt, and on 2026-08-24
+    116 calls reached 66 companies.
+    """
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(days=max(1, int(days)))
+    ).isoformat().replace("+00:00", "Z")
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT domain FROM claude_calls WHERE called_at >= ?",
+            (cutoff,),
+        ).fetchall()
+    except Exception:
+        return []
+    attempted = {
+        stable_domain(str(row["domain"]))
+        for row in rows
+        if str(row["domain"] or "")
+    }
+    if not attempted:
+        return []
+    # Anything that did produce a verdict is already excluded downstream, so
+    # leaving it here as well would be harmless but misleading in the logs.
+    from classification_store import claude_diligenced_domains
+    from diligence_logic import DILIGENCE_VERSION
+
+    try:
+        settled = {
+            stable_domain(domain)
+            for domain in claude_diligenced_domains(
+                diligence_version=DILIGENCE_VERSION
+            )
+        }
+    except Exception:
+        settled = set()
+    return sorted(attempted - settled)
+
+
 def claude_allowance(conn: sqlite3.Connection) -> int:
     config = load_run_config()
     # CLAUDE_DAILY_LIMIT is a ceiling, not a default. The dashboard could
@@ -1634,6 +1691,16 @@ def maybe_run_claude(batch_path: Path) -> int:
             candidates = FILTERED / "all_screened_live.csv"
             temporary_candidates = candidates
             candidates.parent.mkdir(parents=True, exist_ok=True)
+            cooldown = claude_attempted_without_verdict(conn)
+            exclude_path: Path | None = None
+            if cooldown:
+                exclude_path = LLM / "claude_cooldown_domains.txt"
+                exclude_path.parent.mkdir(parents=True, exist_ok=True)
+                exclude_path.write_text("\n".join(cooldown), encoding="utf-8")
+                write_status(
+                    claude_cooldown_domains=len(cooldown),
+                    updated_at=utc_now(),
+                )
             build = subprocess.run(
                 [
                     sys.executable,
@@ -1644,7 +1711,8 @@ def maybe_run_claude(batch_path: Path) -> int:
                     # it will throw away.
                     "--minimum-score",
                     str(CLAUDE_MINIMUM_SCORE),
-                ],
+                ]
+                + (["--exclude", str(exclude_path)] if exclude_path else []),
                 cwd=ROOT,
                 capture_output=True,
                 text=True,
