@@ -160,3 +160,22 @@ def test_decision_modal_recovers_from_api_failure():
     assert "catch (requestError)" in modal
     assert "setSaving(false)" in modal
     assert 'error && <p className="error inline-notice"' in modal
+
+
+def test_the_company_table_can_track_a_company():
+    """Tracking existed only on the deal cards, so a company found by reading
+    the table on the home page could be labelled, rejected or sent to Claude --
+    but not tracked, which is the one action that puts it in front of the team.
+    """
+    source = Path("webapp/src/main.jsx").read_text(encoding="utf-8")
+    # The table renders it as an action of its own.
+    assert "onTrack" in source
+    assert source.count("onTrack={() => setRefresh") == 2, (
+        "both company tables -- Classifications and the corpus views -- should "
+        "offer it"
+    )
+    # And it uses the in-cell style rather than the card one. card-track is
+    # absolutely positioned for a card corner, so in a table the button leaves
+    # its cell and the column renders empty.
+    assert 'className="track-inline"' in source
+    assert 'className="track"' not in source

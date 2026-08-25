@@ -549,6 +549,7 @@ function Table({
   sort,
   onSort,
   headerContext,
+  onTrack,
 }) {
   if (!rows?.length) return <div className="empty">No records found.</div>;
   return (
@@ -576,7 +577,7 @@ function Table({
                 )}
               </th>
             ))}
-            {(onLabel || onReject || onClaude) && <th>Actions</th>}
+            {(onLabel || onReject || onClaude || onTrack) && <th>Actions</th>}
           </tr>
         </thead>
         <tbody>
@@ -610,7 +611,7 @@ function Table({
                   )}
                 </td>
               ))}
-              {(onLabel || onReject || onClaude) && (
+              {(onLabel || onReject || onClaude || onTrack) && (
                 <td className="actions">
                   {onLabel && (
                     <>
@@ -661,6 +662,21 @@ function Table({
                             ? String(row.claude_queue_status).toLowerCase() === "reviewing" ? "Claude processing" : "Queued for Claude"
                           : "Send to Claude"}
                     </button>
+                  )}
+                  {onTrack && row.domain && (
+                    // TrackButton owns its own admin gate, busy state and
+                    // tracked/untracked label, and broadcasts
+                    // "tracking-changed" so the Tracking view updates without
+                    // this table knowing anything about it.
+                    <TrackButton
+                      row={row}
+                      // Not card-track: that is absolutely positioned for a
+                      // deal-card corner, so in a table the button leaves its
+                      // cell and the column renders empty. polish.css carries
+                      // .track-inline for exactly this.
+                      className="track-inline"
+                      onChanged={() => onTrack(row)}
+                    />
                   )}
                 </td>
               )}
@@ -1731,6 +1747,7 @@ function CompaniesTable({ showRunScope = false }) {
             rows={result.data.rows.filter((r) => !r.hidden)}
             columns={companyCols}
             headerContext={added.headerContext}
+            onTrack={() => setRefresh((value) => value + 1)}
             onLabel={admin ? save : (_, label) => requestLogin(label)}
             onReject={admin ? reject : requestLogin}
             onClaude={admin ? sendClaude : requestLogin}
@@ -2137,6 +2154,7 @@ function CorpusCompanies({ kind }) {
             rows={result.data.rows}
             columns={companyCols}
             headerContext={added.headerContext}
+            onTrack={() => setRefresh((value) => value + 1)}
             onLabel={(row, label) =>
               admin ? setLabel({ domain: row.domain, label }) : requestLogin()
             }
