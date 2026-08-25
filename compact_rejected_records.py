@@ -18,21 +18,23 @@ Scope is deliberately the reject bucket alone. Those are decided on a specific
 factual disqualifier, are never re-read, and are already treated as disposable
 elsewhere (discard_uninvestable_classifications).
 
-MEASURED 2026-08-25, AND NOT CURRENTLY WORTH RUNNING. 222,478 rejected rows
-hold 1,105 MB. On a *random* sample of 400 of them, 183 would shrink and the
-total saving is 25.4% -- roughly 280 MB, or 7.7% of a 3,649 MB database, in
-exchange for rewriting a hundred thousand rows and taking on precisely the WAL
-risk the guard in compact_classification_storage exists to avoid.
+RUN 2026-08-25, with the volume at 74% of 5 GB. Reclaimed 98 MB over 36,236
+rows before a dropped connection ended the pass at row 98,500 of 224,094; the
+committed work survived, and the rest was finished by a second run.
 
-An earlier estimate of 69% was wrong because it sampled the *largest* rows.
-The bloat is concentrated in old rows that predate the field whitelist: the
-first 4,000 rejected rows in domain order yielded nothing at all, because
-everything written recently is already in this shape, and the corpus grew from
-314k to 449k rows in five days.
+Measure with a *random* sample, never a prefix. Two earlier estimates were
+both wrong for opposite reasons: 69% came from sampling the largest rows, and
+0% came from scanning in domain order, where the first 13,500 rejected rows
+happen to be short junk-domain records (3,588 B average, none shrinkable)
+against 4,892 B and 36% shrinkable across the bucket as a whole. A random
+sample of 500 gives 28.9%, and 28.9% of the 618 MB that record_json actually
+occupies is roughly 180 MB -- not the 280 MB an earlier note claimed, which
+was taken against a 1,105 MB figure that included the review bucket.
 
-So the cost driver is growth, not history, and the 8am-8pm intake window
-already halves growth. Run this only if the picture changes -- if the ratio
-moves, or the volume gets tight -- and re-measure with a random sample first.
+So the cost driver is growth, not history: 180 MB is about two days of intake
+at the August peak. This buys time; it does not solve capacity. If the volume
+gets tight again the honest options are a bigger volume or dropping the
+rejected rows outright.
 
 Safety: batches commit separately with a pause between them so checkpoints keep
 up, rows that would not shrink are skipped rather than rewritten for nothing,
@@ -65,6 +67,43 @@ BUCKET = os.environ.get("BUCKET", "reject")
 MIN_SAVING = max(0, int(os.environ.get("MIN_SAVING", "512")))
 
 
+# A full pass is tens of minutes of small queries, and on 2026-08-25 one died
+# at row 98,500 of 224,094 with "SSL error: unexpected eof while reading" --
+# a dropped connection, nothing to do with the work. The 98 MB it had already
+# reclaimed was safe, because batches commit separately, but the run was over.
+#
+# So: transient connection failures are retried rather than fatal, and START
+# lets a run pick up where one left off. Resuming is an optimisation, not a
+# correctness requirement -- rows already compacted no longer clear MIN_SAVING,
+# so a plain restart skips them anyway; it just re-reads them first.
+START = os.environ.get("START", "")
+RETRIES = max(0, int(os.environ.get("RETRIES", "5")))
+RETRY_PAUSE = float(os.environ.get("RETRY_PAUSE", "3"))
+
+
+def with_retries(what, action):
+    """Retry an action that failed for reasons unrelated to its own work."""
+    for attempt in range(RETRIES + 1):
+        try:
+            return action()
+        except Exception as exc:
+            transient = any(
+                token in str(exc).lower()
+                for token in (
+                    "ssl", "eof", "connection", "timeout", "terminating",
+                    "server closed", "broken pipe",
+                )
+            )
+            if not transient or attempt == RETRIES:
+                raise
+            print(
+                f"  {what} failed ({type(exc).__name__}), retrying in "
+                f"{RETRY_PAUSE:.0f}s: {str(exc)[:90]}",
+                file=sys.stderr, flush=True,
+            )
+            time.sleep(RETRY_PAUSE)
+
+
 def database_bytes(conn) -> int:
     return int(
         conn.execute(
@@ -73,25 +112,31 @@ def database_bytes(conn) -> int:
     )
 
 
-with connect_store(read_only=True) as conn:
-    start_bytes = database_bytes(conn)
-    total = int(conn.execute(
-        "SELECT count(*) AS n FROM classifications WHERE routing_bucket=?",
-        (BUCKET,),
-    ).fetchone()["n"])
+def _opening():
+    with connect_store(read_only=True) as conn:
+        return database_bytes(conn), int(conn.execute(
+            "SELECT count(*) AS n FROM classifications WHERE routing_bucket=?",
+            (BUCKET,),
+        ).fetchone()["n"])
+
+
+start_bytes, total = with_retries("opening read", _opening)
 print(f"bucket={BUCKET}  rows={total:,}  database={start_bytes/1024**2:,.0f} MB")
 print(f"dry run: {DRY}   batch={BATCH}   min saving/row={MIN_SAVING}B")
 
-cursor = ""
+cursor = START
 seen = examined = rewritten = 0
 saved = 0
 while True:
-    with connect_store(read_only=True) as conn:
-        rows = conn.execute(
-            "SELECT domain, record_json FROM classifications "
-            "WHERE routing_bucket=? AND domain > ? ORDER BY domain LIMIT ?",
-            (BUCKET, cursor, BATCH),
-        ).fetchall()
+    def read_batch(at=None):
+        with connect_store(read_only=True) as conn:
+            return conn.execute(
+                "SELECT domain, record_json FROM classifications "
+                "WHERE routing_bucket=? AND domain > ? ORDER BY domain LIMIT ?",
+                (BUCKET, at, BATCH),
+            ).fetchall()
+
+    rows = with_retries("read", lambda: read_batch(cursor))
     if not rows:
         break
 
@@ -118,18 +163,24 @@ while True:
         pending.append((compacted, cursor))
 
     if pending and not DRY:
-        with connect_store() as conn:
-            conn.executemany(
-                "UPDATE classifications SET record_json=? WHERE domain=?",
-                pending,
-            )
-            conn.commit()
+        def write(batch=None):
+            with connect_store() as conn:
+                conn.executemany(
+                    "UPDATE classifications SET record_json=? WHERE domain=?",
+                    batch,
+                )
+                conn.commit()
+
+        with_retries("write", lambda: write(pending))
         rewritten += len(pending)
         time.sleep(PAUSE)
         # Abort rather than fill the volume: if this is making the database
         # bigger, the assumption behind it is wrong.
-        with connect_store(read_only=True) as conn:
-            now_bytes = database_bytes(conn)
+        def measure():
+            with connect_store(read_only=True) as conn:
+                return database_bytes(conn)
+
+        now_bytes = with_retries("size check", measure)
         if now_bytes > start_bytes * 1.15:
             print(
                 f"\nSTOPPING: database grew from {start_bytes/1024**2:,.0f} MB "
@@ -149,8 +200,12 @@ while True:
         print(f"stopping at the {LIMIT:,}-row cap")
         break
 
-with connect_store(read_only=True) as conn:
-    end_bytes = database_bytes(conn)
+def _closing():
+    with connect_store(read_only=True) as conn:
+        return database_bytes(conn)
+
+
+end_bytes = with_retries("closing read", _closing)
 print(
     f"\nexamined {examined:,}  rewritten {rewritten:,}  "
     f"json reclaimed {saved/1024**2:,.0f} MB"

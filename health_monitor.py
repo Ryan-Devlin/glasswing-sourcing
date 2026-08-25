@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sqlite3
 import sys
@@ -353,6 +354,45 @@ def health_report(*, include_integrity: bool = False) -> dict[str, object]:
                 + (f" · {orphans:,} orphans" if orphans else "")
             ),
         })
+
+    # The database lives on its own volume, which shutil.disk_usage cannot
+    # see from here -- "Free disk reserve" below measures the *web* container's
+    # volume and says nothing about Postgres. So this compares the database's
+    # own reported size against the provisioned capacity.
+    #
+    # Worth having because a full Postgres volume stops accepting writes and
+    # takes the whole pipeline down, and nothing gave any warning before it:
+    # on 2026-08-25 it was found at 74% only because somebody went looking.
+    # The capacity is configuration rather than something SQL can report, so
+    # it is an env var with the current provisioned size as the default.
+    if using_postgres():
+        try:
+            with connect_store(CLASSIFICATION_DB, read_only=True) as conn:
+                database_mb = int(
+                    conn.execute(
+                        "SELECT pg_database_size(current_database()) AS n"
+                    ).fetchone()["n"]
+                ) / (1024 ** 2)
+            capacity_mb = max(1.0, float(os.getenv("POSTGRES_VOLUME_MB", "5000")))
+            used = database_mb / capacity_mb
+            checks.append({
+                "Check": "Database capacity",
+                "Status": (
+                    "Error" if used >= 0.93
+                    else "Warning" if used >= 0.85
+                    else "Healthy"
+                ),
+                "Detail": (
+                    f"{database_mb:,.0f} MB of {capacity_mb:,.0f} MB "
+                    f"({used * 100:.0f}%)"
+                ),
+            })
+        except Exception as exc:
+            checks.append({
+                "Check": "Database capacity",
+                "Status": "Warning",
+                "Detail": f"Could not measure: {type(exc).__name__}",
+            })
 
     disk_total_bytes = shutil.disk_usage(DATA).total
     free_ratio = free_gb / (disk_total_bytes / (1024**3)) if disk_total_bytes else 0.0

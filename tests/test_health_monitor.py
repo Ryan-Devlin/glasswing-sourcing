@@ -328,3 +328,55 @@ def test_a_human_pause_is_the_one_that_expects_silence(monkeypatch):
     row = _row(health_monitor.health_report(), ".AI crawler heartbeat")
     assert row["Status"] == "Healthy"
     assert row["Detail"] == "Stopped on purpose"
+
+
+def _patch_capacity(monkeypatch, database_mb, capacity_mb="5000"):
+    """The database's own reported size, against provisioned capacity."""
+    monkeypatch.setattr(health_monitor, "using_postgres", lambda *a, **k: True)
+    monkeypatch.setenv("POSTGRES_VOLUME_MB", capacity_mb)
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def execute(self, *_a, **_k):
+            class _R:
+                def fetchone(self):
+                    return {"n": int(database_mb * 1024 * 1024)}
+            return _R()
+
+    monkeypatch.setattr(health_monitor, "connect_store", lambda *a, **k: _Conn())
+
+
+def test_a_filling_database_volume_warns_before_writes_fail(monkeypatch):
+    """A full Postgres volume stops accepting writes and takes the pipeline
+    down. shutil.disk_usage cannot see that volume from the web container, so
+    nothing gave any warning at all -- it was found at 74% by going looking."""
+    _patch_common(monkeypatch, pipeline_running=None)
+    _patch_heartbeats(monkeypatch, {})
+    _patch_capacity(monkeypatch, 4400)
+
+    row = _row(health_monitor.health_report(), "Database capacity")
+    assert row["Status"] == "Warning"
+    assert "4,400 MB of 5,000 MB (88%)" == row["Detail"]
+
+
+def test_a_nearly_full_database_is_an_error(monkeypatch):
+    _patch_common(monkeypatch, pipeline_running=None)
+    _patch_heartbeats(monkeypatch, {})
+    _patch_capacity(monkeypatch, 4700)
+
+    assert _row(health_monitor.health_report(), "Database capacity")["Status"] == "Error"
+
+
+def test_ordinary_database_usage_is_quiet(monkeypatch):
+    _patch_common(monkeypatch, pipeline_running=None)
+    _patch_heartbeats(monkeypatch, {})
+    _patch_capacity(monkeypatch, 3550)
+
+    row = _row(health_monitor.health_report(), "Database capacity")
+    assert row["Status"] == "Healthy"
+    assert "71%" in row["Detail"]
