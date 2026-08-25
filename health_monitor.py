@@ -26,7 +26,7 @@ from db_backend import PostgresConnection, connect_postgres, using_postgres
 from manual_truth_backup import list_manual_snapshots
 from model_evaluation import performance_metrics
 from rejection_cleanup import AI_SEARCH_DB, ZONE_DB
-from runtime_control import runtime_status
+from runtime_control import runtime_status, service_requested_by
 from zone_universe.database import ZONE_UNIVERSE_DATABASE_ENV_VAR
 from zone_universe.database import connect as connect_zone_universe
 
@@ -85,6 +85,11 @@ def _quick_check(path: Path) -> str:
 # import takes, and a threshold that fires during normal work is a threshold
 # people learn to ignore.
 HEARTBEAT_STALE_SECONDS = 3600.0
+
+# Both crawlers use this same string when they pause themselves on full
+# coverage. Duplicated rather than imported from either worker: health checks
+# must not import a worker module to read a constant.
+AUTO_PAUSE_REASON = "auto_full_coverage"
 
 
 def _worker_heartbeats() -> dict[str, str]:
@@ -398,6 +403,15 @@ def health_report(*, include_integrity: bool = False) -> dict[str, object]:
     # deliberately stopped has a stale heartbeat by definition, and calling
     # that an error would be the false alarm that teaches people to ignore
     # this check.
+    #
+    # But "not desired" is not the same as "not expected to be alive". Both
+    # crawlers pause *themselves* once they have full coverage, by setting
+    # their own desired flag false, and the thing that later notices new work
+    # and resumes them is a branch inside the very loop this check is looking
+    # for. So an auto-pause still requires a living worker, and excusing it
+    # would leave the dead-loop case invisible for exactly as long as the
+    # queue happened to be empty -- which is the state the .AI crawler was in.
+    # A human pause is the only one that genuinely expects silence.
     heartbeats = _worker_heartbeats()
     for key, label in (("ai_crawler", ".AI crawler"), ("zone_crawler", "Zone crawler")):
         if key not in heartbeats:
@@ -405,6 +419,11 @@ def health_report(*, include_integrity: bool = False) -> dict[str, object]:
         desired = bool(
             (runtime.get("services", {}).get(key) or {}).get("desired", False)
         )
+        if not desired:
+            try:
+                desired = service_requested_by(key) == AUTO_PAUSE_REASON
+            except Exception:
+                desired = False
         age = _heartbeat_age_seconds(heartbeats[key])
         if not desired:
             detail = "Stopped on purpose"

@@ -294,3 +294,37 @@ def test_an_unparseable_heartbeat_does_not_crash_the_page(monkeypatch):
     row = _row(health_monitor.health_report(), ".AI crawler heartbeat")
     assert row["Status"] == "Warning"
     assert row["Detail"] == "Never reported"
+
+
+def test_a_self_pause_still_expects_a_living_worker(monkeypatch):
+    """Both crawlers pause themselves on full coverage by setting their own
+    desired flag false, and the branch that later notices new work and resumes
+    them lives inside the loop this check is looking for. Excusing an
+    auto-pause would hide a dead loop for as long as the queue stayed empty --
+    which is exactly the state the .AI crawler sat in for eight days.
+    """
+    from datetime import datetime, timedelta, timezone
+    _patch_common(monkeypatch, pipeline_running=None)
+    stale = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
+    _patch_heartbeats(monkeypatch, {"ai_crawler": stale}, desired=False)
+    monkeypatch.setattr(
+        health_monitor, "service_requested_by",
+        lambda _key: health_monitor.AUTO_PAUSE_REASON,
+    )
+
+    row = _row(health_monitor.health_report(), ".AI crawler heartbeat")
+    assert row["Status"] == "Error"
+
+
+def test_a_human_pause_is_the_one_that_expects_silence(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    _patch_common(monkeypatch, pipeline_running=None)
+    stale = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
+    _patch_heartbeats(monkeypatch, {"ai_crawler": stale}, desired=False)
+    monkeypatch.setattr(
+        health_monitor, "service_requested_by", lambda _key: "dashboard"
+    )
+
+    row = _row(health_monitor.health_report(), ".AI crawler heartbeat")
+    assert row["Status"] == "Healthy"
+    assert row["Detail"] == "Stopped on purpose"
