@@ -159,10 +159,14 @@ function GreenFlagTags({ row }) {
     ? row.claude_green_flags
     : Array.isArray(row.green_flags) ? row.green_flags : [];
   const websiteFlags = Array.isArray(row.website_green_flags) ? row.website_green_flags : [];
+  // Merging two sources means the same flag can arrive twice, so this dedup
+  // has to stay -- but on the type *and* the label. On the type alone it threw
+  // away the second employer and the second school, which is the same mistake
+  // normalize_green_flags was making on the server and undid the fix there.
+  const flagKey = (flag) =>
+    `${String(flag.type || "")}|${String(flag.label || "").toLowerCase()}`;
   const flags = [...claudeFlags, ...websiteFlags].filter((flag, index, all) =>
-    index === all.findIndex((candidate) =>
-      String(candidate.type || candidate.label) === String(flag.type || flag.label)
-    )
+    index === all.findIndex((candidate) => flagKey(candidate) === flagKey(flag))
   );
   if (!flags.length) return null;
   return (
@@ -173,7 +177,7 @@ function GreenFlagTags({ row }) {
         return (
           <Tag
             className="green-flag"
-            key={flag.type || flag.label}
+            key={flagKey(flag)}
             title={flag.evidence || "Verified by diligence"}
             {...(source ? { href: source, target: "_blank", rel: "noreferrer" } : {})}
           >
@@ -317,9 +321,9 @@ function useApi(path, deps = []) {
   }, deps);
   return state;
 }
-function Metric({ label, value, tone = "" }) {
+function Metric({ label, value, tone = "", hint = "" }) {
   return (
-    <div className={`metric ${tone}`}>
+    <div className={`metric ${tone}`} {...(hint ? { title: hint } : {})}>
       <span>{label}</span>
       <strong>{value}</strong>
     </div>
@@ -2011,8 +2015,16 @@ function CertStreamPage() {
             rather than siblings -- the row double-counted every screened
             domain, and the guards' own work, the largest share by far, had
             no box at all. */}
+        {/* Counted per certificate, so a domain re-issued or renewed during
+            the run is counted again. That is what makes the number so much
+            larger than the domains that exist: the unit is sightings. Every
+            tile beside it is counted the same way, so the row still adds up. */}
         <Metric
           label="Seen on the feed"
+          hint={
+            "Domain sightings, counted once per certificate. A domain " +
+            "appearing on several certificates counts each time."
+          }
           value={metric(s.new_domains_received ?? s.domains_received)}
         />
         {(s.feed_parts || []).map((part) => (

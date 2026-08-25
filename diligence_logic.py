@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from typing import Any
 
 from common import clean
@@ -124,6 +125,8 @@ GREEN_FLAG_TYPE_ALIASES = {
     "patents": "deep_tech_ip",
 }
 
+GREEN_FLAGS_PER_TYPE = 2
+
 _EMPTY_FLAG_EVIDENCE = {
     "none", "unknown", "unverified", "not verified", "n/a",
     "no evidence", "no evidence found", "website",
@@ -157,7 +160,20 @@ def normalize_green_flags(value: Any, *, limit: int = 6) -> list[dict[str, str]]
     if not isinstance(value, list):
         return []
     flags: list[dict[str, str]] = []
-    seen: set[str] = set()
+    # Deduplicated on the canonical label rather than the type. Keying on the
+    # type alone was losing exactly the thing the pedigree column is for: a
+    # founder who is ex-Google and ex-Stripe is two facts and showed as one,
+    # and MIT plus Stanford came out as a single "University spinout".
+    #
+    # The canonicaliser is what makes the label safe to key on -- it is the
+    # step that turns "Ex-Google team", "Ex-Google engineers" and "Ex-Google"
+    # into one string, which is the restatement the type-level dedup was
+    # actually there to catch.
+    seen: set[tuple[str, str]] = set()
+    # Still capped per type, so one category cannot spend every slot. Two is
+    # what the pedigree cases need (two schools, two employers) and it leaves
+    # room for the rest of the row.
+    per_type: Counter[str] = Counter()
     for original in value:
         if not isinstance(original, dict):
             continue
@@ -166,17 +182,19 @@ def normalize_green_flags(value: Any, *, limit: int = 6) -> list[dict[str, str]]
         evidence = clamp_words(clean(original.get("evidence", "")), 24)
         if (
             kind not in GREEN_FLAG_LABELS
-            or kind in seen
             or evidence.lower() in _EMPTY_FLAG_EVIDENCE
             or len(evidence.split()) < 4
         ):
             continue
-        seen.add(kind)
+        label = _canonical_green_flag_label(kind, clean(original.get("label", "")))
+        key = (kind, label.lower())
+        if key in seen or per_type[kind] >= GREEN_FLAGS_PER_TYPE:
+            continue
+        seen.add(key)
+        per_type[kind] += 1
         flag = {
             "type": kind,
-            "label": _canonical_green_flag_label(
-                kind, clean(original.get("label", ""))
-            ),
+            "label": label,
             "evidence": evidence,
         }
         source = clean(original.get("source", ""))

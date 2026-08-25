@@ -1162,11 +1162,19 @@ def certstream_status():
     # feed made them disagree by whatever arrived in between. The funnel is
     # built from these same rows, so sourcing both here makes them equal by
     # construction rather than by luck.
-    # "Domains discovered" means every distinct domain CertStream showed us
-    # this run -- layer 0, before any filtering. It used to report the handful
-    # that survived every guard, which made the feed look like a trickle when
-    # it is delivering orders of magnitude more and the TLD gate removes most
-    # of it. The funnel's top line is the same number, from the same counter.
+    # "Domains discovered" means every domain CertStream showed us this run --
+    # layer 0, before any filtering. It used to report the handful that
+    # survived every guard, which made the feed look like a trickle when it is
+    # delivering orders of magnitude more and the TLD gate removes most of it.
+    # The funnel's top line is the same number, from the same counter.
+    #
+    # Distinct per *certificate*, not per run: reduce_certificate collapses a
+    # SAN list to its registrable domains, and those counts are then summed. So
+    # a domain re-issued through the run is counted once per certificate, and
+    # this is a count of sightings. Tracking run-distinct domains would mean
+    # holding a set of every apex seen -- 109,516 in a single run -- for a
+    # number nothing downstream consumes; the drops are counted the same way,
+    # which is what keeps the tiles adding up to this line.
     observed = int(status.get("domains_observed", 0) or 0)
     run_domains = observed if observed else (
         int(current_run_queue.get("total", 0) or 0) if queue_is_live else None
