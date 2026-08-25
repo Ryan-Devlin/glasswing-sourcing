@@ -220,3 +220,77 @@ def test_index_rows_left_over_from_before_the_retirement_are_named(monkeypatch):
     assert row["Status"] == "Warning"
     assert "stale index row" in row["Detail"]
     assert "2 orphans" in row["Detail"]
+
+
+def _patch_heartbeats(monkeypatch, beats, *, desired=True):
+    monkeypatch.setattr(health_monitor, "_worker_heartbeats", lambda: beats)
+    monkeypatch.setattr(
+        health_monitor,
+        "runtime_status",
+        lambda: {
+            "services": {
+                key: {"desired": desired, "pid": None, "running": None}
+                for key in ("pipeline", "ai_crawler", "zone_crawler")
+            }
+        },
+    )
+
+
+def _row(report, check):
+    return next(r for r in report["checks"] if r["Check"] == check)
+
+
+def test_a_dead_worker_that_still_says_running_is_caught(monkeypatch):
+    """The .AI crawler's heartbeat sat frozen at 2026-08-17T19:18Z for eight
+    days while worker_status read "running", the Railway service read "Online"
+    and System Health was green. Nothing compared the heartbeat to the clock.
+    """
+    from datetime import datetime, timedelta, timezone
+    _patch_common(monkeypatch, pipeline_running=None)
+    stale = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
+    _patch_heartbeats(monkeypatch, {"ai_crawler": stale})
+
+    report = health_monitor.health_report()
+
+    row = _row(report, ".AI crawler heartbeat")
+    assert row["Status"] == "Error"
+    assert "8 days ago" in row["Detail"]
+    assert report["overall"] == "Error"
+
+
+def test_a_worker_stopped_on_purpose_is_not_an_alarm(monkeypatch):
+    """A deliberately stopped worker has a stale heartbeat by definition, and
+    calling that an error is the false alarm that teaches people to ignore
+    the check."""
+    from datetime import datetime, timedelta, timezone
+    _patch_common(monkeypatch, pipeline_running=None)
+    stale = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
+    _patch_heartbeats(monkeypatch, {"ai_crawler": stale}, desired=False)
+
+    report = health_monitor.health_report()
+
+    assert _row(report, ".AI crawler heartbeat")["Status"] == "Healthy"
+    assert report["overall"] != "Error"
+
+
+def test_a_quiet_stretch_inside_normal_work_is_not_an_alarm(monkeypatch):
+    """The zone worker goes silent for the ~27 minutes a .com import takes."""
+    from datetime import datetime, timedelta, timezone
+    _patch_common(monkeypatch, pipeline_running=None)
+    recent = (datetime.now(timezone.utc) - timedelta(minutes=27)).isoformat()
+    _patch_heartbeats(monkeypatch, {"zone_crawler": recent})
+
+    report = health_monitor.health_report()
+
+    row = _row(report, "Zone crawler heartbeat")
+    assert row["Status"] == "Healthy"
+    assert "27m ago" in row["Detail"]
+
+
+def test_an_unparseable_heartbeat_does_not_crash_the_page(monkeypatch):
+    _patch_common(monkeypatch, pipeline_running=None)
+    _patch_heartbeats(monkeypatch, {"ai_crawler": "not a timestamp"})
+
+    row = _row(health_monitor.health_report(), ".AI crawler heartbeat")
+    assert row["Status"] == "Warning"
+    assert row["Detail"] == "Never reported"

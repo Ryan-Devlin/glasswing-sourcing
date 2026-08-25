@@ -74,6 +74,52 @@ def _quick_check(path: Path) -> str:
         return f"{type(exc).__name__}: {exc}"
 
 
+# A worker whose loop has died keeps its last state row, and that row says
+# "running". Confirmed 2026-08-25: the .AI crawler's heartbeat had been frozen
+# at 2026-08-17T19:18Z for eight days -- worker_status "running", the Railway
+# service "Online", System Health green -- because nothing anywhere compared
+# the heartbeat to the clock.
+#
+# An hour is deliberately loose. A paused .AI loop rewrites its state every
+# five seconds, but the zone worker goes quiet for the ~27 minutes a .com
+# import takes, and a threshold that fires during normal work is a threshold
+# people learn to ignore.
+HEARTBEAT_STALE_SECONDS = 3600.0
+
+
+def _worker_heartbeats() -> dict[str, str]:
+    """Last time each worker wrote anything about itself."""
+    beats: dict[str, str] = {}
+    for key, path, env_var, connect_fn in (
+        ("ai_crawler", AI_SEARCH_DB, AI_SEARCH_DATABASE_ENV_VAR, connect_ai_search),
+        ("zone_crawler", ZONE_DB, ZONE_UNIVERSE_DATABASE_ENV_VAR, connect_zone_universe),
+    ):
+        if not (using_postgres(env_var) or path.exists()):
+            continue
+        try:
+            with connect_fn(path, read_only=True) as conn:
+                row = conn.execute(
+                    "SELECT max(updated_at) AS latest FROM worker_state"
+                ).fetchone()
+            beats[key] = str((row and row["latest"]) or "")
+        except Exception:
+            # A status panel must not take the page down.
+            continue
+    return beats
+
+
+def _heartbeat_age_seconds(value: str, *, now: datetime | None = None) -> float | None:
+    if not value:
+        return None
+    try:
+        seen = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if seen.tzinfo is None:
+        seen = seen.replace(tzinfo=timezone.utc)
+    return ((now or datetime.now(timezone.utc)) - seen).total_seconds()
+
+
 def _database_counts() -> dict[str, int]:
     counts: dict[str, int] = {
         "classifications": 0,
@@ -344,6 +390,46 @@ def health_report(*, include_integrity: bool = False) -> dict[str, object]:
                 else f"{counts['pipeline_processing']:,} left processing"
             ),
         })
+    # Liveness, as distinct from the worker's own opinion of itself. A dead
+    # loop leaves its last row behind saying "running", so the only thing that
+    # distinguishes it from a working one is the clock.
+    #
+    # Only for services that are *meant* to be running: a worker somebody has
+    # deliberately stopped has a stale heartbeat by definition, and calling
+    # that an error would be the false alarm that teaches people to ignore
+    # this check.
+    heartbeats = _worker_heartbeats()
+    for key, label in (("ai_crawler", ".AI crawler"), ("zone_crawler", "Zone crawler")):
+        if key not in heartbeats:
+            continue
+        desired = bool(
+            (runtime.get("services", {}).get(key) or {}).get("desired", False)
+        )
+        age = _heartbeat_age_seconds(heartbeats[key])
+        if not desired:
+            detail = "Stopped on purpose"
+            status = "Healthy"
+        elif age is None:
+            detail = "Never reported"
+            status = "Warning"
+        elif age > HEARTBEAT_STALE_SECONDS:
+            hours = age / 3600
+            detail = (
+                f"Last reported {hours:.0f}h ago and it is meant to be running"
+                if hours < 48
+                else f"Last reported {age / 86400:.0f} days ago and it is "
+                     "meant to be running"
+            )
+            status = "Error"
+        else:
+            detail = f"Reported {age / 60:.0f}m ago"
+            status = "Healthy"
+        checks.append({
+            "Check": f"{label} heartbeat",
+            "Status": status,
+            "Detail": detail,
+        })
+
     valid_snapshots = sum(row["valid"] for row in snapshots)
     snapshots_checked = include_integrity or cached_snapshots
     checks.append({
