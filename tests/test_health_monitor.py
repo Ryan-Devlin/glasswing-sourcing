@@ -186,3 +186,37 @@ def test_disk_reserve_healthy_on_a_large_local_disk(monkeypatch):
     )
     report = health_monitor.health_report()
     assert _disk_check(report)["Status"] == "Healthy"
+
+
+def test_a_retained_page_with_no_index_is_not_an_error(monkeypatch):
+    """Corpus search was retired, so "every page is indexed" describes a
+    feature that no longer exists. Asserting it made System Health read Error
+    permanently: .COM/.APP showed "4 pages, 0 indexed" and .AI passed only
+    because it had no pages yet.
+    """
+    counts = _base_counts()
+    counts.update({"ai_indexed": 0, "zone_indexed": 0})
+    _patch_common(monkeypatch, pipeline_running=None)
+    monkeypatch.setattr(health_monitor, "_database_counts", lambda: counts)
+
+    report = health_monitor.health_report()
+
+    pages = [row for row in report["checks"] if "retained pages" in row["Check"]]
+    assert len(pages) == 2
+    for row in pages:
+        assert row["Status"] == "Healthy", row
+    assert report["overall"] != "Error"
+
+
+def test_index_rows_left_over_from_before_the_retirement_are_named(monkeypatch):
+    counts = _base_counts()
+    counts.update({"zone_indexed": 4, "zone_orphans": 2})
+    _patch_common(monkeypatch, pipeline_running=None)
+    monkeypatch.setattr(health_monitor, "_database_counts", lambda: counts)
+
+    report = health_monitor.health_report()
+
+    row = next(r for r in report["checks"] if r["Check"] == ".COM/.APP retained pages")
+    assert row["Status"] == "Warning"
+    assert "stale index row" in row["Detail"]
+    assert "2 orphans" in row["Detail"]

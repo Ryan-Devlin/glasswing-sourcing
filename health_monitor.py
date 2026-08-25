@@ -276,17 +276,30 @@ def health_report(*, include_integrity: bool = False) -> dict[str, object]:
                 "Detail": "Present",
             })
 
+    # Corpus search was retired (157a496 removed the indexing call from both
+    # crawlers), so "every page is indexed" is no longer an invariant -- it is
+    # a description of a feature that no longer exists. Asserting it made this
+    # a permanent Error the moment either corpus retained a page: .COM/.APP
+    # read "4 pages, 0 indexed, Error", and .AI passed only because 0 == 0 and
+    # would have failed on its first page too.
+    #
+    # What is still worth reporting is how many pages retention is holding,
+    # and any index rows left over from before the retirement -- those point at
+    # pages that may since have been deleted, and nothing writes new ones.
     for prefix, label in (("ai", ".AI"), ("zone", ".COM/.APP")):
         pages = counts[f"{prefix}_pages"]
         indexed = counts[f"{prefix}_indexed"]
         orphans = counts[f"{prefix}_orphans"]
-        healthy = pages == indexed and orphans == 0
+        leftover = (
+            f" · {indexed:,} stale index row(s) from before search was retired"
+            if indexed else ""
+        )
         checks.append({
-            "Check": f"{label} search index",
-            "Status": "Healthy" if healthy else "Error",
+            "Check": f"{label} retained pages",
+            "Status": "Healthy" if orphans == 0 else "Warning",
             "Detail": (
-                f"{pages:,} pages · {indexed:,} indexed · "
-                f"{orphans:,} orphans"
+                f"{pages:,} pages retained{leftover}"
+                + (f" · {orphans:,} orphans" if orphans else "")
             ),
         })
 
