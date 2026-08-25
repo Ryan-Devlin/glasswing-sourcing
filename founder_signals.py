@@ -26,7 +26,24 @@ from typing import Any, Iterable
 from common import clean, stable_domain
 
 
-SIGNAL_VERSION = "founder-signals-v1"
+# Bumped when a detector is corrected rather than merely extended, because
+# signals are insert-only: the rows a wrong rule already wrote outlive the fix.
+# v2 corrects two of them -- focus_left_the_day_job fired on baselines of two
+# and three events, and domain_in_certificate_feed matched upstream project
+# homepages carried in by forks. retract_superseded_signals withdraws what v1
+# wrote for exactly those two types.
+SIGNAL_VERSION = "founder-signals-v2"
+
+# The types v2 corrected, and the version whose output for them cannot be
+# stood behind. Deliberately narrow: every other v1 signal was produced by a
+# rule v2 did not change, and re-judging those would be a change of mind about
+# evidence rather than a correction to a rule.
+SUPERSEDED_SIGNALS = {
+    "founder-signals-v1": (
+        "focus_left_the_day_job",
+        "domain_in_certificate_feed",
+    ),
+}
 PEDIGREE_VERSION = "founder-pedigree-v1"
 DEFAULT_COMPANIES = [
     "OpenAI", "Anthropic", "Google DeepMind", "Google Research", "Meta FAIR",
@@ -64,6 +81,11 @@ DEFAULT_SIGNAL_WEIGHTS = {
     "dormancy_break": 10,
     "first_release": 8,
 }
+# Sets how quickly the transition score approaches 100. At 70, a candidate
+# carrying 70 points of signal scores 63 and one carrying 200 scores 96 -- so
+# the strongest cases are still separated from each other instead of all
+# landing on the ceiling together.
+TRANSITION_SCALE = max(10.0, float(os.getenv("FOUNDER_TRANSITION_SCALE", "70")))
 DEFAULT_SCORE_WEIGHTS = {
     "talent": 0.25,
     "transition": 0.35,
@@ -1127,6 +1149,14 @@ def commit_spike(candidate_id: str, *, now: datetime | None = None) -> dict[str,
     }
 
 
+# A day job leaves a lot of traces. These floors are set from the live table:
+# the six spurious hits had baselines of two and three events, while the real
+# anchors -- openai, electron, domdomegg -- carry 400 to 900.
+MIN_BASELINE_EVENTS = max(1, int(os.getenv("FOUNDER_MIN_BASELINE_EVENTS", "40")))
+MIN_ANCHOR_EVENTS = max(1, int(os.getenv("FOUNDER_MIN_ANCHOR_EVENTS", "25")))
+MIN_CURRENT_EVENTS = max(1, int(os.getenv("FOUNDER_MIN_CURRENT_EVENTS", "25")))
+
+
 def focus_shift(candidate_id: str, *, now: datetime | None = None) -> dict[str, Any]:
     """Whether the work has moved away from wherever it used to live.
 
@@ -1167,23 +1197,37 @@ def focus_shift(candidate_id: str, *, now: datetime | None = None) -> dict[str, 
         return {"anchor": "", "baseline_share": None, "current_share": None,
                 "new_owners": [], "is_shift": False, "current_events": sum(current.values())}
     anchor, anchor_count = baseline.most_common(1)[0]
-    baseline_share = anchor_count / sum(baseline.values())
+    baseline_events = sum(baseline.values())
+    baseline_share = anchor_count / baseline_events
     current_share = current.get(anchor, 0) / sum(current.values())
     new_owners = [owner for owner in current if owner not in baseline]
     return {
         "anchor": anchor,
         "baseline_share": round(baseline_share, 3),
         "current_share": round(current_share, 3),
+        "baseline_events": baseline_events,
+        "anchor_baseline_events": anchor_count,
         "new_owners": sorted(new_owners),
         "current_events": sum(current.values()),
-        # The day job has to have been the day job -- half their work or more
-        # -- and its share has to have at least halved, with the work landing
-        # somewhere that was not in their history at all.
+        # A share needs a denominator before it means anything. Every one of
+        # the first six hits had a baseline_share of exactly 0.5 or 0.667 --
+        # one half and two thirds -- because the baseline held two or three
+        # events in total, and one incidental repository was "most" of them.
+        # The anchors it named were airtable, bradagi, heygen-com, takahirom:
+        # not one was the person's employer.
+        #
+        # For contrast the genuine day jobs in the same table carry hundreds:
+        # openai at 802 events, electron at 900, domdomegg at 434. So the
+        # baseline has to look like a job before its collapse means anything,
+        # and the current window has to be substantial enough that "the work
+        # moved" is a claim about work rather than about three commits.
         "is_shift": bool(
-            baseline_share >= 0.5
+            baseline_events >= MIN_BASELINE_EVENTS
+            and anchor_count >= MIN_ANCHOR_EVENTS
+            and baseline_share >= 0.5
             and current_share <= baseline_share / 2
             and new_owners
-            and sum(current.values()) >= 10
+            and sum(current.values()) >= MIN_CURRENT_EVENTS
         ),
     }
 
@@ -1227,6 +1271,38 @@ def certificate_feed_matches(candidate_id: str, *, now: datetime | None = None, 
         domain = stable_domain(str(row["homepage"] or ""))
         if domain:
             wanted.setdefault(domain, {"repository": str(row["full_name"]), "repo_created_at": str(row["created_at"] or "")})
+    if not wanted:
+        return []
+
+    # A domain that shows up on several people's repositories belongs to the
+    # project they all forked or contributed to, not to any one of them.
+    # is_fork only populates from the next collection onward, so on rows
+    # already stored it is the only thing separating slack.com, twilio.com and
+    # x.com -- the first four matches this ever produced, every one of them an
+    # upstream homepage -- from somebody's actual new company.
+    # Grouped after normalising, not before: "https://www.twilio.com/" and
+    # "https://twilio.com" are the same domain and different strings, so
+    # grouping on the raw homepage counted each as unique and caught nothing.
+    owners_by_domain: dict[str, set[str]] = {}
+    with _store(True) as conn:
+        for row in conn.execute(
+            "SELECT candidate_id, homepage FROM founder_github_repositories "
+            "WHERE homepage <> ''"
+        ).fetchall():
+            domain = stable_domain(str(row["homepage"] or ""))
+            if domain:
+                owners_by_domain.setdefault(domain, set()).add(
+                    str(row["candidate_id"])
+                )
+    shared = {
+        domain for domain, owners in owners_by_domain.items()
+        if len(owners) > 1
+    }
+    if shared:
+        wanted = {
+            domain: meta for domain, meta in wanted.items()
+            if domain not in shared
+        }
     if not wanted:
         return []
 
@@ -1389,7 +1465,14 @@ def recalculate_scores(candidate_id: str) -> dict[str, Any]:
         recent_types = {str(signal["signal_type"]) for signal in signals if (now - _parse_time(str(signal["event_at"]))).days <= 30}
         if len(recent_types & {"new_organization", "new_personal_repository", "new_external_domain", "commercial_language"}) >= 3:
             transition += 15; contributions.append({"signal": "combination_bonus", "points": 15, "evidence": "Three related formation signals occurred within 30 days"})
-        transition_score = min(100, round(transition))
+        # Compressed rather than clipped. min(100, ...) put six candidates on
+        # exactly 100 at once, and a score that saturates ranks nothing -- the
+        # whole point of it is to say who to look at first. This is asymptotic:
+        # it never quite reaches 100, so more evidence always outranks less,
+        # however much of it there already is.
+        transition_score = round(
+            100 * (1 - math.exp(-max(0.0, transition) / TRANSITION_SCALE))
+        )
         signal_confidence = round(sum(int(row["confidence"]) for row in signals[:5]) / max(len(signals[:5]), 1)) if signals else 0
         talent = int(candidate["talent_score"]); fit = int(candidate["glasswing_fit_score"]); identity = int(candidate["identity_confidence"])
         overall = round(talent * score_weights["talent"] + transition_score * score_weights["transition"] + fit * score_weights["glasswing_fit"] + identity * score_weights["identity"] + signal_confidence * score_weights["signal_confidence"])
@@ -1434,6 +1517,77 @@ def review_signal(signal_id: str, disposition: str, note: str = "") -> None:
         conn.execute("INSERT INTO founder_analyst_reviews(candidate_id,action,new_value,note,created_at) VALUES (?,?,?,?,?)", (signal["candidate_id"], "signal_review", disposition, clean(note), utc_now()))
         conn.commit()
     recalculate_scores(str(signal["candidate_id"]))
+
+
+def retract_superseded_signals(*, dry_run: bool = False) -> dict[str, Any]:
+    """Withdraw signals whose detector has since been corrected.
+
+    Signals are insert-only and their dedupe key carries the date, so fixing a
+    detector stops tomorrow's false positive and leaves yesterday's in place,
+    still counting toward the score and still reading on the page as evidence.
+
+    Retraction is by rule version, not by re-running the corrected detector
+    over old rows. Re-running would retract true signals that have merely aged
+    out: focus_shift reads the last thirty days, so somebody who genuinely left
+    their job in March has a new baseline by now and would fail the test that
+    was right to fire back then. What a version bump says is narrower and
+    checkable -- this row was produced by a rule we have since found to be
+    wrong -- and it is the only claim available without the event counts, which
+    were never stored on the row.
+
+    Marked dismissed rather than deleted, so the row and its evidence stay
+    readable, and logged as its own action: this is a rule withdrawing its own
+    output, and recording it as an analyst review would put words in a human's
+    mouth. Only explicit human decisions belong in that record as judgements.
+    """
+    retracted: list[dict[str, str]] = []
+    with _store() as conn:
+        for version, types in SUPERSEDED_SIGNALS.items():
+            placeholders = ",".join("?" for _ in types)
+            rows = conn.execute(
+                "SELECT signal_id,candidate_id,signal_type,evidence FROM "
+                f"founder_signals WHERE rule_version=? AND signal_type IN ({placeholders}) "
+                "AND analyst_disposition<>'dismissed'",
+                (version, *types),
+            ).fetchall()
+            for row in rows:
+                retracted.append({
+                    "signal_id": str(row["signal_id"]),
+                    "candidate_id": str(row["candidate_id"]),
+                    "signal_type": str(row["signal_type"]),
+                    "evidence": str(row["evidence"] or ""),
+                    "rule_version": version,
+                })
+        if dry_run or not retracted:
+            return {"retracted": len(retracted), "signals": retracted,
+                    "dry_run": dry_run}
+        now = utc_now()
+        for item in retracted:
+            conn.execute(
+                "UPDATE founder_signals SET analyst_disposition='dismissed' "
+                "WHERE signal_id=?",
+                (item["signal_id"],),
+            )
+            conn.execute(
+                "INSERT INTO founder_analyst_reviews"
+                "(candidate_id,action,previous_value,new_value,note,analyst,created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (
+                    item["candidate_id"],
+                    "signal_retracted_by_rule",
+                    item["rule_version"],
+                    SIGNAL_VERSION,
+                    f'{item["signal_type"]} was produced by {item["rule_version"]}, '
+                    f'whose detector {SIGNAL_VERSION} corrected.',
+                    "",
+                    now,
+                ),
+            )
+        conn.commit()
+    # Outside the write transaction: recalculate_scores opens its own.
+    for candidate_id in sorted({item["candidate_id"] for item in retracted}):
+        recalculate_scores(candidate_id)
+    return {"retracted": len(retracted), "signals": retracted, "dry_run": False}
 
 
 def create_monitoring_job(job_type: str, candidate_id: str = "") -> str:
@@ -1498,7 +1652,25 @@ def run_monitoring_job(job_id: str, *, client: GitHubClient | None = None) -> di
         except Exception as exc:
             failed += 1; errors.append({"candidate_id": item, "error": str(exc)})
             with _store() as conn:
-                conn.execute("INSERT INTO founder_collection_errors(job_id,candidate_id,source,error_type,message,retryable,occurred_at) VALUES (?,?,?,?,?,?,?)", (job_id, item, "github" if "github" in job_type else "local", type(exc).__name__, str(exc)[:1000], getattr(exc, "retryable", True), utc_now())); conn.commit()
+                conn.execute("INSERT INTO founder_collection_errors(job_id,candidate_id,source,error_type,message,retryable,occurred_at) VALUES (?,?,?,?,?,?,?)", (job_id, item, "github" if "github" in job_type else "local", type(exc).__name__, str(exc)[:1000], getattr(exc, "retryable", True), utc_now()))
+                conn.commit()
+    # Withdraw what a corrected detector wrote before it was corrected. Here
+    # rather than in a migration because it needs the scores recomputed after
+    # it, which is this module's work, and because the daily job is the thing
+    # that reliably runs -- a one-off script only helps if somebody remembers
+    # to run it. It is a no-op once the superseded rows are all dismissed.
+    retraction: dict[str, Any] = {}
+    if job_type in {"github_collection", "full_refresh", "score_recalculation"}:
+        try:
+            withdrawn = retract_superseded_signals()
+            retraction = {"retracted": withdrawn["retracted"]}
+        except Exception as exc:
+            # A failed retraction must not fail the collection that ran before
+            # it: the events are already stored and are the expensive part. It
+            # is reported on the job rather than raised, and the next run
+            # retries it.
+            retraction = {"error": str(exc)[:500]}
+
     # A job that found nobody to work on is not a success. Reporting it as
     # "completed" is what let a collection job run every day for five days,
     # touch zero people and raise nothing -- the status was indistinguishable
@@ -1508,7 +1680,7 @@ def run_monitoring_job(job_id: str, *, client: GitHubClient | None = None) -> di
     else:
         status = "completed" if not failed else "partial" if succeeded else "failed"
     with _store() as conn:
-        conn.execute("UPDATE founder_monitoring_jobs SET status=?,completed_at=?,attempted=?,succeeded=?,failed=?,detail_json=?,error=? WHERE job_id=?", (status, utc_now(), attempted, succeeded, failed, _json({"errors": errors[:50]}), errors[0]["error"] if errors and not succeeded else "", job_id)); conn.commit()
+        conn.execute("UPDATE founder_monitoring_jobs SET status=?,completed_at=?,attempted=?,succeeded=?,failed=?,detail_json=?,error=? WHERE job_id=?", (status, utc_now(), attempted, succeeded, failed, _json({"errors": errors[:50], **({"retraction": retraction} if retraction else {})}), errors[0]["error"] if errors and not succeeded else "", job_id)); conn.commit()
     return {"job_id": job_id, "status": status, "attempted": attempted, "succeeded": succeeded, "failed": failed, "errors": errors}
 
 

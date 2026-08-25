@@ -18,6 +18,18 @@ def setup_store(monkeypatch, tmp_path):
     return database
 
 
+def verify(candidate_id, username):
+    """Give somebody a resolved GitHub identity, which is what makes them
+    eligible for collection."""
+    with classification_store.connect_store(classification_store.CLASSIFICATION_DB) as conn:
+        conn.execute(
+            "INSERT INTO verified_github_identities(candidate_id,username,"
+            "confidence_score,verification_method,verified_at) VALUES (?,?,?,?,?)",
+            (candidate_id, username, 100, "github_user_search", fs.utc_now()),
+        )
+        conn.commit()
+
+
 def person(name="Jane Smith", **values):
     return {
         "full_name": name,
@@ -764,3 +776,177 @@ def test_every_additive_column_is_in_the_create_too():
         # The column has to appear in the CREATE block as well, not only in
         # the ALTER list, or a fresh database never gets it.
         assert source.count(column) >= 2, column
+
+
+def test_a_share_needs_a_denominator(monkeypatch, tmp_path):
+    """The exact shape of the first six hits this ever produced. Every one had
+    a baseline_share of 0.5 or 0.667 -- one half, two thirds -- because the
+    baseline held two or three events and one incidental repository was "most"
+    of them. The anchors it named were airtable, bradagi, heygen-com and
+    takahirom; not one was the person's employer.
+    """
+    database = setup_store(monkeypatch, tmp_path)
+    who = fs.create_candidate(person("Sparse Sid"))["candidate_id"]
+    seed_events(database, who, [
+        {"newthing": 30},
+        {"airtable": 1, "other": 1},
+        {"airtable": 1},
+        {}, {}, {}, {},
+    ])
+    shift = fs.focus_shift(who)
+    assert shift["anchor"] == "airtable"
+    assert shift["baseline_share"] >= 0.5, "the share alone still looks decisive"
+    assert shift["baseline_events"] < fs.MIN_BASELINE_EVENTS
+    assert shift["is_shift"] is False, "a three-event baseline is not a day job"
+
+
+def test_a_real_day_job_still_registers_its_departure():
+    """The floors must not be so high that a genuine move is missed. The real
+    anchors in the live table carry 400 to 900 events."""
+    assert fs.MIN_BASELINE_EVENTS <= 100
+    assert fs.MIN_ANCHOR_EVENTS <= 60
+    assert fs.MIN_CURRENT_EVENTS <= 60
+
+
+def test_a_domain_on_several_peoples_repos_is_not_one_persons_company(
+    monkeypatch, tmp_path
+):
+    """slack.com, twilio.com twice and x.com were the first four matches this
+    produced, every one an upstream project's homepage carried in by a fork.
+    A domain appearing for more than one candidate belongs to the project they
+    all touched.
+
+    Grouped after normalising, because "https://www.twilio.com/" and
+    "https://twilio.com" are the same domain and different strings -- grouping
+    on the raw homepage caught nothing.
+    """
+    database = setup_store(monkeypatch, tmp_path)
+    one = fs.create_candidate(person("Contributor One"))["candidate_id"]
+    two = fs.create_candidate(person("Contributor Two"))["candidate_id"]
+    add_repo(database, one, "one/twilio-demo", "https://www.twilio.com/")
+    add_repo(database, two, "two/twilio-sample", "https://twilio.com")
+    add_screened_domain(database, "twilio.com", days_ago=3)
+
+    assert fs.certificate_feed_matches(one) == []
+    assert fs.certificate_feed_matches(two) == []
+
+
+def test_a_domain_only_one_person_links_still_counts(monkeypatch, tmp_path):
+    database = setup_store(monkeypatch, tmp_path)
+    solo = fs.create_candidate(person("Solo Sam"))["candidate_id"]
+    other = fs.create_candidate(person("Someone Else"))["candidate_id"]
+    add_repo(database, solo, "sam/inferloop", "https://inferloop.ai")
+    add_repo(database, other, "else/unrelated", "https://something-else.dev")
+    add_screened_domain(database, "inferloop.ai", days_ago=3)
+
+    assert [m["domain"] for m in fs.certificate_feed_matches(solo)] == [
+        "inferloop.ai"
+    ]
+
+
+def test_the_transition_score_never_saturates(monkeypatch, tmp_path):
+    """Six candidates sat on exactly 100 at once, and a score that saturates
+    ranks nothing -- which is the only thing it is for. More evidence has to
+    outrank less however much is already there.
+    """
+    database = setup_store(monkeypatch, tmp_path)
+    scores = []
+    for label, months in (
+        ("modest", [{"openai": 60, "newco": 40}] + [{"openai": 100}] * 6),
+        ("heavy", [{"openai": 8, "newco": 300}] + [{"openai": 100}] * 6),
+    ):
+        who = fs.create_candidate(person(f"Cand {label}"))["candidate_id"]
+        seed_events(database, who, months)
+        fs.calculate_signals(who)
+        scores.append(fs.recalculate_scores(who)["founder_transition_score"])
+    for value in scores:
+        assert value < 100, "the curve must be asymptotic, never reach 100"
+    assert len(set(scores)) == len(scores) or scores[0] != 100
+
+
+def _store_signal(database, candidate_id, signal_type, version, key):
+    import sqlite3
+    con = sqlite3.connect(database)
+    con.execute(
+        "INSERT INTO founder_signals(signal_id,candidate_id,signal_type,"
+        "detected_at,event_at,evidence,source_url,strength,confidence,"
+        "explanation,rule_version,dedupe_key) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (key, candidate_id, signal_type, "2026-08-25T00:00:00Z",
+         "2026-08-25T00:00:00Z", "stored evidence", "", 20, 80, "", version, key),
+    )
+    con.commit()
+    con.close()
+
+
+def _disposition(database, key):
+    import sqlite3
+    con = sqlite3.connect(database)
+    con.row_factory = sqlite3.Row
+    row = con.execute(
+        "SELECT analyst_disposition FROM founder_signals WHERE signal_id=?", (key,)
+    ).fetchone()
+    con.close()
+    return str(row["analyst_disposition"] or "")
+
+
+def test_a_corrected_rule_withdraws_its_own_output(monkeypatch, tmp_path):
+    """Signals are insert-only and their dedupe key carries the date, so
+    fixing a detector stops tomorrow's false positive and leaves today's in
+    place -- still scoring, still reading on the page as evidence."""
+    database = setup_store(monkeypatch, tmp_path)
+    who = fs.create_candidate(person("Retraction Rita"))["candidate_id"]
+    _store_signal(database, who, "focus_left_the_day_job", "founder-signals-v1", "bad-1")
+    _store_signal(database, who, "domain_in_certificate_feed", "founder-signals-v1", "bad-2")
+
+    preview = fs.retract_superseded_signals(dry_run=True)
+    assert preview["retracted"] == 2
+    assert _disposition(database, "bad-1") == "", "a dry run must not write"
+
+    result = fs.retract_superseded_signals()
+    assert result["retracted"] == 2
+    assert _disposition(database, "bad-1") == "dismissed"
+    assert _disposition(database, "bad-2") == "dismissed"
+
+
+def test_retraction_leaves_alone_what_the_fix_did_not_touch(monkeypatch, tmp_path):
+    """Narrow by design: every other v1 signal came from a rule v2 did not
+    change, and re-judging those would be a change of mind about evidence."""
+    database = setup_store(monkeypatch, tmp_path)
+    who = fs.create_candidate(person("Untouched Uma"))["candidate_id"]
+    _store_signal(database, who, "activity_acceleration", "founder-signals-v1", "keep-1")
+    _store_signal(database, who, "focus_left_the_day_job", fs.SIGNAL_VERSION, "keep-2")
+
+    assert fs.retract_superseded_signals()["retracted"] == 0
+    assert _disposition(database, "keep-1") == ""
+    assert _disposition(database, "keep-2") == ""
+
+
+def test_retraction_is_not_recorded_as_a_human_decision(monkeypatch, tmp_path):
+    """Only explicit human decisions are trusted truth in this system. A rule
+    withdrawing its own output must not be filed as an analyst review."""
+    import sqlite3
+    database = setup_store(monkeypatch, tmp_path)
+    who = fs.create_candidate(person("Ledger Lou"))["candidate_id"]
+    _store_signal(database, who, "focus_left_the_day_job", "founder-signals-v1", "bad-3")
+    fs.retract_superseded_signals()
+
+    con = sqlite3.connect(database)
+    con.row_factory = sqlite3.Row
+    actions = [
+        str(row["action"]) for row in con.execute(
+            "SELECT action FROM founder_analyst_reviews WHERE candidate_id=?", (who,)
+        ).fetchall()
+    ]
+    con.close()
+    assert "signal_retracted_by_rule" in actions
+    assert "signal_review" not in actions
+
+
+def test_retraction_runs_twice_without_doing_anything_twice(monkeypatch, tmp_path):
+    database = setup_store(monkeypatch, tmp_path)
+    who = fs.create_candidate(person("Idempotent Ida"))["candidate_id"]
+    _store_signal(database, who, "focus_left_the_day_job", "founder-signals-v1", "bad-4")
+    assert fs.retract_superseded_signals()["retracted"] == 1
+    assert fs.retract_superseded_signals()["retracted"] == 0
+
