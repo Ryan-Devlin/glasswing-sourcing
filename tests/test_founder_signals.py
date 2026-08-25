@@ -950,3 +950,68 @@ def test_retraction_runs_twice_without_doing_anything_twice(monkeypatch, tmp_pat
     assert fs.retract_superseded_signals()["retracted"] == 1
     assert fs.retract_superseded_signals()["retracted"] == 0
 
+
+class _FailingClient:
+    """Raises whatever the test asks for, on every candidate."""
+
+    def __init__(self, status):
+        self.status = status
+        self.calls = 0
+
+    def __getattr__(self, _name):
+        def raise_it(*args, **kwargs):
+            self.calls += 1
+            raise fs.GitHubError(
+                f"GitHub returned HTTP {self.status}",
+                status=self.status,
+                retryable=False,
+            )
+        return raise_it
+
+
+def _monitoring_status(database, candidate_id):
+    import sqlite3
+    con = sqlite3.connect(database)
+    con.row_factory = sqlite3.Row
+    row = con.execute(
+        "SELECT monitoring_status FROM founder_candidates WHERE candidate_id=?",
+        (candidate_id,),
+    ).fetchone()
+    con.close()
+    return str(row["monitoring_status"] or "")
+
+
+def test_a_login_that_no_longer_exists_stops_being_retried(monkeypatch, tmp_path):
+    """A 404 fails identically every run, holding the job at "partial" forever
+    -- which is how a status stops being worth reading."""
+    database = setup_store(monkeypatch, tmp_path)
+    who = fs.create_candidate(person("Deleted Dana"))["candidate_id"]
+    verify(who, "deleted-dana")
+
+    job = fs.create_monitoring_job("github_collection")
+    result = fs.run_monitoring_job(job, client=_FailingClient(404))
+    assert result["failed"] == 1
+    assert _monitoring_status(database, who) == "paused"
+
+    # And the next run does not attempt it at all.
+    again = fs.create_monitoring_job("github_collection")
+    second = fs.run_monitoring_job(again, client=_FailingClient(404))
+    assert second["attempted"] == 0
+    assert second["status"] == "no_candidates"
+
+
+def test_a_bad_token_does_not_pause_everybody(monkeypatch, tmp_path):
+    """401 is non-retryable too, and arrives for every candidate in the run.
+    Pausing on it would take the whole roster out on one expired secret."""
+    database = setup_store(monkeypatch, tmp_path)
+    people = []
+    for name, login in (("Ann A", "ann-a"), ("Ben B", "ben-b"), ("Cal C", "cal-c")):
+        who = fs.create_candidate(person(name))["candidate_id"]
+        verify(who, login)
+        people.append(who)
+
+    job = fs.create_monitoring_job("github_collection")
+    result = fs.run_monitoring_job(job, client=_FailingClient(401))
+    assert result["failed"] == 3
+    for who in people:
+        assert _monitoring_status(database, who) != "paused"

@@ -1653,6 +1653,33 @@ def run_monitoring_job(job_id: str, *, client: GitHubClient | None = None) -> di
             failed += 1; errors.append({"candidate_id": item, "error": str(exc)})
             with _store() as conn:
                 conn.execute("INSERT INTO founder_collection_errors(job_id,candidate_id,source,error_type,message,retryable,occurred_at) VALUES (?,?,?,?,?,?,?)", (job_id, item, "github" if "github" in job_type else "local", type(exc).__name__, str(exc)[:1000], getattr(exc, "retryable", True), utc_now()))
+                # A 404 on a user endpoint means that login no longer exists --
+                # renamed or deleted account. Nothing about tomorrow makes it
+                # exist again, so left alone it fails every run forever and
+                # holds the job at "partial" permanently, which is how a status
+                # stops being worth reading. Paused rather than archived: the
+                # person may be real and merely renamed, and pausing is the
+                # existing opt-out the eligibility query already honours.
+                #
+                # 404 specifically, not every non-retryable error. A 401 is
+                # also non-retryable and means the token is bad -- it would
+                # arrive for every candidate in the run and pause all 174
+                # people on one expired secret.
+                if getattr(exc, "status", 0) == 404:
+                    conn.execute(
+                        "UPDATE founder_candidates SET monitoring_status='paused' "
+                        "WHERE candidate_id=? AND monitoring_status NOT IN ('stopped','paused')",
+                        (item,),
+                    )
+                    conn.execute(
+                        "INSERT INTO founder_analyst_reviews"
+                        "(candidate_id,action,previous_value,new_value,note,analyst,created_at) "
+                        "VALUES (?,?,?,?,?,?,?)",
+                        (item, "monitoring_paused_by_rule", "", "paused",
+                         "GitHub returned 404 for this login; the account was "
+                         "renamed or deleted. Resolve the identity to resume.",
+                         "", utc_now()),
+                    )
                 conn.commit()
     # Withdraw what a corrected detector wrote before it was corrected. Here
     # rather than in a migration because it needs the scores recomputed after
