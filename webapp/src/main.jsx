@@ -2523,6 +2523,15 @@ function SearchCorpusPage({ kind }) {
                 </p>
               );
             }
+            if (zone.state === "interrupted") {
+              return (
+                <p className="funnel-note" key={zone.tld}>
+                  <strong>.{zone.tld}</strong>&rsquo;s last import was cut short,
+                  most likely by a restart. Today&rsquo;s additions are not in
+                  yet; it will be retried automatically.
+                </p>
+              );
+            }
             if (zone.state === "repeat") {
               return (
                 <p className="funnel-note" key={zone.tld}>

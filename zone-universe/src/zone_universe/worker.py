@@ -590,6 +590,44 @@ async def run() -> None:
     # daily CZDS snapshot from failing with "no space left on device".
     reclaim_orphaned_queue_directories(conn)
 
+    # A .com import takes tens of minutes, so a redeploy lands in the middle of
+    # one regularly -- and import_zone marks the row "importing" before it
+    # starts, with nothing anywhere to clear it afterwards. The status then
+    # claims an import is running for as long as the row survives, which reads
+    # on the page as "still importing" indefinitely.
+    #
+    # Confirmed live 2026-08-25: a deploy at 18:21 killed an import begun at
+    # 17:54 and left .com stuck that way; the orphaned build directory was
+    # reclaimed correctly, but nothing touched the status.
+    #
+    # Marked interrupted rather than ready: the counts on the row still belong
+    # to the last import that finished, so calling it ready would present old
+    # numbers as today's. The daily retry is gated on the snapshot-day key
+    # rather than this, so it proceeds either way.
+    interrupted = conn.execute(
+        "SELECT tld FROM zones WHERE import_status=?", ("importing",)
+    ).fetchall()
+    for row in interrupted:
+        tld = str(row["tld"])
+        conn.execute(
+            "UPDATE zones SET import_status=?,import_error=? WHERE tld=?",
+            (
+                "interrupted",
+                "Import was interrupted before it finished, most likely by a "
+                "restart. It will be retried.",
+                tld,
+            ),
+        )
+        log_event(
+            conn,
+            "zone_import_interrupted",
+            f"{tld}: an import was still running at shutdown; marked "
+            "interrupted so the retry can pick it up.",
+            tld=tld,
+        )
+    if interrupted:
+        conn.commit()
+
     # One-time/boot-time retention sweep: older worker versions kept every
     # successful page regardless of its eventual investment classification.
     # Repair that legacy corpus before new crawling resumes.

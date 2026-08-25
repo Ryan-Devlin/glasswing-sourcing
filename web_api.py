@@ -2287,6 +2287,10 @@ def zone_import_states() -> list[dict[str, object]]:
             "repeated_snapshot": repeated,
             "state": (
                 "importing" if status == "importing"
+                # A restart during a multi-tens-of-minutes .com import leaves
+                # the row claiming to be running. Naming it keeps the page from
+                # promising an import that nothing is performing.
+                else "interrupted" if status == "interrupted"
                 else "repeat" if repeated
                 else "error" if str(row.get("import_error") or "")
                 else "ready"
