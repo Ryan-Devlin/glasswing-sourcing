@@ -314,3 +314,100 @@ def test_snapshot_day_uses_the_eastern_calendar_day() -> None:
     """
     assert zone_parser.snapshot_day_of("2026-08-19T02:00:00Z") == "2026-08-18"
     assert zone_parser.snapshot_day_of("2026-08-18T14:00:00Z") == "2026-08-18"
+
+
+def test_quality_is_only_judged_for_names_not_seen_before(tmp_path, monkeypatch):
+    """The check costs 12.4us a domain, which over .com's 163 million names is
+    36 of the import's 55 minutes -- while answering a question already
+    answered for all but about 110,000 of them. A domain in yesterday's
+    snapshot was accepted when it first appeared, because the snapshot only
+    ever holds accepted domains.
+    """
+    from zone_universe import zone_parser
+
+    checked = []
+    real = zone_parser.assess_domain
+
+    def counting(domain):
+        checked.append(domain)
+        return real(domain)
+
+    monkeypatch.setattr(zone_parser, "assess_domain", counting)
+
+    zone_one = tmp_path / "day1.txt"
+    zone_one.write_text(
+        "alpha.com. 900 in ns a.com.\nbeta.com. 900 in ns a.com.\n"
+    )
+    database = tmp_path / "zones.sqlite3"
+    first = zone_parser.import_zone(
+        zone_one, tld="com", shard_count=4,
+        database=database, queue_root=tmp_path / "queues",
+    )
+    assert first["delegated_domains"] == 2
+    baseline_checks = len(checked)
+    assert baseline_checks == 2, "a first import has to judge everything"
+
+    # Day two: the same two names plus one new one.
+    checked.clear()
+    zone_two = tmp_path / "day2.txt"
+    zone_two.write_text(
+        "alpha.com. 900 in ns a.com.\nbeta.com. 900 in ns a.com.\n"
+        "gamma.com. 900 in ns a.com.\n"
+    )
+    second = zone_parser.import_zone(
+        zone_two, tld="com", shard_count=4,
+        database=database, queue_root=tmp_path / "queues",
+    )
+    assert second["added_domains"] == 1
+    assert second["unchanged_domains"] == 2
+    assert checked == ["gamma.com"], (
+        "only the new name should be judged, not the two already vetted"
+    )
+
+
+def test_a_new_junk_name_is_still_refused(tmp_path):
+    """The saving must not come at the cost of letting junk into the queue."""
+    from zone_universe import zone_parser
+
+    database = tmp_path / "zones.sqlite3"
+    day1 = tmp_path / "day1.txt"
+    day1.write_text("realcompany.com. 900 in ns a.com.\n")
+    zone_parser.import_zone(
+        day1, tld="com", shard_count=4,
+        database=database, queue_root=tmp_path / "queues",
+    )
+    day2 = tmp_path / "day2.txt"
+    day2.write_text(
+        "realcompany.com. 900 in ns a.com.\n"
+        "0003939pgl1.com. 900 in ns a.com.\n"
+    )
+    result = zone_parser.import_zone(
+        day2, tld="com", shard_count=4,
+        database=database, queue_root=tmp_path / "queues",
+    )
+    assert int(result["rejected_gibberish"]) >= 1
+    assert result["added_domains"] == 0, "the junk name must not be queued"
+
+
+def test_a_domain_leaving_the_zone_is_still_recorded_as_removed(tmp_path):
+    """The removed-detection walks the previous snapshot in step with the new
+    one, and reordering the check moved that walk. It has to still happen."""
+    from zone_universe import zone_parser
+
+    database = tmp_path / "zones.sqlite3"
+    day1 = tmp_path / "day1.txt"
+    day1.write_text(
+        "keep.com. 900 in ns a.com.\nleaving.com. 900 in ns a.com.\n"
+    )
+    zone_parser.import_zone(
+        day1, tld="com", shard_count=4,
+        database=database, queue_root=tmp_path / "queues",
+    )
+    day2 = tmp_path / "day2.txt"
+    day2.write_text("keep.com. 900 in ns a.com.\n")
+    result = zone_parser.import_zone(
+        day2, tld="com", shard_count=4,
+        database=database, queue_root=tmp_path / "queues",
+    )
+    assert result["removed_domains"] == 1
+    assert result["unchanged_domains"] == 1

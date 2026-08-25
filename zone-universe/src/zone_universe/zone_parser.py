@@ -279,7 +279,33 @@ def import_zone(
                     repeated_records += 1
                     continue
                 last_domain = domain
-                if reject_gibberish:
+                # Diff first, judge second. The quality check costs 12.4us a
+                # domain, which over 163 million names is 36 of the import's
+                # 55 minutes -- and it is answering a question that was
+                # already answered for all but a hundred thousand of them.
+                #
+                # A domain present in yesterday's snapshot was accepted when
+                # it first appeared, because the snapshot only ever contains
+                # accepted domains. So the check now runs on new names alone:
+                # roughly 110,000 a day for .com instead of 163 million, which
+                # takes the check from 36 minutes to under two seconds.
+                #
+                # One deliberate consequence: tightening the quality rules no
+                # longer retroactively evicts domains already in the universe.
+                # They are grandfathered. The check exists to keep junk out of
+                # the crawl queue, and those names have already been through
+                # it, so a stable universe is the better trade.
+                is_new = False
+                seen_before = False
+                if previous_snapshot is not None:
+                    while previous_domain and previous_domain < domain:
+                        removed_handle.write(previous_domain + "\n")
+                        removed_domains += 1
+                        previous_domain = next(previous_iterator, "")
+                    if previous_domain == domain:
+                        seen_before = True
+                        previous_domain = next(previous_iterator, "")
+                if reject_gibberish and not seen_before:
                     quality = assess_domain(domain)
                     if not quality.accepted:
                         rejected_gibberish += 1
@@ -290,15 +316,9 @@ def import_zone(
                             examples.append(domain)
                         continue
                 snapshot_handle.write(domain + "\n")
-                is_new = False
                 if previous_snapshot is not None:
-                    while previous_domain and previous_domain < domain:
-                        removed_handle.write(previous_domain + "\n")
-                        removed_domains += 1
-                        previous_domain = next(previous_iterator, "")
-                    if previous_domain == domain:
+                    if seen_before:
                         unchanged_domains += 1
-                        previous_domain = next(previous_iterator, "")
                     else:
                         added_handle.write(domain + "\n")
                         added_domains += 1
