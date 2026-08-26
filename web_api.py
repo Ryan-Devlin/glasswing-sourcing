@@ -108,6 +108,7 @@ from health_monitor import health_report
 from runtime_control import (
     SERVICES,
     apply_pipeline_window,
+    automation_enabled,
     read_control,
     read_pipeline_status,
     read_pipeline_config,
@@ -164,6 +165,10 @@ async def _founder_signals_scheduler():
     while True:
         await asyncio.sleep(300)
         if not os.getenv("GITHUB_TOKEN"):
+            continue
+        # Everything off means everything, including the jobs that run on
+        # their own clock rather than on a request.
+        if not await asyncio.to_thread(automation_enabled):
             continue
         try:
             settings = await asyncio.to_thread(founder_settings)

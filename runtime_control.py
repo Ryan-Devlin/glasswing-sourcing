@@ -387,6 +387,28 @@ def scheduled_pipeline_window(
     return f"{yesterday}:close", False
 
 
+AUTOMATION_KEY = "automation_enabled"
+
+
+def automation_enabled() -> bool:
+    """Whether the background schedulers may act at all.
+
+    A pause is not enough to put this system down. The daily window scheduler
+    starts the pipeline at 8am ET whether or not somebody paused it the night
+    before -- that is the whole point of it -- and the founder collection fires
+    every 24 hours on its own clock. So "stop everything until further notice"
+    needs a switch those schedulers consult, and it has to outlive a restart,
+    which means it lives in the control store rather than in an env var.
+
+    Defaults to enabled, so an empty store behaves exactly as before.
+    """
+    return read_schedule_state(AUTOMATION_KEY) != "off"
+
+
+def set_automation_enabled(enabled: bool) -> None:
+    write_schedule_state(AUTOMATION_KEY, "on" if enabled else "off")
+
+
 def read_schedule_state(key: str) -> str:
     if not using_postgres(RUNTIME_CONTROL_DATABASE_ENV_VAR):
         return ""
@@ -418,6 +440,11 @@ def write_schedule_state(key: str, value: str) -> None:
 
 def apply_pipeline_window(now: datetime | None = None) -> dict[str, object]:
     """Start or stop the pipeline if a window boundary has just passed."""
+    # An indefinite stop has to beat the daily clock. Checked here rather than
+    # only in the scheduler so that any caller -- a restart, a manual poke --
+    # gets the same answer while automation is off.
+    if not automation_enabled():
+        return {"applied": False, "reason": "automation_off"}
     boundary, desired = scheduled_pipeline_window(now)
     if read_schedule_state("pipeline_window") == boundary:
         return {"applied": False, "boundary": boundary, "desired": desired}
