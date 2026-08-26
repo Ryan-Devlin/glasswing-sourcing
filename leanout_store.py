@@ -42,6 +42,7 @@ sys.path.insert(0, str(REPO))
 os.chdir(REPO)
 
 import classification_store  # noqa: E402
+import keeper_rules  # noqa: E402
 from db_backend import PostgresConnection  # noqa: E402
 
 
@@ -67,11 +68,8 @@ PAUSE = float(os.environ.get("PAUSE", "0.3"))
 MIN_FREE_MB = float(os.environ.get("MIN_FREE_MB", "1500"))
 CAPACITY_MB = float(os.environ.get("POSTGRES_VOLUME_MB", "10000"))
 
-# Bucketed work that survives on its own merit.
-KEEP_BUCKETS = tuple(
-    b.strip() for b in os.environ.get("KEEP_BUCKETS", "priority,comp").split(",")
-    if b.strip()
-)
+# The keep rule lives in keeper_rules so the export and this cannot drift.
+KEEP_BUCKETS = keeper_rules.KEEP_BUCKETS
 # Tables whose rows are only meaningful next to a classification we kept.
 # Discovered at runtime rather than hardcoded: these live in several modules'
 # schemas and a missing one must be skipped, not crash the run.
@@ -149,17 +147,8 @@ def columns(conn, table: str) -> set[str]:
     }
 
 
-KEEP_SQL = """
-    domain IN (SELECT domain FROM claude_diligence)
- OR domain IN (SELECT domain FROM tracked_domains)
- OR domain IN (SELECT domain FROM manual_decisions)
- OR domain IN (SELECT domain FROM training_labels)
- OR domain IN (SELECT domain FROM classifications WHERE routing_bucket IN ({marks}))
-"""
-
-
 def keep_clause() -> str:
-    return KEEP_SQL.format(marks=",".join("?" for _ in KEEP_BUCKETS))
+    return keeper_rules.keep_clause(KEEP_BUCKETS)
 
 
 def main() -> None:

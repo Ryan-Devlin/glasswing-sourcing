@@ -172,3 +172,50 @@ def test_transient_tables_are_cleared_entirely(monkeypatch, tmp_path):
             "SELECT count(*) AS n FROM admin_audit_log"
         ).fetchone()["n"])
     assert n == 0
+
+
+def test_the_export_and_the_deletion_cannot_disagree():
+    """The export promises to have saved what the lean-out then deletes. Two
+    copies of that rule is one copy too many: if they drifted, the export
+    would be a promise about rows that had already gone."""
+    import export_keepers
+    import keeper_rules
+
+    assert export_keepers.KEEP_PREDICATE == keeper_rules.keep_clause(
+        keeper_rules.KEEP_BUCKETS
+    )
+    assert leanout_store.keep_clause() == keeper_rules.keep_clause(
+        keeper_rules.KEEP_BUCKETS
+    )
+    assert leanout_store.KEEP_BUCKETS == export_keepers.KEEP_BUCKETS
+
+
+def test_everything_kept_is_everything_exported(monkeypatch, tmp_path):
+    """Whatever survives the lean-out must be exactly what the export wrote,
+    checked against one store rather than by reading both predicates."""
+    import export_keepers
+
+    database = store(monkeypatch, tmp_path)
+    add_classification(database, "investable.ai", "priority", 92)
+    add_classification(database, "called.ai", "reject", 10)
+    add_classification(database, "gone.ai", "review", 80)
+    add_row(database, "claude_diligence", domain="called.ai", decision="REJECT",
+            fit_score=11, updated_at="2026-08-20T00:00:00Z")
+
+    out_dir = tmp_path / "export"
+    monkeypatch.setattr(export_keepers, "OUT_DIR", out_dir)
+    monkeypatch.setattr(export_keepers, "KEEP_BUCKETS",
+                        leanout_store.KEEP_BUCKETS)
+    export_keepers.main()
+
+    import sqlite3
+    written = sorted(out_dir.glob("glasswing_keepers_*.sqlite3"))
+    assert written, "the export produced no file"
+    con = sqlite3.connect(written[0])
+    exported = {
+        row[0] for row in con.execute("SELECT domain FROM classifications")
+    }
+    con.close()
+
+    leanout_store.main()
+    assert surviving(database) == exported == {"investable.ai", "called.ai"}
